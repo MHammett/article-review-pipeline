@@ -6,11 +6,37 @@ Usage:
   python pipeline.py --draft path/to/handoff.md --publication your_publication_name
   python pipeline.py --publish path/to/publication_handoff.md --publication your_publication_name [--publish-live]
 """
+import sys
+
+# Version guard — must run before any other imports
+if sys.version_info < (3, 10):
+    print(f"ERROR: Python 3.10 or higher is required. You are running {sys.version}.")
+    print("Download the latest Python at https://www.python.org/downloads/")
+    sys.exit(1)
+
+# Dependency check — catch missing pip packages before any work starts
+_REQUIRED_PACKAGES = {
+    "requests": "requests",
+    "yaml": "pyyaml",
+    "dotenv": "python-dotenv",
+}
+_missing = []
+for _import_name, _pkg_name in _REQUIRED_PACKAGES.items():
+    try:
+        __import__(_import_name)
+    except ImportError:
+        _missing.append(_pkg_name)
+if _missing:
+    print("ERROR: Required packages are not installed. Run:")
+    print(f"  pip install {' '.join(_missing)}")
+    print("Or install all dependencies at once:")
+    print("  pip install -r requirements.txt")
+    sys.exit(1)
+
 import argparse
 import concurrent.futures
 import json
 import logging
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
