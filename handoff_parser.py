@@ -6,7 +6,11 @@ import re
 
 def _extract_section(text, header, next_headers=None):
     """Extract content between a header and the next known header."""
-    pattern = rf"^{re.escape(header)}\s*\n(.*?)(?=\n(?:{'|'.join(re.escape(h) for h in next_headers)})\s*\n|\Z)"
+    if next_headers:
+        boundary = r"(?=\n(?:" + "|".join(re.escape(h) for h in next_headers) + r")\s*\n)"
+    else:
+        boundary = r"\Z"
+    pattern = rf"^{re.escape(header)}\s*\n(.*?){boundary}"
     match = re.search(pattern, text, re.MULTILINE | re.DOTALL)
     return match.group(1).strip() if match else ""
 
@@ -37,9 +41,8 @@ def parse_draft_submission(text):
     def section(header):
         idx = DRAFT_HEADERS.index(header)
         next_h = DRAFT_HEADERS[idx + 1:] if idx + 1 < len(DRAFT_HEADERS) else []
-        return _extract_section(text, header, next_h)
+        return _extract_section(text, header, next_h or None)
 
-    # Extract metadata from header block
     title = _extract_field(text, "Article:")
     publication = _extract_field(text, "Publication:")
     run_number = _extract_field(text, "Pipeline run:")
@@ -63,7 +66,7 @@ def parse_publication_handoff(text):
     def section(header):
         idx = PUB_HEADERS.index(header)
         next_h = PUB_HEADERS[idx + 1:] if idx + 1 < len(PUB_HEADERS) else []
-        return _extract_section(text, header, next_h)
+        return _extract_section(text, header, next_h or None)
 
     title = _extract_field(text, "Article:")
     publication = _extract_field(text, "Publication:")

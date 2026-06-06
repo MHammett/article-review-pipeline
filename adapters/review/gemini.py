@@ -3,19 +3,28 @@ import time
 import logging
 import requests
 
-MODEL = "gemini-2.0-flash"  # gemini-flash-latest
+DEFAULT_MODEL = "gemini-2.0-flash"
 
 log = logging.getLogger(__name__)
 
 
-def _api_url(api_key):
+def _api_url(model, api_key):
     return (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{MODEL}:generateContent?key={api_key}"
+        f"{model}:generateContent?key={api_key}"
     )
 
 
-def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10):
+def _redact_key(text, api_key):
+    if api_key and api_key in str(text):
+        return str(text).replace(api_key, "[REDACTED]")
+    return str(text)
+
+
+def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=None):
+    model = model or DEFAULT_MODEL
+    url = _api_url(model, api_key)
+
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"parts": [{"text": user_prompt}]}],
@@ -26,36 +35,45 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10):
         },
     }
 
-    def _post():
-        resp = requests.post(_api_url(api_key), json=payload, timeout=120)
-        if resp.status_code == 429 and retry:
-            log.warning(f"Gemini rate-limited. Waiting {retry_delay}s.")
+    session = requests.Session()
+    t0 = time.monotonic()
+
+    def _post(use_grounding=True):
+        p = payload if use_grounding else {k: v for k, v in payload.items() if k != "tools"}
+        resp = session.post(url, json=p, timeout=120)
+        if resp.status_code in (429, 500, 502, 503, 504) and retry:
+            log.warning(f"Gemini HTTP {resp.status_code}. Waiting {retry_delay}s before retry.")
             time.sleep(retry_delay)
-            resp = requests.post(_api_url(api_key), json=payload, timeout=120)
+            resp = session.post(url, json=p, timeout=120)
         resp.raise_for_status()
         return resp.json()
 
     grounding_available = True
     try:
-        raw = _post()
+        raw = _post(use_grounding=True)
     except Exception as e:
-        log.warning(f"Gemini with search grounding failed: {e}. Retrying without grounding.")
+        safe_err = _redact_key(e, api_key)
+        log.warning(f"Gemini with search grounding failed: {safe_err}. Retrying without grounding.")
         grounding_available = False
-        payload_no_ground = {k: v for k, v in payload.items() if k != "tools"}
         try:
-            resp = requests.post(_api_url(api_key), json=payload_no_ground, timeout=120)
-            resp.raise_for_status()
-            raw = resp.json()
+            raw = _post(use_grounding=False)
         except Exception as e2:
-            log.error(f"Gemini call failed entirely: {e2}")
+            elapsed = round(time.monotonic() - t0, 2)
+            safe_err2 = _redact_key(e2, api_key)
+            log.error(f"Gemini call failed entirely after {elapsed}s: {safe_err2}")
+            session.close()
             return {
                 "failed": True,
-                "error": str(e2),
+                "error": safe_err2,
                 "raw": None,
-                "model": MODEL,
+                "model": model,
                 "tokens": {},
                 "grounding_available": False,
+                "elapsed_seconds": elapsed,
             }
+
+    elapsed = round(time.monotonic() - t0, 2)
+    session.close()
 
     candidates = raw.get("candidates", [])
     if not candidates:
@@ -63,9 +81,10 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10):
             "failed": True,
             "error": "No candidates in Gemini response",
             "raw": raw,
-            "model": MODEL,
+            "model": model,
             "tokens": {},
             "grounding_available": grounding_available,
+            "elapsed_seconds": elapsed,
         }
 
     content_parts = candidates[0].get("content", {}).get("parts", [])
@@ -75,30 +94,32 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10):
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        # Strip markdown code fences if present
         cleaned = text.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError:
-            log.warning("Gemini returned non-JSON content")
+            log.warning(f"Gemini returned non-JSON content after {elapsed}s")
             return {
                 "failed": True,
                 "error": "Malformed JSON response",
                 "raw": text,
-                "model": MODEL,
+                "model": model,
                 "tokens": usage,
                 "grounding_available": grounding_available,
+                "elapsed_seconds": elapsed,
             }
 
+    log.debug(f"Gemini call succeeded in {elapsed}s (grounding={grounding_available})")
     return {
         "failed": False,
         "data": parsed,
-        "model": MODEL,
+        "model": model,
         "tokens": {
             "prompt": usage.get("promptTokenCount"),
             "completion": usage.get("candidatesTokenCount"),
         },
         "grounding_available": grounding_available,
+        "elapsed_seconds": elapsed,
     }

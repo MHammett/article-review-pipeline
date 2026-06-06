@@ -1,10 +1,12 @@
-import requests
 import time
 import logging
+import requests
 
 LANGUAGETOOL_API_URL = "https://api.languagetool.org/v2/check"
 
 log = logging.getLogger(__name__)
+
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 
 
 def check_text(text, username, api_key, language="en-US"):
@@ -14,9 +16,13 @@ def check_text(text, username, api_key, language="en-US"):
         "username": username,
         "apiKey": api_key,
     }
-    resp = requests.post(LANGUAGETOOL_API_URL, data=payload, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
+    session = requests.Session()
+    try:
+        resp = session.post(LANGUAGETOOL_API_URL, data=payload, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+    finally:
+        session.close()
 
 
 def apply_corrections(text, matches, auto_apply_categories, suppress_categories):
@@ -27,7 +33,7 @@ def apply_corrections(text, matches, auto_apply_categories, suppress_categories)
     Returns (corrected_text, change_log).
     """
     change_log = []
-    # Process matches in reverse order so offsets stay valid
+    # Process in reverse order so character offsets stay valid after each edit
     sorted_matches = sorted(matches, key=lambda m: m["offset"], reverse=True)
 
     for match in sorted_matches:
@@ -36,10 +42,8 @@ def apply_corrections(text, matches, auto_apply_categories, suppress_categories)
 
         if category_id in suppress_categories:
             continue
-
         if not match.get("replacements"):
             continue
-
         if category_id not in auto_apply_categories:
             continue
 
@@ -61,45 +65,55 @@ def apply_corrections(text, matches, auto_apply_categories, suppress_categories)
             "message": match.get("message", ""),
         })
 
-    change_log.reverse()  # back to document order
+    change_log.reverse()
     return text, change_log
 
 
 def run(text, lt_config, username, api_key, retry=True, retry_delay=10):
     """
     Main entry point. Returns dict with keys:
-      corrected_text, change_log, flagged_matches, failed (bool)
+      corrected_text, change_log, flagged_matches, failed (bool), elapsed_seconds
     """
     auto_apply = set(lt_config.get("auto_apply", []))
     flag_for_review = set(lt_config.get("flag_for_review", []))
     suppress = set(lt_config.get("suppress", []))
 
+    t0 = time.monotonic()
+
+    def _attempt():
+        return check_text(text, username, api_key)
+
     try:
-        result = check_text(text, username, api_key)
+        result = _attempt()
     except Exception as e:
         if retry:
             log.warning(f"LanguageTool first attempt failed: {e}. Retrying in {retry_delay}s.")
             time.sleep(retry_delay)
             try:
-                result = check_text(text, username, api_key)
+                result = _attempt()
             except Exception as e2:
-                log.error(f"LanguageTool failed after retry: {e2}")
+                elapsed = round(time.monotonic() - t0, 2)
+                log.error(f"LanguageTool failed after retry ({elapsed}s): {e2}")
                 return {
                     "corrected_text": text,
                     "change_log": [],
                     "flagged_matches": [],
                     "failed": True,
                     "error": str(e2),
+                    "elapsed_seconds": elapsed,
                 }
         else:
+            elapsed = round(time.monotonic() - t0, 2)
             return {
                 "corrected_text": text,
                 "change_log": [],
                 "flagged_matches": [],
                 "failed": True,
                 "error": str(e),
+                "elapsed_seconds": elapsed,
             }
 
+    elapsed = round(time.monotonic() - t0, 2)
     matches = result.get("matches", [])
     corrected_text, change_log = apply_corrections(text, matches, auto_apply, suppress)
 
@@ -117,9 +131,11 @@ def run(text, lt_config, username, api_key, retry=True, retry_delay=10):
                 "replacements": [r["value"] for r in match.get("replacements", [])[:3]],
             })
 
+    log.debug(f"LanguageTool completed in {elapsed}s: {len(change_log)} corrections, {len(flagged)} flagged")
     return {
         "corrected_text": corrected_text,
         "change_log": change_log,
         "flagged_matches": flagged,
         "failed": False,
+        "elapsed_seconds": elapsed,
     }

@@ -17,6 +17,20 @@ pipeline:
   retry_delay_seconds: 10
   abort_if_all_provider_calls_fail: false
 
+# Model overrides — omit to use the defaults listed here
+models:
+  openai: gpt-4o               # chat-latest
+  gemini: gemini-2.0-flash     # gemini-flash-latest
+  mistral: mistral-large-latest
+
+# Pipeline behavior
+pipeline:
+  parallel_review_calls: true
+  retry_on_failure: true
+  retry_delay_seconds: 10
+  abort_if_all_provider_calls_fail: false
+  task_timeout_seconds: 180    # per-model wall-clock timeout in parallel mode
+
 # Delta assessment thresholds for re-run recommendation
 delta:
   word_change_threshold_pct: 15
