@@ -1,0 +1,11 @@
+configs/user.yaml
+configs/*.yaml
+!configs/user.example.yaml
+!configs/publication.example.yaml
+!configs/examples/
+pipeline_history/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

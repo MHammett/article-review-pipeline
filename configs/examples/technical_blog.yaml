@@ -1,0 +1,80 @@
+publication_name: technical_blog
+
+publication_description: |
+  A practitioner-focused technical blog covering infrastructure, distributed systems,
+  and platform engineering. Readers are senior engineers and architects who implement
+  what they read. Unpublishable: hand-wavy architecture advice without operational
+  grounding, vendor marketing dressed as analysis, anything that patronizes the reader.
+
+audience:
+  primary: |
+    Senior software engineers and platform engineers with 5+ years experience.
+    They know TCP/IP, CAP theorem, and can read a flame graph. They skip
+    introductory context. They stop reading when you explain what a container is.
+  secondary: |
+    Engineering managers who need to evaluate technical decisions without
+    implementing them.
+
+voice_profile: |
+  Direct and precise. Conclusions first, evidence second. No hedging on claims
+  the data supports. Technical vocabulary used without definition — the reader
+  knows what p99 latency and MTTR mean. Short declarative sentences for emphasis.
+  Long sentences only when causality requires it. No throat-clearing openers.
+  Never uses "interesting" or "important" as adjectives — shows why instead.
+
+style_rules:
+  banned_words:
+    - utilize
+    - leverage
+    - innovative
+    - robust
+    - scalable
+    - seamlessly
+    - delve
+    - exciting
+  banned_phrases:
+    - "it's worth noting"
+    - "it's important to understand"
+    - "in today's world"
+    - "as we all know"
+    - "at the end of the day"
+  positive_rules:
+    - "Name the failure mode before the solution"
+    - "Use specific numbers: p99, not 'high'"
+    - "If you claim X is faster, state the measured difference"
+    - "Active voice"
+    - "Conclusions before evidence"
+
+languagetool:
+  auto_apply:
+    - TYPOS
+    - PUNCTUATION
+    - GRAMMAR
+  flag_for_review:
+    - STYLE
+  suppress:
+    - SENTENCE_FRAGMENT
+    - EN_UNPAIRED_BRACKETS
+
+citation_sources:
+  - name: AWS_DOCS
+    adapter: generic_url
+    description: AWS documentation
+  - name: CNCF
+    adapter: generic_url
+    description: Cloud Native Computing Foundation
+
+wordpress:
+  site_url: https://yourtechblog.com
+  username: your_wp_username
+  application_password: your_app_password
+  default_status: draft
+  rest_api_endpoint: /wp-json/wp/v2
+
+rank_math:
+  default_schema_type: Article
+  derive_focus_keyword_if_missing: true
+  derive_meta_description_if_missing: true
+  auto_set_og_tags: true
+  do_not_touch:
+    - cornerstone_content

@@ -1,0 +1,24 @@
+# API keys -- copy to user.yaml and fill in; never commit user.yaml
+api_keys:
+  languagetool:
+    username: your_email@example.com
+    api_key: your_key_here
+  openai:
+    api_key: your_key_here
+  gemini:
+    api_key: your_key_here
+  mistral:
+    api_key: your_key_here
+
+# Pipeline behavior
+pipeline:
+  parallel_review_calls: true
+  retry_on_failure: true
+  retry_delay_seconds: 10
+  abort_if_all_provider_calls_fail: false
+
+# Delta assessment thresholds for re-run recommendation
+delta:
+  word_change_threshold_pct: 15
+  claim_change_triggers_rerun: true
+  structure_change_triggers_rerun: true

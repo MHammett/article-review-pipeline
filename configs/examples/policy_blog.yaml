@@ -1,0 +1,81 @@
+publication_name: policy_blog
+
+publication_description: |
+  A policy analysis publication focused on municipal infrastructure, land use,
+  and local government accountability. Holds local officials and agencies accountable
+  to the public record. Readers are engaged residents, local journalists, and
+  policymakers. Unpublishable: unverified claims about officials, speculation
+  without documentary support, both-sides framing on factual disputes.
+
+audience:
+  primary: |
+    Civically engaged residents with above-average attention to local government.
+    They read meeting minutes. They know the difference between a zoning variance
+    and a rezoning. They stop reading when you explain what a city council does.
+  secondary: |
+    Local journalists checking their beat coverage against independent analysis.
+
+voice_profile: |
+  Analytical and direct. Skeptical of official framing. Claims traced to the
+  public record. Numbers cited with source and date. No deference to authority
+  — a statement from a city spokesperson is a claim requiring verification,
+  not a fact. No passive voice when an actor can be named. Short sentences
+  when making findings. Longer sentences when tracing causal chains through
+  the record.
+
+style_rules:
+  banned_words:
+    - stakeholders
+    - robust
+    - proactive
+    - synergy
+    - impactful
+    - utilize
+    - leverage
+  banned_phrases:
+    - "it's complicated"
+    - "there are no easy answers"
+    - "both sides"
+    - "moving forward"
+    - "going forward"
+    - "in conclusion"
+  positive_rules:
+    - "Name the official, agency, and date when attributing any claim"
+    - "Distinguish between what a document says and what it means"
+    - "If a number appears, cite the source and date inline"
+    - "Distinguish findings (this happened) from analysis (this means X)"
+
+languagetool:
+  auto_apply:
+    - TYPOS
+    - PUNCTUATION
+    - GRAMMAR
+  flag_for_review:
+    - STYLE
+    - TYPOGRAPHY
+  suppress:
+    - SENTENCE_FRAGMENT
+
+citation_sources:
+  - name: FRED
+    adapter: fred
+    description: Federal Reserve Economic Data
+  - name: CENSUS
+    adapter: census
+    description: US Census Bureau data
+
+wordpress:
+  site_url: https://yourpolicyblog.com
+  username: your_wp_username
+  application_password: your_app_password
+  default_status: draft
+  rest_api_endpoint: /wp-json/wp/v2
+
+rank_math:
+  default_schema_type: NewsArticle
+  derive_focus_keyword_if_missing: true
+  derive_meta_description_if_missing: true
+  auto_set_og_tags: true
+  do_not_touch:
+    - cornerstone_content
+    - pillar_page

@@ -1,0 +1,76 @@
+publication_name: local_news
+
+publication_description: |
+  A local and regional news site covering city government, schools, business,
+  and community events. Readers are general residents of the coverage area.
+  Holds itself to AP Style and factual verification against primary sources.
+  Unpublishable: unverified crime reports, speculation presented as news,
+  unnamed sources for factual claims.
+
+audience:
+  primary: |
+    General adult residents of the coverage area. Varied educational backgrounds.
+    No assumed technical or policy expertise. They know the names of local
+    neighborhoods, schools, and major employers. They stop reading after two
+    paragraphs if the relevance to them isn't clear.
+  secondary: |
+    Local business owners and community organization leaders.
+
+voice_profile: |
+  Neutral and documentary. Inverted pyramid structure: most important information
+  first. Who, what, when, where, why in the lede. No opinion in news stories.
+  Attribution for every significant claim. Named sources preferred.
+  Short sentences. Plain vocabulary — if a resident without a college degree
+  would need to look up the word, replace it.
+
+style_rules:
+  banned_words:
+    - utilize
+    - commenced
+    - prior to
+    - subsequent to
+    - aforementioned
+    - heretofore
+  banned_phrases:
+    - "sources say"
+    - "it has been reported"
+    - "allegedly" # unless quoting a legal document
+    - "as previously stated"
+  positive_rules:
+    - "Answer who, what, when, where in the first two sentences"
+    - "Named sources; unnamed sources require editor approval"
+    - "Verify all numbers against primary documents"
+    - "AP Style for dates, titles, and numbers"
+    - "Plain language: eighth-grade reading level"
+
+languagetool:
+  auto_apply:
+    - TYPOS
+    - PUNCTUATION
+    - GRAMMAR
+    - STYLE
+  flag_for_review:
+    - TYPOGRAPHY
+  suppress: []
+
+citation_sources:
+  - name: CENSUS
+    adapter: census
+    description: US Census Bureau population and demographic data
+  - name: FRED
+    adapter: fred
+    description: Economic data
+
+wordpress:
+  site_url: https://yourlocalnews.com
+  username: your_wp_username
+  application_password: your_app_password
+  default_status: draft
+  rest_api_endpoint: /wp-json/wp/v2
+
+rank_math:
+  default_schema_type: NewsArticle
+  derive_focus_keyword_if_missing: true
+  derive_meta_description_if_missing: true
+  auto_set_og_tags: true
+  do_not_touch: []

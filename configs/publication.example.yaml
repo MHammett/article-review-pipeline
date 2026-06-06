@@ -1,0 +1,74 @@
+publication_name: your_publication_name
+
+publication_description: |
+  One paragraph: what the publication covers, who the reader is,
+  what it holds itself accountable to, what would make a piece
+  unpublishable here regardless of writing quality.
+
+audience:
+  primary: |
+    Specific description of primary reader: what they know,
+    what they want, what baseline knowledge to assume.
+  secondary: |
+    If applicable.
+
+voice_profile: |
+  Written description of characteristic style.
+  Be specific: what you always do, what you never do,
+  intentional deviations from standard style, and
+  what would make a sentence obviously not yours.
+
+style_rules:
+  banned_words:
+    - delve
+    - utilize
+    - leverage
+    - navigate
+    - landscape
+    - unpack
+    - shed light on
+  banned_phrases:
+    - "it's worth noting"
+    - "at the end of the day"
+    - "in conclusion"
+    - "it could be argued"
+  positive_rules:
+    - "State conclusions before evidence, not after"
+    - "Use specific numbers, not approximations"
+    - "Active voice except when passive is demonstrably better"
+    - "Short sentences for emphasis"
+
+languagetool:
+  auto_apply:
+    - TYPOS
+    - PUNCTUATION
+    - GRAMMAR
+  flag_for_review:
+    - STYLE
+    - TYPOGRAPHY
+  suppress:
+    - SENTENCE_FRAGMENT
+
+citation_sources:
+  - name: EIA
+    adapter: eia
+    description: Energy Information Administration data
+  - name: FRED
+    adapter: fred
+    description: Federal Reserve Economic Data (BLS, Census series)
+
+wordpress:
+  site_url: https://yoursite.com
+  username: your_wp_username
+  application_password: your_app_password
+  default_status: draft
+  rest_api_endpoint: /wp-json/wp/v2
+
+rank_math:
+  default_schema_type: BlogPosting
+  derive_focus_keyword_if_missing: true
+  derive_meta_description_if_missing: true
+  auto_set_og_tags: true
+  do_not_touch:
+    - cornerstone_content
+    - pillar_page
