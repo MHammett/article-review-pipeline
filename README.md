@@ -225,6 +225,20 @@ See `configs/examples/` for complete worked examples across three publication ty
 
 ---
 
+## Verify your setup
+
+After filling in `configs/user.yaml` and your publication config, run the connectivity check before submitting a real article:
+
+```bash
+python check.py --publication your_publication_name
+```
+
+This makes one minimal test call to each configured service and reports pass/fail with specific error messages. It catches wrong API keys, billing not activated, and WordPress credential problems before they interrupt a pipeline run.
+
+Optional services (Grok, LanguageTool) show as SKIP rather than FAIL when not configured.
+
+---
+
 ## Usage
 
 ### Review a draft
