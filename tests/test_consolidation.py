@@ -128,6 +128,63 @@ class TestBuildReport:
         assert report["lt_failed"] is True
 
 
+class TestGrokRedTeam:
+    def _failed(self):
+        return {"failed": True, "error": "test", "model": "x", "tokens": {}}
+
+    def _ok(self, data):
+        return {"failed": False, "data": data, "model": "grok-3-latest", "tokens": {}}
+
+    def test_grok_result_included_when_present(self):
+        grok_data = {
+            "most_vulnerable_claim": {"passage": "grok finding", "attack_vector": "a", "supporting_evidence_for_attack": "b"},
+            "highest_audience_risk": {"passage": "p", "risk": "r", "audience_segment": "s"},
+            "highest_credibility_risk": {"passage": "p", "risk": "r", "attack_vector": "a"},
+        }
+        mistral_data = {
+            "most_vulnerable_claim": {"passage": "mistral finding", "attack_vector": "c", "supporting_evidence_for_attack": "d"},
+            "highest_audience_risk": {"passage": "p2", "risk": "r2", "audience_segment": "s2"},
+            "highest_credibility_risk": {"passage": "p2", "risk": "r2", "attack_vector": "a2"},
+        }
+        report = build_report(
+            article_title="Test", publication_name="pub", run_number=1,
+            corrected_draft="draft",
+            lt_result={"change_log": [], "flagged_matches": [], "failed": False, "skipped": False},
+            gemini_result=self._failed(),
+            openai_voice_result=self._ok({"flags": [], "low_confidence": []}),
+            mistral_argument_result=self._ok({"flags": [], "low_confidence": []}),
+            openai_completeness_result=self._ok({"flags": [], "low_confidence": []}),
+            mistral_redteam_result=self._ok(mistral_data),
+            grok_redteam_result=self._ok(grok_data),
+            api_call_log=[],
+        )
+        red_team = report["section_6_red_team"]
+        assert "mistral" in red_team
+        assert "grok" in red_team
+
+    def test_single_red_team_flattened(self):
+        mistral_data = {
+            "most_vulnerable_claim": {"passage": "p", "attack_vector": "a", "supporting_evidence_for_attack": "b"},
+            "highest_audience_risk": {"passage": "p", "risk": "r", "audience_segment": "s"},
+            "highest_credibility_risk": {"passage": "p", "risk": "r", "attack_vector": "a"},
+        }
+        report = build_report(
+            article_title="Test", publication_name="pub", run_number=1,
+            corrected_draft="draft",
+            lt_result={"change_log": [], "flagged_matches": [], "failed": False, "skipped": False},
+            gemini_result=self._failed(),
+            openai_voice_result=self._ok({"flags": [], "low_confidence": []}),
+            mistral_argument_result=self._ok({"flags": [], "low_confidence": []}),
+            openai_completeness_result=self._ok({"flags": [], "low_confidence": []}),
+            mistral_redteam_result=self._ok(mistral_data),
+            grok_redteam_result=None,
+            api_call_log=[],
+        )
+        red_team = report["section_6_red_team"]
+        # With only Mistral, result should be the flat dict, not nested under "mistral"
+        assert "most_vulnerable_claim" in red_team
+
+
 class TestRerunRecommended:
     def test_high_word_change(self):
         delta = {"word_change_pct": 20, "new_consensus_count": 0, "resolved_consensus_count": 0,

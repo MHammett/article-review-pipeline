@@ -1,11 +1,6 @@
 # API keys -- copy to user.yaml and fill in; never commit user.yaml
 api_keys:
-  # LanguageTool is optional. Set grammar_pass: false in pipeline below to skip it.
-  # If omitted, the grammar pass is bypassed automatically.
-  languagetool:
-    username: your_email@example.com
-    api_key: your_key_here
-
+  # Required
   openai:
     api_key: your_key_here
   gemini:
@@ -13,11 +8,21 @@ api_keys:
   mistral:
     api_key: your_key_here
 
+  # Optional — adds a Grok red team pass when present (free tier available)
+  grok:
+    api_key: your_key_here
+
+  # Optional — set grammar_pass: false in pipeline below to skip entirely
+  languagetool:
+    username: your_email@example.com
+    api_key: your_key_here
+
 # Model overrides — omit to use the defaults listed here
 models:
   openai: gpt-4o               # chat-latest
   gemini: gemini-2.0-flash     # gemini-flash-latest
   mistral: mistral-large-latest
+  grok: grok-3-latest
 
 # Pipeline behavior
 pipeline:

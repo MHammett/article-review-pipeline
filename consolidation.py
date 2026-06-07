@@ -66,6 +66,7 @@ def build_report(
     mistral_redteam_result,
     api_call_log,
     prior_report=None,
+    grok_redteam_result=None,
 ):
     now = datetime.now(timezone.utc).isoformat()
 
@@ -121,10 +122,15 @@ def build_report(
     if not gemini_result.get("failed") and gemini_result.get("data"):
         fact_check = gemini_result["data"]
 
-    # Red team section
+    # Red team section — merge Mistral and Grok findings if both present
     red_team = {}
     if not mistral_redteam_result.get("failed") and mistral_redteam_result.get("data"):
-        red_team = mistral_redteam_result["data"]
+        red_team["mistral"] = mistral_redteam_result["data"]
+    if grok_redteam_result and not grok_redteam_result.get("failed") and grok_redteam_result.get("data"):
+        red_team["grok"] = grok_redteam_result["data"]
+    # Flatten to single dict if only one source responded
+    if len(red_team) == 1:
+        red_team = next(iter(red_team.values()))
 
     # Delta from prior run
     delta = None
@@ -157,7 +163,8 @@ def build_report(
                 ("mistral_argument", mistral_argument_result),
                 ("openai_completeness", openai_completeness_result),
                 ("mistral_red_team", mistral_redteam_result),
-            ] if result.get("failed")
+            ] + ([("grok_red_team", grok_redteam_result)] if grok_redteam_result else [])
+            if result.get("failed")
         ],
     }
 

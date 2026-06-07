@@ -206,6 +206,25 @@ def _run_mistral_redteam(draft, handoff, pub_config, api_keys, pipeline_config, 
     )
 
 
+def _run_grok_redteam(draft, handoff, pub_config, api_keys, pipeline_config, model_overrides):
+    from adapters.review import grok
+    template = _load_prompt("red_team.txt")
+    system = _render_prompt(
+        template,
+        publication_description=pub_config.get("publication_description", ""),
+        audience=str(pub_config.get("audience", {})),
+        primary_claim=handoff.get("primary_claim", ""),
+    )
+    user = _build_user_prompt(draft, handoff)
+    return grok.call(
+        system, user,
+        api_keys["grok"]["api_key"],
+        retry=pipeline_config.get("retry_on_failure", True),
+        retry_delay=pipeline_config.get("retry_delay_seconds", 10),
+        model=model_overrides.get("grok"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Draft mode
 # ---------------------------------------------------------------------------
@@ -287,6 +306,11 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs"):
         ("mistral_red_team", _run_mistral_redteam),
     ]
 
+    # Grok is optional — added when credentials are present
+    if api_keys.get("grok", {}).get("api_key"):
+        runners.append(("grok_red_team", _run_grok_redteam))
+        log.info("Grok API key found — adding Grok red team pass.")
+
     results = {}
 
     if pipeline_cfg.get("parallel_review_calls", True):
@@ -327,6 +351,7 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs"):
         "mistral_argument": "argument",
         "openai_completeness": "completeness",
         "mistral_red_team": "red_team",
+        "grok_red_team": "red_team_grok",
     }
     for name, result in results.items():
         api_call_log.append({
@@ -361,6 +386,7 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs"):
         mistral_argument_result=results.get("mistral_argument", {"failed": True}),
         openai_completeness_result=results.get("openai_completeness", {"failed": True}),
         mistral_redteam_result=results.get("mistral_red_team", {"failed": True}),
+        grok_redteam_result=results.get("grok_red_team"),
         api_call_log=api_call_log,
         prior_report=prior_report,
     )

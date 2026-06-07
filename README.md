@@ -37,7 +37,25 @@ python pipeline.py --help
 
 ## Account Setup and API Keys
 
-You need accounts with three services before the pipeline can run (OpenAI, Gemini, Mistral). LanguageTool is optional — see below.
+You need accounts with three services before the pipeline can run (OpenAI, Gemini, Mistral). Grok and LanguageTool are optional — see below.
+
+---
+
+### Grok / xAI (optional)
+
+**Where:** https://console.x.ai
+
+**Steps:**
+1. Create an account (sign in with X/Twitter or email)
+2. Go to API keys and generate a key
+3. Copy the key
+
+**What you need:**
+- API key: the key you generated
+
+**Billing:** xAI currently offers free tier credits. At low article volume you may stay within free limits indefinitely. Check https://console.x.ai for current pricing.
+
+**What it adds:** When a Grok API key is present, the pipeline runs a second red team pass using Grok in addition to Mistral's red team pass. Grok is trained on a different corpus (heavy X/Twitter data) and tends toward more direct, contrarian responses — useful for finding attack angles the other models miss. Both red team results appear in Section 6 of the report. If no key is present, the pipeline runs exactly as before with Mistral's red team only.
 
 ---
 

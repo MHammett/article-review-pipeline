@@ -250,6 +250,58 @@ class TestGemini:
 
 
 # ---------------------------------------------------------------------------
+# Grok adapter
+# ---------------------------------------------------------------------------
+
+class TestGrok:
+    def _mock_response(self, content_dict):
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.json.return_value = {
+            "choices": [{"message": {"content": json.dumps(content_dict)}}],
+            "usage": {"prompt_tokens": 90, "completion_tokens": 45},
+        }
+        mock.raise_for_status = MagicMock()
+        return mock
+
+    def test_successful_call(self):
+        from adapters.review import grok
+        content = {
+            "most_vulnerable_claim": {"passage": "test", "attack_vector": "x", "supporting_evidence_for_attack": "y"},
+            "highest_audience_risk": {"passage": "test", "risk": "z", "audience_segment": "all"},
+            "highest_credibility_risk": {"passage": "test", "risk": "w", "attack_vector": "v"},
+        }
+        with patch("adapters.review.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = grok.call("system", "user", "key")
+        assert result["failed"] is False
+        assert "most_vulnerable_claim" in result["data"]
+        assert "elapsed_seconds" in result
+
+    def test_failed_call(self):
+        from adapters.review import grok
+        with patch("adapters.review.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = Exception("Connection refused")
+            result = grok.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "elapsed_seconds" in result
+
+    def test_model_override(self):
+        from adapters.review import grok
+        content = {"most_vulnerable_claim": {}, "highest_audience_risk": {}, "highest_credibility_risk": {}}
+        with patch("adapters.review.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = grok.call("system", "user", "key", model="grok-2-latest")
+        assert result["model"] == "grok-2-latest"
+
+
+# ---------------------------------------------------------------------------
 # Config loader
 # ---------------------------------------------------------------------------
 
