@@ -7,8 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REQUIRED_USER_KEYS = [
-    ("api_keys", "languagetool", "username"),
-    ("api_keys", "languagetool", "api_key"),
+    # LanguageTool is intentionally absent — grammar_pass is optional.
     ("api_keys", "openai", "api_key"),
     ("api_keys", "gemini", "api_key"),
     ("api_keys", "mistral", "api_key"),

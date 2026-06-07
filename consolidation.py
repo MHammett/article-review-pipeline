@@ -138,6 +138,7 @@ def build_report(
         "publication": publication_name,
         "lt_corrections_applied": lt_result.get("change_log", []) if lt_result else [],
         "lt_failed": lt_result.get("failed", False) if lt_result else True,
+        "lt_skipped": lt_result.get("skipped", False) if lt_result else False,
         "corrected_draft": corrected_draft,
         "api_call_log": api_call_log,
         "delta": delta,

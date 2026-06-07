@@ -240,24 +240,36 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs"):
     article_title = handoff.get("title", "Untitled")
     lt_config = pub_config.get("languagetool", {})
 
-    # Pass 1: LanguageTool
-    log.info("Pass 1: LanguageTool grammar correction")
-    from adapters.grammar import languagetool as lt
-    lt_result = lt.run(
-        handoff["draft"],
-        lt_config,
-        api_keys["languagetool"]["username"],
-        api_keys["languagetool"]["api_key"],
-        retry=pipeline_cfg.get("retry_on_failure", True),
-        retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
-    )
+    # Pass 1: LanguageTool grammar correction (optional)
+    grammar_enabled = pipeline_cfg.get("grammar_pass", True)
+    lt_creds = api_keys.get("languagetool", {})
+    lt_has_creds = bool(lt_creds.get("username") and lt_creds.get("api_key"))
 
-    if lt_result["failed"]:
-        log.warning(f"LanguageTool failed ({lt_result.get('elapsed_seconds', '?')}s): {lt_result.get('error')}. Proceeding with uncorrected draft.")
+    if not grammar_enabled:
+        log.info("Pass 1: Grammar pass disabled (grammar_pass: false) — skipping.")
+        lt_result = {"failed": True, "skipped": True, "change_log": [], "flagged_matches": []}
+        corrected_draft = handoff["draft"]
+    elif not lt_has_creds:
+        log.info("Pass 1: No LanguageTool credentials configured — skipping grammar pass.")
+        lt_result = {"failed": True, "skipped": True, "change_log": [], "flagged_matches": []}
         corrected_draft = handoff["draft"]
     else:
-        corrected_draft = lt_result["corrected_text"]
-        log.info(f"LanguageTool: {len(lt_result['change_log'])} corrections in {lt_result.get('elapsed_seconds', '?')}s.")
+        log.info("Pass 1: LanguageTool grammar correction")
+        from adapters.grammar import languagetool as lt
+        lt_result = lt.run(
+            handoff["draft"],
+            lt_config,
+            lt_creds["username"],
+            lt_creds["api_key"],
+            retry=pipeline_cfg.get("retry_on_failure", True),
+            retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
+        )
+        if lt_result["failed"]:
+            log.warning(f"LanguageTool failed ({lt_result.get('elapsed_seconds', '?')}s): {lt_result.get('error')}. Proceeding with uncorrected draft.")
+            corrected_draft = handoff["draft"]
+        else:
+            corrected_draft = lt_result["corrected_text"]
+            log.info(f"LanguageTool: {len(lt_result['change_log'])} corrections in {lt_result.get('elapsed_seconds', '?')}s.")
 
     # Pre-load all prompt files before spawning threads (warms the cache)
     for prompt_name in ("fact_check.txt", "ai_speak.txt", "argument_integrity.txt", "completeness.txt", "red_team.txt"):
@@ -377,7 +389,9 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
     if report.get("model_failures"):
         print(f"\nWARNING: These model passes failed: {', '.join(report['model_failures'])}")
 
-    if report.get("lt_failed"):
+    if report.get("lt_skipped"):
+        print("\nGrammar pass: skipped (no LanguageTool credentials — run manual Grammarly pass before publishing)")
+    elif report.get("lt_failed"):
         print("\nWARNING: LanguageTool failed — draft not grammar-corrected")
     else:
         print(f"\nLanguageTool: {len(report['lt_corrections_applied'])} corrections applied")

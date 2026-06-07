@@ -37,23 +37,23 @@ python pipeline.py --help
 
 ## Account Setup and API Keys
 
-You need accounts with four services before the pipeline can run. Each section below tells you where to go, what to do, and what to copy down.
+You need accounts with three services before the pipeline can run (OpenAI, Gemini, Mistral). LanguageTool is optional — see below.
 
-### LanguageTool Premium
+---
 
-**Where:** https://languagetool.org
+### LanguageTool (optional)
 
-**Steps:**
-1. Create an account and subscribe to Premium (two-year plan is $4.99/month)
-2. After subscribing, go to your account settings page
-3. Find the API section and generate an API key
-4. Copy your **API key** and your **username** (the email address you signed up with)
+The grammar correction pass is useful but not required. If you already do a manual Grammarly pass before publishing, you are covering the same ground. Skip LanguageTool if the cost doesn't justify the automation at your volume.
 
-**What you need:**
+**To skip it:** set `grammar_pass: false` in `configs/user.yaml`, or simply omit the `languagetool` credentials block. The pipeline detects missing credentials and skips the pass automatically. The summary will remind you to run a manual grammar check before publishing.
+
+**To use it:** LanguageTool offers a Premium API. Go to https://languagetool.org, create an account, subscribe, go to account settings, and generate an API key. Copy your API key and the email address you signed up with.
+
+**What you need (if using):**
 - Username: your email address
-- API key: the key from account settings
+- API key: from account settings
 
-**Why it's here:** LanguageTool applies deterministic rule-based grammar corrections automatically — it's the only component that edits your draft without asking first. Everything else is advisory.
+**Why it's here when used:** LanguageTool applies deterministic rule-based corrections before the AI review passes, so the models aren't distracted by surface errors. It's the only component that writes to your draft without asking first.
 
 ---
 
@@ -289,6 +289,6 @@ article-review-pipeline/
 
 **WordPress returns 401** — Your application password is wrong or the username doesn't match. Re-generate the application password in Users → Profile.
 
-**LanguageTool returns 401** — Your API key or username is wrong. Log in to languagetool.org and check your account settings page.
+**LanguageTool returns 401** — Your API key or username is wrong. Log in to languagetool.org and check your account settings page. Or set `grammar_pass: false` to skip the grammar pass entirely.
 
 **A model pass timed out** — The default per-task timeout is 180 seconds. If a model is consistently slow, increase `pipeline.task_timeout_seconds` in `configs/user.yaml`. The pipeline continues with whatever results it has and notes the timeout in the report.
