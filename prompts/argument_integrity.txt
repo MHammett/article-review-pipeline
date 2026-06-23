@@ -25,6 +25,9 @@ Identify:
 - Places where a skeptical reader from the target audience would challenge the reasoning
 - Logical gaps where a step in the argument is missing
 
+ADDITIONAL OBSERVATIONS:
+While performing your logic analysis, you may notice issues outside your primary scope — voice problems, factual errors, missing context, or credibility risks. Apply the same steelman/strawman filter. Only include observations that clearly survive that filter. Do not force findings. Leave the array empty if nothing stands out.
+
 RETURN FORMAT (JSON only, no other text):
 {
   "flags": [
@@ -39,6 +42,14 @@ RETURN FORMAT (JSON only, no other text):
     {
       "passage": "exact quote from draft",
       "observation": "what was noticed but did not survive the steelman"
+    }
+  ],
+  "additional_observations": [
+    {
+      "category": "fact_check|voice|completeness|red_team",
+      "passage": "exact quote from draft",
+      "observation": "specific description of what was noticed",
+      "confidence": "high|medium|low"
     }
   ]
 }

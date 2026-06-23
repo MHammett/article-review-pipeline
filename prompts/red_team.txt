@@ -20,6 +20,9 @@ Identify exactly three things. Return specific passages only — no general obse
 
 For each finding, explain the specific attack vector and what evidence supports it.
 
+ADDITIONAL OBSERVATIONS:
+After identifying your three required findings, you may notice issues outside the red team scope — factual inaccuracies, voice inconsistencies, logical gaps, or structural incompleteness. Apply a steelman filter. Only include observations you are confident survive it. Do not pad this list. Leave it empty if nothing else stands out.
+
 RETURN FORMAT (JSON only, no other text):
 {
   "most_vulnerable_claim": {
@@ -36,5 +39,13 @@ RETURN FORMAT (JSON only, no other text):
     "passage": "exact quote from draft",
     "risk": "what a critic would say",
     "attack_vector": "how they would frame the attack"
-  }
+  },
+  "additional_observations": [
+    {
+      "category": "fact_check|voice|argument|completeness",
+      "passage": "exact quote from draft",
+      "observation": "specific description of what was noticed",
+      "confidence": "high|medium|low"
+    }
+  ]
 }

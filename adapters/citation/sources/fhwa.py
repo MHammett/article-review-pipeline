@@ -24,6 +24,7 @@ def resolve(claim, api_key=None):
 
     return {
         "found": True,
+        "pointer_only": True,   # not a verified data fetch — points at a publication for manual retrieval
         "url": url,
         "summary": f"FHWA Highway Statistics ({year}) — manual retrieval required. See {url}",
         "content": f"FHWA source pointer for: {claim[:200]}",

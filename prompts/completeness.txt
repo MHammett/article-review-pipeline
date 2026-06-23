@@ -27,6 +27,9 @@ Identify:
 - Claims that would land differently with different audience segments
 - Framing choices that create risks with the target audience
 
+ADDITIONAL OBSERVATIONS:
+While performing your completeness analysis, you may notice issues outside your primary scope — voice problems, factual errors, logical gaps, or credibility risks. Apply the same steelman/strawman filter. Only include observations that clearly survive that filter. Do not force findings. Leave the array empty if nothing stands out.
+
 RETURN FORMAT (JSON only, no other text):
 {
   "flags": [
@@ -41,6 +44,14 @@ RETURN FORMAT (JSON only, no other text):
     {
       "observation": "what was noticed but did not survive the steelman",
       "passage_reference": "relevant quote if applicable"
+    }
+  ],
+  "additional_observations": [
+    {
+      "category": "fact_check|voice|argument|red_team",
+      "passage": "exact quote from draft",
+      "observation": "specific description of what was noticed",
+      "confidence": "high|medium|low"
     }
   ]
 }

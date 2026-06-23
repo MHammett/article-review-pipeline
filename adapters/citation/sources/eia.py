@@ -1,4 +1,5 @@
 """EIA (Energy Information Administration) data resolver."""
+import os
 import requests
 import logging
 
@@ -8,16 +9,21 @@ log = logging.getLogger(__name__)
 
 def resolve(claim, api_key=None):
     """
-    Minimal resolver: searches EIA dataset catalog for terms from the claim.
-    Full implementation requires an EIA API key set in environment.
+    Resolves energy-related claims against the EIA v2 API.
+    Requires EIA_API_KEY environment variable (free at eia.gov/opendata/register.php).
     """
+    api_key = api_key or os.getenv("EIA_API_KEY")
+    if not api_key:
+        log.debug("EIA_API_KEY not set; skipping EIA resolution")
+        return {"found": False}
+
     keywords = _extract_keywords(claim)
     if not keywords:
         return {"found": False}
 
     try:
         url = f"{EIA_BASE}/seriesid/{'+'.join(keywords[:2])}"
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, params={"api_key": api_key}, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             return {
@@ -26,6 +32,7 @@ def resolve(claim, api_key=None):
                 "summary": str(data)[:500],
                 "content": str(data),
             }
+        log.debug("EIA resolve HTTP %s", resp.status_code)
     except Exception as e:
         log.debug(f"EIA resolve failed: {e}")
 

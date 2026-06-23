@@ -1,3 +1,12 @@
 requests>=2.31.0,<3.0
 pyyaml>=6.0,<7.0
 python-dotenv>=1.0.0,<2.0
+
+# Optional: required only when using provider: vertex_ai in user.yaml.
+# Install with: pip install google-auth
+# google-auth>=2.22.0,<3.0
+
+# Optional: best-in-class main-content extraction for --url input mode.
+# Without it, a built-in heuristic HTML extractor is used as a fallback.
+# Install with: pip install trafilatura
+# trafilatura>=1.6,<3.0

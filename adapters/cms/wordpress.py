@@ -40,26 +40,83 @@ def _auth_header(username, application_password):
     return {"Authorization": f"Basic {token}"}
 
 
-def _build_post_payload(pub_params, wp_config, rank_math_config, content):
+def _lookup_term_ids(api_base, headers, taxonomy, items):
+    """Convert category/tag slugs (strings) or IDs (ints) to WP term IDs.
+
+    WordPress REST API requires integer IDs when creating/updating posts.
+    String slugs are resolved via a GET request to the taxonomy endpoint.
+    Integer IDs are passed through unchanged.
+
+    Args:
+        api_base:  Base URL for WP REST API, e.g. ``https://site.com/wp-json/wp/v2``
+        headers:   Auth headers dict (already built by caller)
+        taxonomy:  ``"categories"`` or ``"tags"``
+        items:     List of slugs (str) or IDs (int), or a single slug string
+
+    Returns:
+        List of integer term IDs.  Slugs that cannot be resolved are logged
+        as warnings and omitted.
+    """
+    if not items:
+        return []
+
+    # Accept a single string or a list
+    if isinstance(items, (str, int)):
+        items = [items]
+
+    resolved = []
+    for item in items:
+        if isinstance(item, int):
+            resolved.append(item)
+            continue
+        if not isinstance(item, str) or not item.strip():
+            continue
+        slug = item.strip()
+        try:
+            resp = requests.get(
+                f"{api_base}/{taxonomy}",
+                params={"slug": slug},
+                headers=headers,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            terms = resp.json()
+            if terms:
+                resolved.append(terms[0]["id"])
+                log.debug(f"Resolved {taxonomy} slug '{slug}' → ID {terms[0]['id']}")
+            else:
+                log.warning(
+                    f"WordPress {taxonomy} slug '{slug}' not found — "
+                    f"create it in WP admin first, or use its integer ID."
+                )
+        except Exception as e:
+            log.warning(f"WordPress {taxonomy} lookup failed for '{slug}': {e}")
+
+    return resolved
+
+
+def _build_post_payload(pub_params, wp_config, rank_math_config, content,
+                        category_ids, tag_ids):
     payload = {
-        "title": pub_params.get("title", ""),
-        "content": content,
-        "status": "draft",  # always draft unless --publish-live
-        "categories": _resolve_categories(pub_params.get("wordpress_category")),
-        "tags": _resolve_tags(pub_params.get("tags", [])),
+        "title":      pub_params.get("title", ""),
+        "content":    content,
+        "status":     "draft",          # always draft unless --publish-live
+        "categories": category_ids,
+        "tags":       tag_ids,
     }
 
     author = pub_params.get("author")
     if author:
         payload["author"] = author
 
-    # Rank Math SEO meta fields via meta
+    # Rank Math SEO meta fields
     meta = {}
-    focus_keyword = pub_params.get("seo", {}).get("focus_keyword")
-    meta_description = pub_params.get("seo", {}).get("meta_description")
-    og_title = pub_params.get("seo", {}).get("og_title") or pub_params.get("title", "")
-    og_description = pub_params.get("seo", {}).get("og_description") or meta_description
-    schema_type = pub_params.get("seo", {}).get("schema_type") or rank_math_config.get("default_schema_type", "BlogPosting")
+    seo = pub_params.get("seo", {})
+    focus_keyword   = seo.get("focus_keyword")
+    meta_description = seo.get("meta_description")
+    og_title        = seo.get("og_title") or pub_params.get("title", "")
+    og_description  = seo.get("og_description") or meta_description
+    schema_type     = seo.get("schema_type") or rank_math_config.get("default_schema_type", "BlogPosting")
 
     if focus_keyword:
         meta["rank_math_focus_keyword"] = focus_keyword
@@ -77,36 +134,39 @@ def _build_post_payload(pub_params, wp_config, rank_math_config, content):
     return payload
 
 
-def _resolve_categories(category_slug):
-    if not category_slug:
-        return []
-    # WordPress REST API expects category IDs; slugs require a lookup
-    # Return as-is — pipeline.py handles slug-to-ID resolution if needed
-    return [category_slug] if isinstance(category_slug, int) else []
-
-
-def _resolve_tags(tag_slugs):
-    if not tag_slugs:
-        return []
-    return [t for t in tag_slugs if isinstance(t, int)]
-
-
 def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
-    """
-    Push article to WordPress. Always saves as draft unless publish_live=True.
+    """Push article to WordPress.  Always saves as draft unless publish_live=True.
+
+    Resolves category and tag slugs to integer IDs via the WP REST API before
+    creating the post.
 
     Returns dict with keys: success (bool), post_id, post_url, error (if failed).
     """
     site_url = wp_config["site_url"].rstrip("/")
     endpoint = wp_config.get("rest_api_endpoint", "/wp-json/wp/v2")
     api_base = f"{site_url}{endpoint}"
-    username = wp_config["username"]
+    username    = wp_config["username"]
     app_password = wp_config["application_password"]
 
     headers = _auth_header(username, app_password)
     headers["Content-Type"] = "application/json"
+    auth_headers = _auth_header(username, app_password)   # without Content-Type for GETs
 
-    payload = _build_post_payload(pub_params, wp_config, rank_math_config, content)
+    # Resolve slugs → IDs before building the post payload
+    category_ids = _lookup_term_ids(
+        api_base, auth_headers, "categories",
+        pub_params.get("wordpress_category"),
+    )
+    tag_ids = _lookup_term_ids(
+        api_base, auth_headers, "tags",
+        pub_params.get("tags", []),
+    )
+
+    payload = _build_post_payload(
+        pub_params, wp_config, rank_math_config, content,
+        category_ids=category_ids,
+        tag_ids=tag_ids,
+    )
 
     if publish_live:
         payload["status"] = "publish"
@@ -115,9 +175,12 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
         resp = requests.post(f"{api_base}/posts", headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
-        post_id = data.get("id")
+        post_id  = data.get("id")
         post_url = data.get("link")
-        log.info(f"WordPress push successful: post_id={post_id} url={post_url}")
+        log.info(
+            f"WordPress push successful: post_id={post_id} url={post_url} "
+            f"categories={category_ids} tags={tag_ids}"
+        )
         return {"success": True, "post_id": post_id, "post_url": post_url}
     except requests.HTTPError as e:
         error_body = ""

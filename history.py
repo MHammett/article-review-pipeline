@@ -34,25 +34,38 @@ def _run_dir(history_root, article_title, run_number):
     return path
 
 
-def save_run(history_root, article_title, run_number, report, corrections_log):
+def save_run(history_root, article_title, run_number, report, corrections_log, run_ts=None):
+    if run_ts is None:
+        run_ts = datetime.now(timezone.utc)
+    ts_str = run_ts.strftime("%Y%m%d_%H%M%S")
+
     try:
         d = _run_dir(history_root, article_title, run_number)
     except OSError as e:
         log.error(f"Cannot create history directory: {e}")
         return {"report_path": None, "corrections_path": None}
 
-    report_path = d / f"run_{run_number}_report.json"
-    corrections_path = d / f"run_{run_number}_corrections.log"
+    report_path = d / f"run_{run_number}_{ts_str}_report.json"
+    corrections_path = d / f"run_{run_number}_{ts_str}_corrections.log"
 
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, default=str)
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, default=str)
+    except OSError as e:
+        log.error(f"Could not write report to {report_path}: {e}")
+        return {"report_path": None, "corrections_path": None}
 
-    lines = [
-        f"[{c.get('category','?')}] {c.get('original','')!r} -> {c.get('replacement','')!r}  ({c.get('message','')})"
-        for c in corrections_log
-    ]
-    with open(corrections_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    try:
+        lines = [
+            f"[{c.get('category','?')}] {c.get('original','')!r} -> {c.get('replacement','')!r}  ({c.get('message','')})"
+            for c in corrections_log
+        ]
+        with open(corrections_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except OSError as e:
+        log.warning(f"Could not write corrections log to {corrections_path}: {e}")
+        # Report saved successfully — corrections log is supplementary, don't fail the run.
+        return {"report_path": str(report_path), "corrections_path": None}
 
     return {"report_path": str(report_path), "corrections_path": str(corrections_path)}
 
@@ -61,9 +74,10 @@ def load_prior_report(history_root, article_title, run_number):
     if run_number <= 1:
         return None
     d = _run_dir(history_root, article_title, run_number)
-    prior_path = d / f"run_{run_number - 1}_report.json"
-    if not prior_path.exists():
+    matches = sorted(d.glob(f"run_{run_number - 1}_*_report.json"))
+    if not matches:
         return None
+    prior_path = matches[-1]
     try:
         with open(prior_path, encoding="utf-8") as f:
             return json.load(f)

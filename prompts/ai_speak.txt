@@ -26,6 +26,15 @@ Flag:
 - Throat-clearing openers that delay the point
 - Vague intensifiers (very, quite, somewhat, rather)
 - Technical claims asserted without grounding
+- Vague significance gesturing: sentences that assert importance without making a specific claim ("worth watching", "it remains to be seen", "only time will tell", "this is significant", "this highlights the importance of", "this is a reminder that"). These are placeholder sentences — flag them and propose a replacement that makes the actual claim or cuts the sentence.
+- Problem→cause→solution skeleton: when a piece follows a rigid three-act AI structure (here is the problem, here is why it happened, here is what should be done) regardless of whether the content warrants that scaffolding. Flag the structural seam where each act transitions to the next if the transition reads like an AI outline rather than an authorial choice. Do not flag this pattern when the topic genuinely calls for that structure.
+- Listicle inflation: when a naturally flowing two- or three-point observation has been expanded into a four-, five-, or six-item numbered or bulleted list that pads the point rather than clarifying it. Flag the list and suggest collapsing it to prose or the minimum number of items the content actually supports.
+- Restatement conclusion: when the closing paragraph restates the opening premise in slightly different words without adding new synthesis or a specific takeaway. Flag the conclusion and suggest what specific point, implication, or call to action should replace the restatement.
+- Mid-article throat-clearing: "In today's X", "In the modern Y", "As X continues to evolve", "Given the current landscape of" — context-setting phrases that delay the actual point at the paragraph level, not just the article opener. Flag and propose cutting straight to the substantive claim.
+- Audience condescension: check the AUDIENCE field above. If the audience is described as practitioners, technically literate, or domain experts, flag any passage that explains a concept or term that audience demonstrably already knows (e.g., defining BGP to a network engineer, explaining what an IX does to an IXP operator). Do NOT flag explanatory passages if the AUDIENCE field indicates a general, non-technical, or mixed audience — explanation is correct there. When flagging, note specifically what the audience already knows and propose cutting or replacing the explanation with the substantive point it was delaying.
+
+ADDITIONAL OBSERVATIONS:
+While performing your voice analysis, you may notice issues outside your primary scope — factual problems, logical gaps, missing context, or credibility risks. Apply the same steelman/strawman filter. Only include observations that clearly survive that filter. Do not force findings. Leave the array empty if nothing stands out.
 
 RETURN FORMAT (JSON only, no other text):
 {
@@ -41,6 +50,14 @@ RETURN FORMAT (JSON only, no other text):
     {
       "passage": "exact quote from draft",
       "observation": "what was noticed but did not survive the steelman"
+    }
+  ],
+  "additional_observations": [
+    {
+      "category": "fact_check|argument|completeness|red_team",
+      "passage": "exact quote from draft",
+      "observation": "specific description of what was noticed",
+      "confidence": "high|medium|low"
     }
   ]
 }

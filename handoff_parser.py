@@ -2,6 +2,9 @@
 Parse Template A (draft submission) and Template C (publication handoff) documents.
 """
 import re
+import logging
+
+log = logging.getLogger(__name__)
 
 
 def _extract_section(text, header, next_headers=None):
@@ -47,19 +50,46 @@ def parse_draft_submission(text):
     publication = _extract_field(text, "Publication:")
     run_number = _extract_field(text, "Pipeline run:")
 
-    return {
+    # Fields that directly fill prompt template variables — warn if missing
+    # so the user knows before a model call produces oddly generic output.
+    _REQUIRED_FIELDS = {
+        "title":          ("Article:", title),
+        "primary_claim":  ("PRIMARY CLAIM", section("PRIMARY CLAIM")),
+        "draft":          ("DRAFT", section("DRAFT")),
+    }
+    for field, (label, value) in _REQUIRED_FIELDS.items():
+        if not value:
+            log.warning(
+                f"Handoff document is missing '{label}'. "
+                f"The review models will receive an empty {field} — results may be generic or misdirected."
+            )
+
+    # Advisory fields — missing is common and acceptable, but worth noting at debug level
+    _ADVISORY_FIELDS = {
+        "pre_draft_analysis": ("PRE-DRAFT ANALYSIS SUMMARY", section("PRE-DRAFT ANALYSIS SUMMARY")),
+    }
+
+    results = {
         "title": title,
         "publication": publication,
         "run_number": int(run_number) if run_number and run_number.isdigit() else 1,
-        "primary_claim": section("PRIMARY CLAIM"),
+        "primary_claim": _REQUIRED_FIELDS["primary_claim"][1],
         "target_audience": section("TARGET AUDIENCE"),
-        "pre_draft_analysis": section("PRE-DRAFT ANALYSIS SUMMARY"),
+        "pre_draft_analysis": _ADVISORY_FIELDS["pre_draft_analysis"][1],
         "sources_cited": section("SOURCES ALREADY CITED"),
         "uncertain_sections": section("UNCERTAIN SECTIONS"),
         "known_gaps": section("KNOWN GAPS"),
         "additional_context": section("ADDITIONAL CONTEXT FOR REVIEW MODELS"),
-        "draft": section("DRAFT"),
+        "draft": _REQUIRED_FIELDS["draft"][1],
     }
+
+    if not results["pre_draft_analysis"]:
+        log.debug(
+            "No PRE-DRAFT ANALYSIS SUMMARY found. "
+            "Argument and completeness models will have less context — consider adding one."
+        )
+
+    return results
 
 
 def parse_publication_handoff(text):

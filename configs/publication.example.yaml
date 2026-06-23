@@ -38,6 +38,13 @@ style_rules:
     - "Active voice except when passive is demonstrably better"
     - "Short sentences for emphasis"
 
+# Optional — SEO thresholds for the pre-analysis pass. Omit to use the defaults
+# shown here. Set these when your publication has different SEO standards.
+seo_rules:
+  title_max_chars: 60       # search snippets truncate around 60 chars
+  title_min_chars: 20
+  min_article_words: 300    # below this, the report flags thin content
+
 languagetool:
   auto_apply:
     - TYPOS
@@ -56,6 +63,30 @@ citation_sources:
   - name: FRED
     adapter: fred
     description: Federal Reserve Economic Data (BLS, Census series)
+  # Available adapters: eia, fred, census, fhwa
+  # Claims from fact-check results are resolved against these sources (Pass 3).
+  # Each resolved URL is also checked against the Wayback Machine automatically.
+
+# Custom review domains — publication-specific prompts run in addition to the
+# five built-in domains (fact_check, voice_style, completeness, argument_integrity,
+# red_team).  Each domain runs on the models you list.  The prompt can be an
+# inline string or a path to a .txt file.
+#
+# custom_domains:
+#   brand_compliance:
+#     prompt: |
+#       Review this article for brand compliance.  Flag any passage that:
+#       - Uses competitor names without proper framing
+#       - Makes claims that require legal review before publishing
+#       - Contradicts messaging in our style guide
+#       Return JSON with a "flags" list, each with "passage" and "reason".
+#     models: [openai, claude]
+#     weight: 1.0
+#
+#   legal_review:
+#     prompt_file: prompts/legal_review.txt
+#     models: [claude]
+#     weight: 1.2
 
 wordpress:
   site_url: https://yoursite.com

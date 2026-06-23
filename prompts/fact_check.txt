@@ -17,6 +17,9 @@ Before flagging any claim, apply a steelman/strawman filter:
 2. Strawman: What is the strongest case that this claim is wrong or misleading?
 3. Only return a finding if the criticism survives the steelman defense.
 
+ADDITIONAL OBSERVATIONS:
+While performing your fact-check, you may notice issues outside your primary scope — voice problems, logical gaps, missing context, or credibility risks. Apply the same steelman/strawman filter. Only include observations that clearly survive that filter. Do not force findings. Leave the array empty if nothing stands out.
+
 RETURN FORMAT (JSON only, no other text):
 {
   "confirmed": [
@@ -33,5 +36,13 @@ RETURN FORMAT (JSON only, no other text):
   ],
   "primary_source_needed": [
     {"claim": "exact quote from draft", "best_candidate_source": "recommended primary source"}
+  ],
+  "additional_observations": [
+    {
+      "category": "voice|argument|completeness|red_team",
+      "passage": "exact quote from draft",
+      "observation": "specific description of what was noticed",
+      "confidence": "high|medium|low"
+    }
   ]
 }

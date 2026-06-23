@@ -1,0 +1,116 @@
+# Cost presets — controls model selection, reasoning depth, and thoroughness as a bundle.
+# Edit this file to update model names when providers release new versions.
+# See docs/CONFIGURATION.md for full documentation.
+#
+# Behavior when cost_preset is set in user.yaml:
+#   - Sets thoroughness (unless user also set thoroughness: explicitly).
+#   - Overrides model name and reasoning flags for each configured provider.
+#   - Preserves infrastructure keys: provider, project, location, credentials_file,
+#     endpoint, deployment, api_version, prompts, timeout_seconds.
+#   - Skips providers with no API key or no models: entry in user.yaml.
+#   - Respects enabled: false set by the user — disabled models stay disabled.
+#
+# Estimated per-article costs assume a 1,500-word article (~4,000 in / ~2,000 out
+# tokens per call). Reasoning adds latency and token overhead.
+#
+#   economy  : ~$0.04 – $0.10   (sanity check, no reasoning)
+#   standard : ~$0.10 – $0.40   (solid, no reasoning overhead)
+#   balanced : ~$0.50 – $1.50   (light reasoning on key models, thorough coverage)
+#   thorough : ~$1.00 – $2.50   (deep reasoning, thorough coverage)
+#   maximum  : ~$2.50 – $5.00   (all flagship models, all domains, max reasoning)
+#
+# Mistral note: mistral-medium-3-5 only accepts reasoning_effort "high" or "none".
+#   "low" and "medium" return 400. Standard models do not support reasoning_effort at all.
+# Grok note: reasoning is model-selection based. Use grok-4.20-0309-reasoning for CoT;
+#   reasoning_effort is not a supported Grok API parameter.
+
+economy:
+  thoroughness: standard
+  models:
+    openai:
+      model: gpt-5.4-mini
+    gemini:
+      model: gemini-2.5-flash
+    mistral:
+      model: mistral-small-latest
+    perplexity:
+      model: sonar
+    grok:
+      enabled: false
+    claude:
+      enabled: false
+
+standard:
+  thoroughness: standard
+  models:
+    openai:
+      model: gpt-5.4
+    gemini:
+      model: gemini-2.5-flash
+    mistral:
+      model: mistral-large-latest
+    perplexity:
+      model: sonar-pro
+    grok:
+      model: grok-4.3
+    claude:
+      model: claude-haiku-4-5-20251001
+
+balanced:
+  thoroughness: thorough
+  models:
+    openai:
+      model: gpt-5.4
+      reasoning_effort: low
+    gemini:
+      model: gemini-2.5-flash
+    mistral:
+      model: mistral-medium-3-5
+      # No reasoning_effort at balanced — mistral-medium-3-5 only accepts "high" or "none"
+    perplexity:
+      model: sonar-reasoning-pro
+    grok:
+      model: grok-4.20-0309-reasoning
+    claude:
+      model: claude-sonnet-4-6
+      effort: medium
+
+thorough:
+  thoroughness: thorough
+  models:
+    openai:
+      model: gpt-5.4
+      reasoning_effort: high
+    gemini:
+      model: gemini-2.5-pro
+    mistral:
+      model: mistral-medium-3-5
+      reasoning_effort: high
+    perplexity:
+      model: sonar-reasoning-pro
+    grok:
+      model: grok-4.20-0309-reasoning
+    claude:
+      model: claude-opus-4-8
+      effort: high
+
+maximum:
+  thoroughness: maximum
+  models:
+    openai:
+      model: gpt-5.5
+      reasoning_effort: xhigh
+    gemini:
+      model: gemini-2.5-pro
+      thinking_budget: 16000
+      # gemini-2.5-pro confirmed available on Vertex AI; gemini-3.x returns 404 there
+    mistral:
+      model: mistral-medium-3-5
+      reasoning_effort: high
+    perplexity:
+      model: sonar-reasoning-pro
+    grok:
+      model: grok-4.20-0309-reasoning
+    claude:
+      model: claude-opus-4-8
+      effort: high
