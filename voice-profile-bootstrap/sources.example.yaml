@@ -1,0 +1,52 @@
+wordpress:
+  site_url: https://www.example.com
+  username: ${WP_USER}
+  application_password: ${WP_APPLICATION_PASSWORD}
+
+twitter:
+  bearer_token: ${TWITTER_BEARER_TOKEN}
+  user_id: "123456789"
+  exclude_retweets: true
+  exclude_replies: true
+
+gmail:
+  credentials_file: ~/.config/voice-bootstrap/gmail_credentials.json
+  query: "from:me after:2023/01/01 -category:promotions -category:social"
+  max_messages: 500
+
+outlook365:
+  tenant_id: common                   # "common" for personal MSA; tenant UUID for org accounts
+  client_id: ${AZURE_CLIENT_ID}
+  auth_method: device_code            # device_code (interactive) | client_credentials (unattended)
+  # client_secret: ${AZURE_CLIENT_SECRET}   # uncomment for client_credentials auth
+  credentials_file: ~/.config/voice-bootstrap/outlook_token.json
+  folder: SentItems                   # SentItems | AllMail | or a folder display name
+  max_messages: 500
+
+textfiles:
+  path: ~/writing-archive
+  register: long_form
+  glob: "**/*.md"
+
+synthesis:
+  # Model selection and API keys come from configs/user.yaml — same as the review pipeline.
+  # The voice profiler uses whatever models are configured there.
+  voice_mode: detect                 # canonical | detect | per-source
+  max_voices: 5                      # ceiling for auto-detection (detect mode only); 0 = no limit
+  max_input_chars: 120000            # corpus budget before sampling
+  prompt_overhead_chars: 12000       # reserved for system prompt + schema + metrics header
+  per_voice_min_words: 2000          # minimum words per detected voice for per-voice synthesis
+  ambiguity_threshold: 0.2           # docs within this score margin are "ambiguous"
+  consensus_threshold: 2.0           # weighted-vote threshold for banned word inclusion
+  detection_models: []               # empty = voice_style-weighted models (claude + openai)
+  max_parallel_models: 0             # 0 = no limit (all at once)
+  per_source_group_by: source        # "source" (collector name) or "register" (source hint)
+
+logging:
+  level: INFO                        # DEBUG | INFO | WARNING | ERROR
+  format: human                      # human | json
+  file: null                         # path to log file; null = stdout only
+  also_stdout: true
+  modules: {}
+    # voice_profile_bootstrap.collectors.gmail: DEBUG
+    # voice_profile_bootstrap.synthesize: WARNING

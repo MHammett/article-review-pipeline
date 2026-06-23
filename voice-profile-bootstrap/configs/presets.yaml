@@ -1,0 +1,95 @@
+# Voice profile bootstrap presets
+# Five tiers: economy → maximum
+# Individual sources.yaml keys override specific preset values.
+# CLI --voice and --max-voices override preset voice settings.
+
+economy:
+  voice_mode: canonical
+  max_input_chars: 40000
+  max_voices: 0
+  per_voice_min_words: 1000
+  synthesis_models: [claude]
+  detection_models: []
+  models:
+    claude:
+      model: claude-haiku-4-5-20251001
+      effort: low
+    openai:
+      model: gpt-5.4-mini
+    gemini:
+      model: gemini-2.5-flash-lite
+    mistral:
+      model: mistral-small-latest
+
+standard:
+  voice_mode: detect
+  max_input_chars: 80000
+  max_voices: 3
+  per_voice_min_words: 1500
+  synthesis_models: [claude, openai]
+  detection_models: [claude]
+  models:
+    claude:
+      model: claude-haiku-4-5-20251001
+    openai:
+      model: gpt-5.4
+    gemini:
+      model: gemini-2.5-flash
+    mistral:
+      model: mistral-large-latest
+
+balanced:
+  voice_mode: detect
+  max_input_chars: 120000
+  max_voices: 5
+  per_voice_min_words: 2000
+  synthesis_models: []
+  detection_models: []
+  models:
+    claude:
+      model: claude-sonnet-4-6
+    openai:
+      model: gpt-5.4
+    gemini:
+      model: gemini-2.5-flash
+    mistral:
+      model: mistral-large-latest
+
+thorough:
+  voice_mode: detect
+  max_input_chars: 160000
+  max_voices: 7
+  per_voice_min_words: 2000
+  synthesis_models: []
+  detection_models: []
+  models:
+    claude:
+      model: claude-sonnet-4-6
+      effort: medium
+    openai:
+      model: gpt-5.4
+      reasoning_effort: medium
+    gemini:
+      model: gemini-2.5-pro
+    mistral:
+      model: mistral-large-latest
+
+maximum:
+  voice_mode: detect
+  max_input_chars: 200000
+  max_voices: 10
+  per_voice_min_words: 2000
+  synthesis_models: []
+  detection_models: "*"
+  models:
+    claude:
+      model: claude-opus-4-8
+      effort: high
+    openai:
+      model: gpt-5.4
+      reasoning_effort: high
+    gemini:
+      model: gemini-2.5-pro
+      thinking_budget: 8192
+    mistral:
+      model: mistral-large-latest

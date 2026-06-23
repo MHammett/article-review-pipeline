@@ -1,0 +1,183 @@
+# Voice Profile Bootstrap
+
+Analyzes your writing corpus across multiple platforms and synthesizes a structured voice/style profile for use in `publication.yaml`.
+
+## Prerequisites
+
+- Python 3.10+
+- API keys in `configs/user.yaml` (same as the review pipeline — at least one model required)
+- For Twitter: API v2 Basic tier ($100/month) for general corpus access; Free tier is limited to your own recent tweets (last 7 days)
+
+## Setup
+
+```bash
+# Install dependencies
+pip install -r voice-profile-bootstrap/requirements.txt
+
+# Create sources.yaml from the template
+cp voice-profile-bootstrap/sources.example.yaml voice-profile-bootstrap/sources.yaml
+# Edit sources.yaml — fill in your site URL and credentials
+
+# Set credentials as environment variables (or use .env file)
+export WP_USER=your_wordpress_username
+export WP_APPLICATION_PASSWORD=your_app_password
+```
+
+## Usage
+
+### 1. Dry run first (free for canonical/per-source; one API call for detect)
+
+```bash
+# Zero cost — collect, normalize, print stats
+python voice-profile-bootstrap/bootstrap.py \
+  --publication mikehammett \
+  --sources wordpress \
+  --voice canonical \
+  --dry-run
+
+# Detect mode dry-run runs one detection API call (not free)
+python voice-profile-bootstrap/bootstrap.py \
+  --publication mikehammett \
+  --sources wordpress \
+  --voice detect \
+  --dry-run
+```
+
+### 2. Full run
+
+```bash
+python voice-profile-bootstrap/bootstrap.py \
+  --publication mikehammett \
+  --sources wordpress,gmail \
+  --voice detect \
+  --preset balanced
+```
+
+### 3. Write to a specific file
+
+```bash
+python voice-profile-bootstrap/bootstrap.py \
+  --output-yaml my_profile.yaml \
+  --sources textfiles \
+  --voice canonical
+```
+
+## CLI Reference
+
+```
+--publication NAME       Resolve to configs/<name>.yaml (mutually exclusive with --output-yaml)
+--output-yaml PATH       Explicit output path
+--sources SRC[,SRC...]   Comma-separated source names (default: all in sources.yaml)
+--since DATE             ISO date; applied at API level where supported
+--voice MODE             canonical | detect | per-source (overrides preset)
+--max-voices N           Max detected voice count (detect mode only; 0 = no limit)
+--preset PRESET          economy | standard | balanced | thorough | maximum (default: balanced)
+--refresh                Ignore staging cache; re-fetch all sources
+--dry-run                Collect + normalize + stats only (detect: runs detection pass)
+--no-stage               Don't write staging files; process in memory only
+--continue-on-error      Skip failed collectors; continue with remaining sources
+--format FORMAT          yaml | markdown | json (default: yaml)
+--overwrite              Skip confirmation prompt when merging into existing file
+--log-level LEVEL        DEBUG | INFO | WARNING | ERROR (overrides sources.yaml)
+```
+
+## Voice Modes
+
+| Mode | Description | API calls | Cost |
+|------|-------------|-----------|------|
+| `canonical` | Single unified voice profile | M + 1 | Low |
+| `detect` | Discover N distinct voices automatically | D + 1 + (N×M) + 1 | Medium |
+| `per-source` | Separate profile per source type | (G×M) + 1 | Medium |
+
+M = configured models, D = detection models, N = detected voices, G = source groups
+
+## Output Format
+
+The synthesized profile is written into your `configs/<publication>.yaml` as YAML, preserving all existing non-voice sections. Voice sections added:
+
+```yaml
+voice_profile: |
+  Prose description of the author's voice and style...
+
+audience:
+  primary: Who this author writes for
+  secondary: Secondary audience (if any)
+
+style_rules:
+  banned_words: [utilize, leverage, synergy]
+  banned_phrases: [at the end of the day]
+  positive_rules:
+    - Lead with the main claim, then support it
+    - Use concrete examples over abstractions
+
+# In detect/per-source modes:
+voice_profiles:
+  technical analysis:
+    voice_profile: |
+      What's distinctive about this voice...
+    additional_banned_words: [basically]
+    additional_positive_rules: [Use numbered lists]
+    source_distribution: {wordpress: 0.85, textfiles: 0.15}
+```
+
+## Gmail OAuth Setup
+
+The first time you use the Gmail source, you'll be prompted to authenticate:
+
+1. Ensure `credentials_file` in `sources.yaml` points to your `credentials.json` (downloaded from Google Cloud Console)
+2. Set OAuth credentials mode to `Desktop application`
+3. Run bootstrap; a browser window opens for Google sign-in
+4. After authorizing, a token file is saved alongside the credentials file
+
+**Important:** The credentials file should have mode `600` (owner-read only):
+```bash
+chmod 600 ~/.config/voice-bootstrap/gmail_credentials.json
+```
+
+## Email Source Privacy
+
+Gmail and Outlook365 sources contain private email text. The tool takes these precautions:
+- Staging files are gitignored (`voice-profile-bootstrap/staging/`)
+- Use `--no-stage` to never persist email text to disk (synthesizes in memory only)
+- Be cautious with cloud sync (Dropbox, iCloud, etc.) on your home directory
+- Staging files contain cleaned plain text, not raw emails
+
+## Adding a Custom Collector
+
+Drop a Python file in `voice-profile-bootstrap/collectors/custom/`:
+
+```python
+from collectors.base import Collector, Document
+
+class MyCustomCollector(Collector):
+    SOURCE_NAME = "mycustom"
+
+    @classmethod
+    def validate_config(cls, config):
+        # raise ConfigError on missing keys
+        pass
+
+    def fetch(self, since=None):
+        # yield Document objects
+        yield Document.from_text(...)
+```
+
+The collector is auto-discovered — no registration needed.
+
+## Interpreting Results
+
+**`confidence` field:** `high` = strong, well-separated voices with adequate corpus; `medium` = adequate but borderline; `low` = synthesis completed but quality uncertain.
+
+**`synthesis_notes` log line:** Logged at INFO level, not written to YAML. Contains model agreement notes and detection observations.
+
+**Profile versioning:** Every run saves a timestamped snapshot in `profiles/<publication>/`. Diff consecutive snapshots to track how your profile evolves with more data.
+
+## Presets
+
+| Preset | Mode | Budget | Voices | Cost range |
+|--------|------|--------|--------|------------|
+| economy | canonical | 40k chars | — | ~$0.01–$0.05 |
+| standard | detect | 80k chars | 3 | ~$0.10–$0.30 |
+| balanced | detect | 120k chars | 5 | ~$0.50–$1.50 |
+| thorough | detect | 160k chars | 7 | ~$1.50–$3.00 |
+| maximum | detect | 200k chars | 10 | ~$3.00–$8.00 |
