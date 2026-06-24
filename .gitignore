@@ -18,3 +18,10 @@ __pycache__/
 voice-profile-bootstrap/sources.yaml
 voice-profile-bootstrap/staging/
 voice-profile-bootstrap/profiles/
+
+# uv
+.uv/
+uv.lock
+.venv/
+*.egg-info/
+dist/
