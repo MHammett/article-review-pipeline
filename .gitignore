@@ -21,7 +21,6 @@ voice-profile-bootstrap/profiles/
 
 # uv
 .uv/
-uv.lock
 .venv/
 *.egg-info/
 dist/
