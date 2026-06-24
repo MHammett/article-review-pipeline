@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [ci-core, ci-article-review, ci-web-intel]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check packages/${{ matrix.package }}
+
+      - name: Format check
+        run: uv run ruff format --check packages/${{ matrix.package }}
+
+      - name: Type check
+        run: uv run mypy packages/${{ matrix.package }}/src
+
+      - name: Test
+        run: uv run pytest packages/${{ matrix.package }} --cov=packages/${{ matrix.package }}/src --cov-report=term-missing

@@ -1,5 +1,4 @@
 """Tests for analysis.cost."""
-import sys, os
 
 from ci_article_review.analysis.cost import calculate, _price_for_model
 
@@ -17,18 +16,20 @@ class TestPriceForModel:
 
     def test_unknown_model_returns_fallback(self):
         from ci_article_review.analysis.cost import _UNKNOWN_PRICE
+
         result = _price_for_model("some-hypothetical-model-9999")
         assert result == _UNKNOWN_PRICE
 
     def test_none_returns_fallback(self):
         from ci_article_review.analysis.cost import _UNKNOWN_PRICE
+
         assert _price_for_model(None) == _UNKNOWN_PRICE
 
 
 class TestCalculate:
     def _log(self, model, prompt_tok, completion_tok, failed=False):
         return {
-            "pass": f"openai:fact_check",
+            "pass": "openai:fact_check",
             "model": model,
             "failed": failed,
             "tokens": {"prompt": prompt_tok, "completion": completion_tok},
@@ -85,10 +86,15 @@ class TestCalculate:
         # api_call_log entries now carry calibration fields (effort, timeout budget,
         # headroom, char_count, status). Cost calculation must ignore the extras.
         entry = self._log("gpt-5.5", 18843, 17218)
-        entry.update({
-            "effort": "xhigh", "timeout_budget_seconds": 819,
-            "headroom_seconds": 478.9, "char_count": 73786, "status": "ok",
-        })
+        entry.update(
+            {
+                "effort": "xhigh",
+                "timeout_budget_seconds": 819,
+                "headroom_seconds": 478.9,
+                "char_count": 73786,
+                "status": "ok",
+            }
+        )
         result = calculate([entry])
         assert result["total_usd"] > 0
         assert result["pricing_known"] is True

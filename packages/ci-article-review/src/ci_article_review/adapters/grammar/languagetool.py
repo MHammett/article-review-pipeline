@@ -50,20 +50,22 @@ def apply_corrections(text, matches, auto_apply_categories, suppress_categories)
         offset = match["offset"]
         length = match["length"]
         replacement = match["replacements"][0]["value"]
-        original = text[offset: offset + length]
+        original = text[offset : offset + length]
 
         if original == replacement:
             continue
 
-        text = text[:offset] + replacement + text[offset + length:]
-        change_log.append({
-            "rule_id": rule_id,
-            "category": category_id,
-            "original": original,
-            "replacement": replacement,
-            "offset": offset,
-            "message": match.get("message", ""),
-        })
+        text = text[:offset] + replacement + text[offset + length :]
+        change_log.append(
+            {
+                "rule_id": rule_id,
+                "category": category_id,
+                "original": original,
+                "replacement": replacement,
+                "offset": offset,
+                "message": match.get("message", ""),
+            }
+        )
 
     change_log.reverse()
     return text, change_log
@@ -87,7 +89,9 @@ def run(text, lt_config, username, api_key, retry=True, retry_delay=10):
         result = _attempt()
     except Exception as e:
         if retry:
-            log.warning(f"LanguageTool first attempt failed: {e}. Retrying in {retry_delay}s.")
+            log.warning(
+                f"LanguageTool first attempt failed: {e}. Retrying in {retry_delay}s."
+            )
             time.sleep(retry_delay)
             try:
                 result = _attempt()
@@ -121,17 +125,23 @@ def run(text, lt_config, username, api_key, retry=True, retry_delay=10):
     for match in matches:
         category_id = match.get("rule", {}).get("category", {}).get("id", "")
         if category_id in flag_for_review:
-            flagged.append({
-                "rule_id": match.get("rule", {}).get("id", ""),
-                "category": category_id,
-                "message": match.get("message", ""),
-                "context": match.get("context", {}).get("text", ""),
-                "offset": match["offset"],
-                "length": match["length"],
-                "replacements": [r["value"] for r in match.get("replacements", [])[:3]],
-            })
+            flagged.append(
+                {
+                    "rule_id": match.get("rule", {}).get("id", ""),
+                    "category": category_id,
+                    "message": match.get("message", ""),
+                    "context": match.get("context", {}).get("text", ""),
+                    "offset": match["offset"],
+                    "length": match["length"],
+                    "replacements": [
+                        r["value"] for r in match.get("replacements", [])[:3]
+                    ],
+                }
+            )
 
-    log.debug(f"LanguageTool completed in {elapsed}s: {len(change_log)} corrections, {len(flagged)} flagged")
+    log.debug(
+        f"LanguageTool completed in {elapsed}s: {len(change_log)} corrections, {len(flagged)} flagged"
+    )
     return {
         "corrected_text": corrected_text,
         "change_log": change_log,

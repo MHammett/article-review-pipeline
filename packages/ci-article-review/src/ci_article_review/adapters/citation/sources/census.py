@@ -1,4 +1,5 @@
 """US Census Bureau data resolver."""
+
 import requests
 import logging
 import os
@@ -24,7 +25,7 @@ def resolve(claim, api_key=None):
             data = resp.json()
             return {
                 "found": True,
-                "url": f"https://data.census.gov/",
+                "url": "https://data.census.gov/",
                 "summary": f"Census {dataset['name']} {dataset['year']}: {data}",
                 "content": str(data),
             }

@@ -1,4 +1,5 @@
 """Readability metrics — Flesch-Kincaid and supporting stats. No external dependencies."""
+
 import re
 
 
@@ -41,21 +42,31 @@ def analyze(text):
     avg_syllables_per_word = round(n_syllables / n_words, 2)
 
     # Flesch Reading Ease — higher is easier to read
-    fre = round(206.835 - 1.015 * (n_words / n_sentences) - 84.6 * (n_syllables / n_words), 1)
+    fre = round(
+        206.835 - 1.015 * (n_words / n_sentences) - 84.6 * (n_syllables / n_words), 1
+    )
     fre = max(0.0, min(100.0, fre))
 
     # Flesch-Kincaid Grade Level
-    fkgl = round(0.39 * (n_words / n_sentences) + 11.8 * (n_syllables / n_words) - 15.59, 1)
+    fkgl = round(
+        0.39 * (n_words / n_sentences) + 11.8 * (n_syllables / n_words) - 15.59, 1
+    )
     fkgl = max(0.0, fkgl)
 
     reading_level = (
-        "Very Easy" if fre >= 90 else
-        "Easy" if fre >= 80 else
-        "Fairly Easy" if fre >= 70 else
-        "Standard" if fre >= 60 else
-        "Fairly Difficult" if fre >= 50 else
-        "Difficult" if fre >= 30 else
-        "Very Confusing"
+        "Very Easy"
+        if fre >= 90
+        else "Easy"
+        if fre >= 80
+        else "Fairly Easy"
+        if fre >= 70
+        else "Standard"
+        if fre >= 60
+        else "Fairly Difficult"
+        if fre >= 50
+        else "Difficult"
+        if fre >= 30
+        else "Very Confusing"
     )
 
     longest_para_words = max(

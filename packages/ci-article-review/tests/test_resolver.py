@@ -1,5 +1,4 @@
 """Tests for adapters.citation.resolver — parallel resolution, ordering, pointer flag."""
-import sys, os
 
 from unittest.mock import patch
 
@@ -21,10 +20,22 @@ class TestResolveCitations:
         claims = ["claim zero", "claim one", "claim two"]
 
         def fake_resolve(claim, api_key=None):
-            return {"found": True, "url": f"https://x/{claim.split()[-1]}", "content": claim}
+            return {
+                "found": True,
+                "url": f"https://x/{claim.split()[-1]}",
+                "content": claim,
+            }
 
-        with patch("ci_article_review.adapters.citation.resolver.wayback.check", side_effect=_no_wayback), \
-             patch("ci_article_review.adapters.citation.sources.fred.resolve", side_effect=fake_resolve):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
             results = resolver.resolve_citations(claims, _SOURCES)
 
         assert [r["claim"] for r in results] == claims
@@ -33,7 +44,10 @@ class TestResolveCitations:
         def fake_resolve(claim, api_key=None):
             return {"found": False}
 
-        with patch("ci_article_review.adapters.citation.sources.fred.resolve", side_effect=fake_resolve):
+        with patch(
+            "ci_article_review.adapters.citation.sources.fred.resolve",
+            side_effect=fake_resolve,
+        ):
             results = resolver.resolve_citations(["unknown claim"], _SOURCES)
 
         assert results[0]["resolved"] is False
@@ -43,18 +57,39 @@ class TestResolveCitations:
         def fake_resolve(claim, api_key=None):
             return {"found": True, "url": "https://x", "content": "data"}
 
-        with patch("ci_article_review.adapters.citation.resolver.wayback.check", side_effect=_no_wayback), \
-             patch("ci_article_review.adapters.citation.sources.fred.resolve", side_effect=fake_resolve):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
             results = resolver.resolve_citations(["c"], _SOURCES)
 
         assert results[0]["verification"] == "checksum"
 
     def test_pointer_only_label(self):
         def fake_resolve(claim, api_key=None):
-            return {"found": True, "pointer_only": True, "url": "https://x", "content": "ptr"}
+            return {
+                "found": True,
+                "pointer_only": True,
+                "url": "https://x",
+                "content": "ptr",
+            }
 
-        with patch("ci_article_review.adapters.citation.resolver.wayback.check", side_effect=_no_wayback), \
-             patch("ci_article_review.adapters.citation.sources.fred.resolve", side_effect=fake_resolve):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
             results = resolver.resolve_citations(["c"], _SOURCES)
 
         assert results[0]["verification"] == "pointer"
@@ -65,8 +100,16 @@ class TestResolveCitations:
         def fake_resolve(claim, api_key=None):
             return {"found": True, "url": "https://x", "content": "data"}
 
-        with patch("ci_article_review.adapters.citation.resolver.wayback.check", side_effect=_no_wayback), \
-             patch("ci_article_review.adapters.citation.sources.fred.resolve", side_effect=fake_resolve):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
             results = resolver.resolve_citations(["c"], sources)
 
         # Falls back to adapter name instead of raising KeyError
@@ -76,7 +119,9 @@ class TestResolveCitations:
         def boom(claim, api_key=None):
             raise RuntimeError("adapter exploded")
 
-        with patch("ci_article_review.adapters.citation.sources.fred.resolve", side_effect=boom):
+        with patch(
+            "ci_article_review.adapters.citation.sources.fred.resolve", side_effect=boom
+        ):
             results = resolver.resolve_citations(["c"], _SOURCES)
 
         # Exception is caught; claim reported unresolved rather than crashing the run

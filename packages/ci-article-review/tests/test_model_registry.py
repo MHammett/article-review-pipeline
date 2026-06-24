@@ -1,22 +1,24 @@
 """Tests for model_registry.check_model_currency."""
-import sys
-import os
+
 import datetime
-import pytest
 
 
-from ci_article_review.model_registry import check_model_currency, REGISTRY_DATE, _SUPERSEDED, _NEWER_AVAILABLE
+from ci_article_review.model_registry import (
+    check_model_currency,
+    REGISTRY_DATE,
+    _SUPERSEDED,
+)
 
 
 class TestCheckModelCurrency:
     def test_current_models_no_warnings(self):
         models = {
-            "openai":     {"model": "gpt-5.4",            "provider": "openai"},
-            "gemini":     {"model": "gemini-2.5-flash",   "provider": "ai_studio"},
-            "grok":       {"model": "grok-4.3",           "provider": "grok"},
-            "claude":     {"model": "claude-opus-4-8",    "provider": "anthropic"},
-            "mistral":    {"model": "mistral-large-latest","provider": "mistral"},
-            "perplexity": {"model": "sonar-reasoning-pro","provider": "perplexity"},
+            "openai": {"model": "gpt-5.4", "provider": "openai"},
+            "gemini": {"model": "gemini-2.5-flash", "provider": "ai_studio"},
+            "grok": {"model": "grok-4.3", "provider": "grok"},
+            "claude": {"model": "claude-opus-4-8", "provider": "anthropic"},
+            "mistral": {"model": "mistral-large-latest", "provider": "mistral"},
+            "perplexity": {"model": "sonar-reasoning-pro", "provider": "perplexity"},
         }
         result = check_model_currency(models)
         assert result["warnings"] == [], f"unexpected warnings: {result['warnings']}"
@@ -34,9 +36,9 @@ class TestCheckModelCurrency:
 
     def test_multiple_superseded(self):
         models = {
-            "openai": {"model": "gpt-4o",         "provider": "openai"},
-            "grok":   {"model": "grok-3-latest",  "provider": "grok"},
-            "claude": {"model": "claude-opus-4-5","provider": "anthropic"},
+            "openai": {"model": "gpt-4o", "provider": "openai"},
+            "grok": {"model": "grok-3-latest", "provider": "grok"},
+            "claude": {"model": "claude-opus-4-5", "provider": "anthropic"},
         }
         result = check_model_currency(models)
         assert len(result["warnings"]) == 3
@@ -85,4 +87,6 @@ class TestCheckModelCurrency:
     def test_all_superseded_have_replacement(self):
         for model_id, info in _SUPERSEDED.items():
             assert "replacement" in info, f"{model_id!r} missing 'replacement'"
-            assert isinstance(info["replacement"], str), f"{model_id!r} replacement is not a string"
+            assert isinstance(info["replacement"], str), (
+                f"{model_id!r} replacement is not a string"
+            )

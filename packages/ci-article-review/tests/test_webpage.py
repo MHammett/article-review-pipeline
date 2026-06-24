@@ -2,7 +2,9 @@
 
 All network access is mocked; no real HTTP requests are made.
 """
-import sys, os, types
+
+import sys
+import types
 
 from unittest.mock import patch, MagicMock
 
@@ -68,7 +70,9 @@ class TestExtractArticle:
 class TestTrafilaturaPaths:
     def test_uses_trafilatura_when_present(self):
         fake = types.ModuleType("trafilatura")
-        fake.extract = MagicMock(return_value="# From Trafilatura\n\nClean extracted body.")
+        fake.extract = MagicMock(
+            return_value="# From Trafilatura\n\nClean extracted body."
+        )
         with patch.dict(sys.modules, {"trafilatura": fake}):
             _, body = webpage.extract_article(SAMPLE_HTML)
         assert body == "# From Trafilatura\n\nClean extracted body."
@@ -107,8 +111,14 @@ class TestFetchSsrfGuard:
         resp = MagicMock()
         resp.text = SAMPLE_HTML
         resp.raise_for_status = MagicMock()
-        with patch("ci_article_review.analysis.webpage._is_public_host", return_value=True), \
-             patch("ci_article_review.analysis.webpage.requests.get", return_value=resp) as mock_get:
+        with (
+            patch(
+                "ci_article_review.analysis.webpage._is_public_host", return_value=True
+            ),
+            patch(
+                "ci_article_review.analysis.webpage.requests.get", return_value=resp
+            ) as mock_get,
+        ):
             html = webpage.fetch_url("https://example.com/post")
         assert html == SAMPLE_HTML
         # Real User-Agent and redirects enabled.
@@ -132,10 +142,14 @@ class TestBuildHandoffFromUrl:
         thin = "<html><head><title>Paywall</title></head><body><article><p>Subscribe to read.</p></article></body></html>"
         with self._patch_fetch(thin):
             with caplog.at_level("WARNING"):
-                handoff = webpage.build_handoff_from_url("https://example.com/paywalled")
+                handoff = webpage.build_handoff_from_url(
+                    "https://example.com/paywalled"
+                )
         assert handoff["title"] == "Paywall"
-        assert any("paywall" in r.message.lower() or "limited content" in r.message.lower()
-                   for r in caplog.records)
+        assert any(
+            "paywall" in r.message.lower() or "limited content" in r.message.lower()
+            for r in caplog.records
+        )
 
 
 class TestUrlModeFlowsIntoReview:
@@ -148,13 +162,23 @@ class TestUrlModeFlowsIntoReview:
         resp.text = SAMPLE_HTML
         resp.raise_for_status = MagicMock()
 
-        argv = ["pipeline.py", "--url", "https://example.com/post", "--publication", "myblog"]
-        with patch.object(sys, "argv", argv), \
-             patch("ci_article_review.analysis.webpage._is_public_host", return_value=True), \
-             patch("ci_article_review.analysis.webpage.requests.get", return_value=resp), \
-             patch("ci_article_review.pipeline.logging.FileHandler"), \
-             patch("logging.Logger.addHandler"), \
-             patch("ci_article_review.pipeline.run_draft_pipeline") as mock_run:
+        argv = [
+            "pipeline.py",
+            "--url",
+            "https://example.com/post",
+            "--publication",
+            "myblog",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch(
+                "ci_article_review.analysis.webpage._is_public_host", return_value=True
+            ),
+            patch("ci_article_review.analysis.webpage.requests.get", return_value=resp),
+            patch("ci_article_review.pipeline.logging.FileHandler"),
+            patch("logging.Logger.addHandler"),
+            patch("ci_article_review.pipeline.run_draft_pipeline") as mock_run,
+        ):
             pipeline.main()
 
         mock_run.assert_called_once()
@@ -169,22 +193,46 @@ class TestRunDraftPipelineAcceptsHandoff:
     """run_draft_pipeline must use a pre-built handoff and never read a file."""
 
     _MIN_CONFIG = {
-        "api_keys": {}, "pipeline": {}, "publication": {},
-        "delta": {}, "ensemble": {}, "models": {},
+        "api_keys": {},
+        "pipeline": {},
+        "publication": {},
+        "delta": {},
+        "ensemble": {},
+        "models": {},
     }
     _CURRENCY = {
-        "warnings": [], "registry_warning": False, "registry_stale": False,
-        "registry_date": "", "registry_age_days": 0,
+        "warnings": [],
+        "registry_warning": False,
+        "registry_stale": False,
+        "registry_date": "",
+        "registry_age_days": 0,
     }
 
     def _patches(self):
         return [
-            patch("ci_article_review.pipeline._read_handoff_file", side_effect=AssertionError("read a file")),
-            patch("ci_article_review.pipeline.parse_draft_submission", side_effect=AssertionError("parsed a file")),
-            patch("ci_article_review.pipeline.load_user_config", return_value={"pipeline": {}}),
-            patch("ci_article_review.pipeline.load_publication_config", return_value={}),
-            patch("ci_article_review.pipeline.merge_configs", return_value=self._MIN_CONFIG),
-            patch("ci_article_review.pipeline.check_model_currency", return_value=self._CURRENCY),
+            patch(
+                "ci_article_review.pipeline._read_handoff_file",
+                side_effect=AssertionError("read a file"),
+            ),
+            patch(
+                "ci_article_review.pipeline.parse_draft_submission",
+                side_effect=AssertionError("parsed a file"),
+            ),
+            patch(
+                "ci_article_review.pipeline.load_user_config",
+                return_value={"pipeline": {}},
+            ),
+            patch(
+                "ci_article_review.pipeline.load_publication_config", return_value={}
+            ),
+            patch(
+                "ci_article_review.pipeline.merge_configs",
+                return_value=self._MIN_CONFIG,
+            ),
+            patch(
+                "ci_article_review.pipeline.check_model_currency",
+                return_value=self._CURRENCY,
+            ),
         ]
 
     def test_prebuilt_handoff_used_without_file_read(self):
@@ -199,6 +247,7 @@ class TestRunDraftPipelineAcceptsHandoff:
                 stack.enter_context(p)
             with pytest.raises(SystemExit):
                 pipeline.run_draft_pipeline(
-                    None, "myblog",
+                    None,
+                    "myblog",
                     handoff={"title": "T", "draft": "", "run_number": 1},
                 )

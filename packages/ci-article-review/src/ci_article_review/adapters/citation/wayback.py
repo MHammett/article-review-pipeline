@@ -1,4 +1,5 @@
 """Wayback Machine availability checker (archive.org CDX API)."""
+
 import logging
 import re
 from datetime import datetime, timezone
@@ -8,7 +9,9 @@ import requests
 log = logging.getLogger(__name__)
 
 _AVAILABILITY_API = "https://archive.org/wayback/available"
-_STALE_DAYS = 180  # default — overridden by pipeline.wayback_snapshot_stale_days in user.yaml
+_STALE_DAYS = (
+    180  # default — overridden by pipeline.wayback_snapshot_stale_days in user.yaml
+)
 
 # Matches a Wayback Machine snapshot URL and captures its embedded timestamp:
 #   https://web.archive.org/web/20250101000000/https://example.com/...
@@ -98,7 +101,8 @@ def check(url, timeout=10, stale_days=None):
         "snapshot_url": snapshot_url,
         "snapshot_ts": ts,
         "snapshot_age_days": snapshot_age_days,
-        "snapshot_stale": snapshot_age_days is not None and snapshot_age_days > stale_threshold,
+        "snapshot_stale": snapshot_age_days is not None
+        and snapshot_age_days > stale_threshold,
     }
 
 

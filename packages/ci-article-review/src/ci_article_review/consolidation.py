@@ -55,12 +55,12 @@ from datetime import datetime, timezone
 #: Built-in domain weights.  Configurable under ``ensemble.weights`` in user.yaml.
 #: The ``default`` key applies to all domains not explicitly listed.
 _DEFAULT_WEIGHTS = {
-    "gemini":     {"default": 1.0, "fact_check": 1.5},
+    "gemini": {"default": 1.0, "fact_check": 1.5},
     "perplexity": {"default": 1.0, "fact_check": 1.5},
-    "openai":     {"default": 1.0, "voice_style": 1.2, "completeness": 1.2},
-    "mistral":    {"default": 1.0, "argument_integrity": 1.2, "red_team": 1.1},
-    "grok":       {"default": 1.0, "red_team": 1.2},
-    "claude":     {"default": 1.0, "argument_integrity": 1.3, "voice_style": 1.1},
+    "openai": {"default": 1.0, "voice_style": 1.2, "completeness": 1.2},
+    "mistral": {"default": 1.0, "argument_integrity": 1.2, "red_team": 1.1},
+    "grok": {"default": 1.0, "red_team": 1.2},
+    "claude": {"default": 1.0, "argument_integrity": 1.3, "voice_style": 1.1},
 }
 
 #: Weighted sum required to call a passage consensus.
@@ -94,6 +94,7 @@ def _get_weight(model_name, domain, ensemble_cfg):
 # Passage normalisation
 # ---------------------------------------------------------------------------
 
+
 def _passage_key(passage):
     """Normalise a passage for fuzzy cross-model matching.
 
@@ -107,6 +108,7 @@ def _passage_key(passage):
 # ---------------------------------------------------------------------------
 # Passage extraction per domain schema
 # ---------------------------------------------------------------------------
+
 
 def _extract_passages(model_name, domain, result):
     """Return list of (passage_text, flag_data_dict) pairs for consensus detection.
@@ -128,30 +130,68 @@ def _extract_passages(model_name, domain, result):
         for item in data.get("outdated", []):
             claim = item.get("claim", "")
             if claim:
-                out.append((claim, {**item, "domain": domain, "type": "outdated", "source_model": model_name}))
+                out.append(
+                    (
+                        claim,
+                        {
+                            **item,
+                            "domain": domain,
+                            "type": "outdated",
+                            "source_model": model_name,
+                        },
+                    )
+                )
         for item in data.get("contradicted", []):
             claim = item.get("claim", "")
             if claim:
-                out.append((claim, {**item, "domain": domain, "type": "contradicted", "source_model": model_name}))
+                out.append(
+                    (
+                        claim,
+                        {
+                            **item,
+                            "domain": domain,
+                            "type": "contradicted",
+                            "source_model": model_name,
+                        },
+                    )
+                )
 
     elif domain in ("voice_style", "argument_integrity"):
         for flag in data.get("flags", []):
             passage = flag.get("passage", "")
             if passage:
-                out.append((passage, {**flag, "domain": domain, "source_model": model_name}))
+                out.append(
+                    (passage, {**flag, "domain": domain, "source_model": model_name})
+                )
 
     elif domain == "completeness":
         for flag in data.get("flags", []):
             passage = flag.get("passage_reference", "")
             if passage:
-                out.append((passage, {**flag, "domain": domain, "source_model": model_name}))
+                out.append(
+                    (passage, {**flag, "domain": domain, "source_model": model_name})
+                )
 
     elif domain == "red_team":
-        for rt_key in ("most_vulnerable_claim", "highest_audience_risk", "highest_credibility_risk"):
+        for rt_key in (
+            "most_vulnerable_claim",
+            "highest_audience_risk",
+            "highest_credibility_risk",
+        ):
             item = data.get(rt_key, {})
             passage = item.get("passage", "")
             if passage:
-                out.append((passage, {**item, "domain": domain, "type": rt_key, "source_model": model_name}))
+                out.append(
+                    (
+                        passage,
+                        {
+                            **item,
+                            "domain": domain,
+                            "type": rt_key,
+                            "source_model": model_name,
+                        },
+                    )
+                )
 
     return out
 
@@ -160,14 +200,17 @@ def _extract_passages(model_name, domain, result):
 # Consensus detection
 # ---------------------------------------------------------------------------
 
+
 def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
     """Weighted consensus detection across all model/domain results.
 
     Returns (consensus_flags, single_source_flags).  consensus_flags are
     sorted by weight_sum descending so the strongest findings appear first.
     """
-    threshold = float(ensemble_cfg.get("consensus_threshold", _DEFAULT_CONSENSUS_THRESHOLD))
-    lt_weight  = float(ensemble_cfg.get("lt_weight", _DEFAULT_LT_WEIGHT))
+    threshold = float(
+        ensemble_cfg.get("consensus_threshold", _DEFAULT_CONSENSUS_THRESHOLD)
+    )
+    lt_weight = float(ensemble_cfg.get("lt_weight", _DEFAULT_LT_WEIGHT))
 
     # passage_key → accumulated data
     passage_map: dict[str, dict] = {}
@@ -199,13 +242,15 @@ def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
         effective_weight = entry["weight_sum"] + (lt_weight if has_lt else 0.0)
 
         if effective_weight >= threshold:
-            consensus.append({
-                "passage": entry["passage"],
-                "models": sorted(set(entry["models"])),
-                "weight_sum": round(effective_weight, 2),
-                "languagetool_also_flagged": has_lt,
-                "flags": entry["flag_data"],
-            })
+            consensus.append(
+                {
+                    "passage": entry["passage"],
+                    "models": sorted(set(entry["models"])),
+                    "weight_sum": round(effective_weight, 2),
+                    "languagetool_also_flagged": has_lt,
+                    "flags": entry["flag_data"],
+                }
+            )
         else:
             single_source.extend(entry["flag_data"])
 
@@ -216,6 +261,7 @@ def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
 # ---------------------------------------------------------------------------
 # Domain section builders
 # ---------------------------------------------------------------------------
+
 
 def _build_fact_check(results, ensemble_cfg):
     """Merge fact_check results from all models that ran the domain."""
@@ -233,7 +279,9 @@ def _build_fact_check(results, ensemble_cfg):
             **r["data"],
             "_sources": {
                 model_name: {
-                    "weight": round(_get_weight(model_name, "fact_check", ensemble_cfg), 2),
+                    "weight": round(
+                        _get_weight(model_name, "fact_check", ensemble_cfg), 2
+                    ),
                     "grounding": r.get("grounding_available", False),
                 }
             },
@@ -241,8 +289,12 @@ def _build_fact_check(results, ensemble_cfg):
 
     # Multiple sources — merge all lists, tag each item with source model and weight
     merged: dict = {
-        "confirmed": [], "outdated": [], "contradicted": [],
-        "unverifiable": [], "primary_source_needed": [], "additional_observations": [],
+        "confirmed": [],
+        "outdated": [],
+        "contradicted": [],
+        "unverifiable": [],
+        "primary_source_needed": [],
+        "additional_observations": [],
         "_sources": {},
     }
     for model_name, r in domain_results:
@@ -253,13 +305,24 @@ def _build_fact_check(results, ensemble_cfg):
             "source_weight": round(weight, 2),
             "grounding": grounding,
         }
-        merged["_sources"][model_name] = {"weight": round(weight, 2), "grounding": grounding}
+        merged["_sources"][model_name] = {
+            "weight": round(weight, 2),
+            "grounding": grounding,
+        }
         data = r["data"]
-        for key in ("confirmed", "outdated", "contradicted", "unverifiable", "primary_source_needed"):
+        for key in (
+            "confirmed",
+            "outdated",
+            "contradicted",
+            "unverifiable",
+            "primary_source_needed",
+        ):
             for item in data.get(key, []):
                 merged[key].append({**item, **tag})
         for obs in data.get("additional_observations", []):
-            merged["additional_observations"].append({**obs, "source_model": model_name})
+            merged["additional_observations"].append(
+                {**obs, "source_model": model_name}
+            )
 
     # Sort problem arrays: higher-weight model findings first
     for key in ("outdated", "contradicted"):
@@ -360,6 +423,7 @@ def _build_red_team(results, ensemble_cfg):
 # Cross-model contradiction detection
 # ---------------------------------------------------------------------------
 
+
 def find_contradictions(results):
     """Surface claims confirmed by one fact-check model but challenged by another.
 
@@ -369,7 +433,7 @@ def find_contradictions(results):
       challenged_by   list  — model names that marked it outdated or contradicted
       challenge_type  str   — "outdated" | "contradicted" | "mixed"
     """
-    confirmed: dict[str, list] = {}   # passage_key → [{model, claim, ...}]
+    confirmed: dict[str, list] = {}  # passage_key → [{model, claim, ...}]
     challenged: dict[str, list] = {}  # passage_key → [{model, claim, type, ...}]
 
     for (model_name, domain), result in results.items():
@@ -380,13 +444,20 @@ def find_contradictions(results):
             claim = item.get("claim", "")
             if claim:
                 key = _passage_key(claim)
-                confirmed.setdefault(key, []).append({"model": model_name, "claim": claim, **item})
+                confirmed.setdefault(key, []).append(
+                    {"model": model_name, "claim": claim, **item}
+                )
         for item in data.get("contradicted", []):
             claim = item.get("claim", "")
             if claim:
                 key = _passage_key(claim)
                 challenged.setdefault(key, []).append(
-                    {"model": model_name, "claim": claim, "type": "contradicted", **item}
+                    {
+                        "model": model_name,
+                        "claim": claim,
+                        "type": "contradicted",
+                        **item,
+                    }
                 )
         for item in data.get("outdated", []):
             claim = item.get("claim", "")
@@ -400,12 +471,14 @@ def find_contradictions(results):
     for key in set(confirmed) & set(challenged):
         c_types = {e["type"] for e in challenged[key]}
         challenge_type = c_types.pop() if len(c_types) == 1 else "mixed"
-        contradictions.append({
-            "claim": challenged[key][0]["claim"],
-            "confirmed_by": sorted({e["model"] for e in confirmed[key]}),
-            "challenged_by": sorted({e["model"] for e in challenged[key]}),
-            "challenge_type": challenge_type,
-        })
+        contradictions.append(
+            {
+                "claim": challenged[key][0]["claim"],
+                "confirmed_by": sorted({e["model"] for e in confirmed[key]}),
+                "challenged_by": sorted({e["model"] for e in challenged[key]}),
+                "challenge_type": challenge_type,
+            }
+        )
 
     return contradictions
 
@@ -413,6 +486,7 @@ def find_contradictions(results):
 # ---------------------------------------------------------------------------
 # Low-confidence and additional observations collectors
 # ---------------------------------------------------------------------------
+
 
 def _collect_low_confidence(results):
     out = []
@@ -431,11 +505,11 @@ def _collect_additional_observations(results):
     (rare) or out-of-domain (the typical case for additional_observations).
     """
     _domain_label = {
-        "fact_check":         "fact_check",
-        "voice_style":        "voice",
+        "fact_check": "fact_check",
+        "voice_style": "voice",
         "argument_integrity": "argument",
-        "completeness":       "completeness",
-        "red_team":           "red_team",
+        "completeness": "completeness",
+        "red_team": "red_team",
     }
     out = []
     for (model_name, domain), r in results.items():
@@ -444,12 +518,14 @@ def _collect_additional_observations(results):
         primary_category = _domain_label.get(domain, domain)
         for obs in r["data"].get("additional_observations", []):
             obs_category = obs.get("category", "")
-            out.append({
-                **obs,
-                "source_model": model_name,
-                "source_domain": domain,
-                "in_domain": obs_category == primary_category,
-            })
+            out.append(
+                {
+                    **obs,
+                    "source_model": model_name,
+                    "source_domain": domain,
+                    "in_domain": obs_category == primary_category,
+                }
+            )
     return out
 
 
@@ -457,14 +533,15 @@ def _collect_additional_observations(results):
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def build_report(
     article_title,
     publication_name,
     run_number,
     corrected_draft,
     lt_result,
-    results,         # {(model_name, domain): result_dict}
-    ensemble_cfg,    # from config["ensemble"] — weights, threshold, etc.
+    results,  # {(model_name, domain): result_dict}
+    ensemble_cfg,  # from config["ensemble"] — weights, threshold, etc.
     api_call_log,
     prior_report=None,
     primary_claim="",
@@ -490,14 +567,18 @@ def build_report(
                 lt_flagged_passages.append(ctx)
 
     # Section 1 — Weighted consensus across all domains
-    consensus_flags, _single = _find_consensus(results, lt_flagged_passages, ensemble_cfg)
+    consensus_flags, _single = _find_consensus(
+        results, lt_flagged_passages, ensemble_cfg
+    )
 
     # Sections 2-6 — Domain sections
-    section_2_fact_check  = _build_fact_check(results, ensemble_cfg)
-    section_3_voice       = _build_flags_section("voice_style", results, ensemble_cfg)
-    section_4_argument    = _build_flags_section("argument_integrity", results, ensemble_cfg)
+    section_2_fact_check = _build_fact_check(results, ensemble_cfg)
+    section_3_voice = _build_flags_section("voice_style", results, ensemble_cfg)
+    section_4_argument = _build_flags_section(
+        "argument_integrity", results, ensemble_cfg
+    )
     section_5_completeness = _build_completeness(results, ensemble_cfg)
-    section_6_red_team    = _build_red_team(results, ensemble_cfg)
+    section_6_red_team = _build_red_team(results, ensemble_cfg)
 
     # Section 7 — Low-confidence observations
     section_7_low_confidence = _collect_low_confidence(results)
@@ -518,7 +599,8 @@ def build_report(
     # Delta from prior run
     delta = (
         _compute_delta(corrected_draft, prior_report, consensus_flags, primary_claim)
-        if prior_report else None
+        if prior_report
+        else None
     )
 
     # Ensemble metadata for the report header
@@ -559,6 +641,7 @@ def build_report(
 # ---------------------------------------------------------------------------
 # Delta computation
 # ---------------------------------------------------------------------------
+
 
 def _heading_structure(text):
     """Ordered list of (level, normalized_text) for every markdown heading.
@@ -601,10 +684,7 @@ def _compute_delta(current_draft, prior_report, current_consensus, current_claim
         _passage_key(f.get("passage", ""))
         for f in prior_report.get("section_1_consensus", [])
     }
-    current_passages = {
-        _passage_key(f.get("passage", ""))
-        for f in current_consensus
-    }
+    current_passages = {_passage_key(f.get("passage", "")) for f in current_consensus}
 
     # Claim change: only flag when both runs supplied a claim to compare. Older
     # reports predating claim storage have no primary_claim — treat as unchanged
@@ -614,7 +694,9 @@ def _compute_delta(current_draft, prior_report, current_consensus, current_claim
     claim_changed = bool(prior_claim and curr_claim and prior_claim != curr_claim)
 
     # Structure change: heading outline differs (added/removed/renamed/reordered).
-    structure_changed = _heading_structure(prior_draft) != _heading_structure(current_draft)
+    structure_changed = _heading_structure(prior_draft) != _heading_structure(
+        current_draft
+    )
 
     return {
         "word_change_pct": word_change_pct,
@@ -637,8 +719,12 @@ def rerun_recommended(delta, delta_config):
         return True
     # Honor the configurable triggers (default True). delta.get(...) guards older
     # delta dicts that predate these keys.
-    if delta_config.get("claim_change_triggers_rerun", True) and delta.get("claim_changed"):
+    if delta_config.get("claim_change_triggers_rerun", True) and delta.get(
+        "claim_changed"
+    ):
         return True
-    if delta_config.get("structure_change_triggers_rerun", True) and delta.get("structure_changed"):
+    if delta_config.get("structure_change_triggers_rerun", True) and delta.get(
+        "structure_changed"
+    ):
         return True
     return False

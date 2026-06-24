@@ -26,7 +26,6 @@ Then in configs/user.yaml::
         # credentials_file: /path/to/sa.json  # omit to use Application Default Credentials
 """
 
-import json
 import time
 import logging
 import requests
@@ -49,6 +48,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _redact_key(text, api_key):
     if api_key and api_key in str(text):
@@ -73,6 +73,7 @@ def _resolve_model(model_arg, provider_config):
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 def call(
     system_prompt,
     user_prompt,
@@ -87,15 +88,25 @@ def call(
 
     if provider == "vertex_ai":
         return _call_with_fallback(
-            system_prompt, user_prompt, api_key,
-            retry=retry, retry_delay=retry_delay,
-            model=model, cfg=cfg, backend="vertex",
+            system_prompt,
+            user_prompt,
+            api_key,
+            retry=retry,
+            retry_delay=retry_delay,
+            model=model,
+            cfg=cfg,
+            backend="vertex",
         )
     else:
         return _call_with_fallback(
-            system_prompt, user_prompt, api_key,
-            retry=retry, retry_delay=retry_delay,
-            model=model, cfg=cfg, backend="aistudio",
+            system_prompt,
+            user_prompt,
+            api_key,
+            retry=retry,
+            retry_delay=retry_delay,
+            model=model,
+            cfg=cfg,
+            backend="aistudio",
         )
 
 
@@ -103,9 +114,16 @@ def call(
 # Fallback-chain orchestration (shared by both backends)
 # ---------------------------------------------------------------------------
 
+
 def _call_with_fallback(
-    system_prompt, user_prompt, api_key,
-    retry, retry_delay, model, cfg, backend,
+    system_prompt,
+    user_prompt,
+    api_key,
+    retry,
+    retry_delay,
+    model,
+    cfg,
+    backend,
 ):
     requested_model = _resolve_model(model, cfg)
     models_to_try = [requested_model] + [
@@ -116,13 +134,21 @@ def _call_with_fallback(
     for attempt_model in models_to_try:
         if backend == "vertex":
             result = _call_vertex(
-                system_prompt, user_prompt, cfg,
-                model=attempt_model, retry=retry, retry_delay=retry_delay,
+                system_prompt,
+                user_prompt,
+                cfg,
+                model=attempt_model,
+                retry=retry,
+                retry_delay=retry_delay,
             )
         else:
             result = _call_aistudio(
-                system_prompt, user_prompt, api_key,
-                model=attempt_model, retry=retry, retry_delay=retry_delay,
+                system_prompt,
+                user_prompt,
+                api_key,
+                model=attempt_model,
+                retry=retry,
+                retry_delay=retry_delay,
                 provider_config=cfg,
             )
 
@@ -136,7 +162,10 @@ def _call_with_fallback(
                 )
             return result
 
-        if _is_capacity_error(result.get("error", "")) and attempt_model != models_to_try[-1]:
+        if (
+            _is_capacity_error(result.get("error", ""))
+            and attempt_model != models_to_try[-1]
+        ):
             log.warning(
                 f"Gemini {attempt_model} unavailable (capacity). "
                 f"Trying next fallback model."
@@ -152,6 +181,7 @@ def _call_with_fallback(
 # AI Studio backend
 # ---------------------------------------------------------------------------
 
+
 def _aistudio_url(model, api_key):
     # streamGenerateContent + alt=sse → Server-Sent Events instead of one buffered body.
     return (
@@ -160,11 +190,20 @@ def _aistudio_url(model, api_key):
     )
 
 
-def _call_aistudio(system_prompt, user_prompt, api_key, model, retry=True, retry_delay=10, provider_config=None):
+def _call_aistudio(
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry=True,
+    retry_delay=10,
+    provider_config=None,
+):
     url = _aistudio_url(model, api_key)
     grounding_tool = {"google_search": {}}
     return _execute_request(
-        system_prompt, user_prompt,
+        system_prompt,
+        user_prompt,
         url=url,
         headers={"Content-Type": "application/json"},
         grounding_tool=grounding_tool,
@@ -179,6 +218,7 @@ def _call_aistudio(system_prompt, user_prompt, api_key, model, retry=True, retry
 # ---------------------------------------------------------------------------
 # Vertex AI backend
 # ---------------------------------------------------------------------------
+
 
 def _vertex_url(model, cfg):
     project = cfg.get("project", "")
@@ -211,6 +251,7 @@ def _get_vertex_token(cfg):
     credentials_file = cfg.get("credentials_file")
     if credentials_file:
         from google.oauth2 import service_account
+
         creds = service_account.Credentials.from_service_account_file(
             credentials_file,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
@@ -247,12 +288,13 @@ def _call_vertex(system_prompt, user_prompt, cfg, model, retry=True, retry_delay
     # Both Vertex AI and AI Studio now use the same google_search tool name.
     grounding_tool = {"google_search": {}}
     return _execute_request(
-        system_prompt, user_prompt,
+        system_prompt,
+        user_prompt,
         url=url,
         headers=headers,
         grounding_tool=grounding_tool,
         model=model,
-        api_key=None,       # no key to redact in Vertex error messages
+        api_key=None,  # no key to redact in Vertex error messages
         retry=retry,
         retry_delay=retry_delay,
         provider_config=cfg,
@@ -262,6 +304,7 @@ def _call_vertex(system_prompt, user_prompt, cfg, model, retry=True, retry_delay
 # ---------------------------------------------------------------------------
 # Shared HTTP execution (both backends use the same response handling)
 # ---------------------------------------------------------------------------
+
 
 def _execute_request(
     system_prompt,
@@ -293,8 +336,14 @@ def _execute_request(
     if thinking_budget is not None:
         # includeThoughts: true ensures the response includes thought parts so our
         # filtering logic can strip them. Without it the API may omit them on some models.
-        _grounded_gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget, "includeThoughts": True}
-        _plain_gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget, "includeThoughts": True}
+        _grounded_gen_config["thinkingConfig"] = {
+            "thinkingBudget": thinking_budget,
+            "includeThoughts": True,
+        }
+        _plain_gen_config["thinkingConfig"] = {
+            "thinkingBudget": thinking_budget,
+            "includeThoughts": True,
+        }
 
     payload_grounded = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -316,7 +365,9 @@ def _execute_request(
     t0 = time.monotonic()
 
     def _post(payload):
-        resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            url, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503, 504) and retry:
             log.warning(
                 f"Gemini {model} HTTP {resp.status_code}. "
@@ -324,7 +375,9 @@ def _execute_request(
             )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                url, headers=headers, json=payload, stream=True, timeout=timeout
+            )
         resp.raise_for_status()
         return streaming.accumulate_gemini(resp)
 
@@ -354,7 +407,9 @@ def _execute_request(
             "elapsed_seconds": elapsed,
         }
     except requests.HTTPError as e:
-        body = _redact_key(e.response.text[:400] if e.response is not None else "", api_key)
+        body = _redact_key(
+            e.response.text[:400] if e.response is not None else "", api_key
+        )
         safe_err = _redact_key(e, api_key)
         log.warning(
             f"Gemini {model} with search grounding failed: {safe_err} | {body}. "
@@ -365,9 +420,13 @@ def _execute_request(
             assembled = _post(payload_plain)
         except requests.HTTPError as e2:
             elapsed = round(time.monotonic() - t0, 2)
-            body2 = _redact_key(e2.response.text[:400] if e2.response is not None else "", api_key)
+            body2 = _redact_key(
+                e2.response.text[:400] if e2.response is not None else "", api_key
+            )
             safe_err2 = _redact_key(e2, api_key)
-            log.error(f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2} | {body2}")
+            log.error(
+                f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2} | {body2}"
+            )
             session.close()
             return {
                 "failed": True,
@@ -381,7 +440,9 @@ def _execute_request(
         except Exception as e2:
             elapsed = round(time.monotonic() - t0, 2)
             safe_err2 = _redact_key(e2, api_key)
-            log.error(f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2}")
+            log.error(
+                f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2}"
+            )
             session.close()
             return {
                 "failed": True,
@@ -404,7 +465,9 @@ def _execute_request(
         except Exception as e2:
             elapsed = round(time.monotonic() - t0, 2)
             safe_err2 = _redact_key(e2, api_key)
-            log.error(f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2}")
+            log.error(
+                f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2}"
+            )
             session.close()
             return {
                 "failed": True,
@@ -451,8 +514,7 @@ def _execute_request(
         }
 
     log.debug(
-        f"Gemini {model} call succeeded in {elapsed}s "
-        f"(grounding={grounding_available})"
+        f"Gemini {model} call succeeded in {elapsed}s (grounding={grounding_available})"
     )
     return {
         "failed": False,

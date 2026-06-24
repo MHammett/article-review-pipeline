@@ -1,10 +1,11 @@
 """Tests for consolidation.find_contradictions."""
-import sys, os
 
 from ci_article_review.consolidation import find_contradictions
 
 
-def _result(model, domain, confirmed=None, contradicted=None, outdated=None, failed=False):
+def _result(
+    model, domain, confirmed=None, contradicted=None, outdated=None, failed=False
+):
     return (model, domain), {
         "failed": failed,
         "data": {
@@ -23,8 +24,12 @@ class TestFindContradictions:
         assert find_contradictions(results) == []
 
     def test_detects_confirmed_vs_contradicted(self):
-        r1 = _result("gemini", "fact_check", confirmed=[{"claim": "Unemployment is 4%"}])
-        r2 = _result("perplexity", "fact_check", contradicted=[{"claim": "Unemployment is 4%"}])
+        r1 = _result(
+            "gemini", "fact_check", confirmed=[{"claim": "Unemployment is 4%"}]
+        )
+        r2 = _result(
+            "perplexity", "fact_check", contradicted=[{"claim": "Unemployment is 4%"}]
+        )
         results = dict([r1, r2])
         contradictions = find_contradictions(results)
         assert len(contradictions) == 1
@@ -52,13 +57,20 @@ class TestFindContradictions:
 
     def test_skips_non_fact_check_domains(self):
         r1 = _result("openai", "voice_style", confirmed=[{"claim": "Some passage"}])
-        r2 = _result("claude", "argument_integrity", contradicted=[{"claim": "Some passage"}])
+        r2 = _result(
+            "claude", "argument_integrity", contradicted=[{"claim": "Some passage"}]
+        )
         results = dict([r1, r2])
         assert find_contradictions(results) == []
 
     def test_skips_failed_results(self):
         r1 = _result("gemini", "fact_check", confirmed=[{"claim": "X is true"}])
-        r2 = _result("perplexity", "fact_check", contradicted=[{"claim": "X is true"}], failed=True)
+        r2 = _result(
+            "perplexity",
+            "fact_check",
+            contradicted=[{"claim": "X is true"}],
+            failed=True,
+        )
         results = dict([r1, r2])
         assert find_contradictions(results) == []
 
@@ -67,15 +79,23 @@ class TestFindContradictions:
 
     def test_no_overlap_no_contradiction(self):
         r1 = _result("gemini", "fact_check", confirmed=[{"claim": "Claim A"}])
-        r2 = _result("perplexity", "fact_check", contradicted=[{"claim": "Claim B totally different"}])
+        r2 = _result(
+            "perplexity",
+            "fact_check",
+            contradicted=[{"claim": "Claim B totally different"}],
+        )
         results = dict([r1, r2])
         # No passage key overlap → no contradiction
         assert find_contradictions(results) == []
 
     def test_returns_confirmed_by_and_challenged_by(self):
         r1 = _result("gemini", "fact_check", confirmed=[{"claim": "Inflation is 2%"}])
-        r2 = _result("perplexity", "fact_check", confirmed=[{"claim": "Inflation is 2%"}])
-        r3 = _result("openai", "fact_check", contradicted=[{"claim": "Inflation is 2%"}])
+        r2 = _result(
+            "perplexity", "fact_check", confirmed=[{"claim": "Inflation is 2%"}]
+        )
+        r3 = _result(
+            "openai", "fact_check", contradicted=[{"claim": "Inflation is 2%"}]
+        )
         results = dict([r1, r2, r3])
         contradictions = find_contradictions(results)
         assert len(contradictions) == 1

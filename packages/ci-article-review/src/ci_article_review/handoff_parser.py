@@ -1,6 +1,7 @@
 """
 Parse Template A (draft submission) and Template C (publication handoff) documents.
 """
+
 import re
 import logging
 
@@ -10,7 +11,9 @@ log = logging.getLogger(__name__)
 def _extract_section(text, header, next_headers=None):
     """Extract content between a header and the next known header."""
     if next_headers:
-        boundary = r"(?=\n(?:" + "|".join(re.escape(h) for h in next_headers) + r")\s*\n)"
+        boundary = (
+            r"(?=\n(?:" + "|".join(re.escape(h) for h in next_headers) + r")\s*\n)"
+        )
     else:
         boundary = r"\Z"
     pattern = rf"^{re.escape(header)}\s*\n(.*?){boundary}"
@@ -43,7 +46,7 @@ PUB_HEADERS = [
 def parse_draft_submission(text):
     def section(header):
         idx = DRAFT_HEADERS.index(header)
-        next_h = DRAFT_HEADERS[idx + 1:] if idx + 1 < len(DRAFT_HEADERS) else []
+        next_h = DRAFT_HEADERS[idx + 1 :] if idx + 1 < len(DRAFT_HEADERS) else []
         return _extract_section(text, header, next_h or None)
 
     title = _extract_field(text, "Article:")
@@ -53,9 +56,9 @@ def parse_draft_submission(text):
     # Fields that directly fill prompt template variables — warn if missing
     # so the user knows before a model call produces oddly generic output.
     _REQUIRED_FIELDS = {
-        "title":          ("Article:", title),
-        "primary_claim":  ("PRIMARY CLAIM", section("PRIMARY CLAIM")),
-        "draft":          ("DRAFT", section("DRAFT")),
+        "title": ("Article:", title),
+        "primary_claim": ("PRIMARY CLAIM", section("PRIMARY CLAIM")),
+        "draft": ("DRAFT", section("DRAFT")),
     }
     for field, (label, value) in _REQUIRED_FIELDS.items():
         if not value:
@@ -66,7 +69,10 @@ def parse_draft_submission(text):
 
     # Advisory fields — missing is common and acceptable, but worth noting at debug level
     _ADVISORY_FIELDS = {
-        "pre_draft_analysis": ("PRE-DRAFT ANALYSIS SUMMARY", section("PRE-DRAFT ANALYSIS SUMMARY")),
+        "pre_draft_analysis": (
+            "PRE-DRAFT ANALYSIS SUMMARY",
+            section("PRE-DRAFT ANALYSIS SUMMARY"),
+        ),
     }
 
     results = {
@@ -95,7 +101,7 @@ def parse_draft_submission(text):
 def parse_publication_handoff(text):
     def section(header):
         idx = PUB_HEADERS.index(header)
-        next_h = PUB_HEADERS[idx + 1:] if idx + 1 < len(PUB_HEADERS) else []
+        next_h = PUB_HEADERS[idx + 1 :] if idx + 1 < len(PUB_HEADERS) else []
         return _extract_section(text, header, next_h or None)
 
     title = _extract_field(text, "Article:")

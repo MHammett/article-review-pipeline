@@ -1,5 +1,5 @@
 """FHWA (Federal Highway Administration) Highway Statistics resolver."""
-import requests
+
 import logging
 
 FHWA_BASE = "https://www.fhwa.dot.gov/policyinformation/statistics"
@@ -12,8 +12,17 @@ def resolve(claim, api_key=None):
     pointer to the relevant Highway Statistics publication for manual retrieval.
     """
     claim_lower = claim.lower()
-    highway_terms = ["vehicle miles", "vmt", "lane miles", "highway", "road", "bridge",
-                     "traffic", "fuel tax", "motor fuel"]
+    highway_terms = [
+        "vehicle miles",
+        "vmt",
+        "lane miles",
+        "highway",
+        "road",
+        "bridge",
+        "traffic",
+        "fuel tax",
+        "motor fuel",
+    ]
 
     if not any(t in claim_lower for t in highway_terms):
         return {"found": False}
@@ -24,7 +33,7 @@ def resolve(claim, api_key=None):
 
     return {
         "found": True,
-        "pointer_only": True,   # not a verified data fetch — points at a publication for manual retrieval
+        "pointer_only": True,  # not a verified data fetch — points at a publication for manual retrieval
         "url": url,
         "summary": f"FHWA Highway Statistics ({year}) — manual retrieval required. See {url}",
         "content": f"FHWA source pointer for: {claim[:200]}",
@@ -33,5 +42,6 @@ def resolve(claim, api_key=None):
 
 def _extract_year(text):
     import re
+
     match = re.search(r"\b(20\d{2}|19\d{2})\b", text)
     return match.group(0) if match else None

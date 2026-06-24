@@ -6,12 +6,13 @@ Usage:
   python pipeline.py --draft path/to/handoff.md --publication your_publication_name
   python pipeline.py --publish path/to/publication_handoff.md --publication your_publication_name [--publish-live]
 """
+
 import sys
 
 # Reconfigure stdout/stderr to UTF-8 on Windows (default cp1252 breaks on non-ASCII report content)
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
 # Version guard — must run before any other imports
 if sys.version_info < (3, 10):
@@ -41,7 +42,6 @@ if _missing:
 import argparse
 import concurrent.futures
 import importlib
-import json
 import logging
 import time
 
@@ -49,7 +49,12 @@ import requests
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config_loader import load_user_config, load_publication_config, merge_configs, validate_publication_name
+from .config_loader import (
+    load_user_config,
+    load_publication_config,
+    merge_configs,
+    validate_publication_name,
+)
 from .handoff_parser import parse_draft_submission, parse_publication_handoff
 from . import history as hist
 from . import consolidation
@@ -74,20 +79,20 @@ _PROMPT_CACHE: dict[str, str] = {}
 
 #: Maps domain names to their prompt file.
 _DOMAIN_PROMPTS: dict[str, str] = {
-    "fact_check":         "fact_check.txt",
-    "voice_style":        "ai_speak.txt",
-    "completeness":       "completeness.txt",
+    "fact_check": "fact_check.txt",
+    "voice_style": "ai_speak.txt",
+    "completeness": "completeness.txt",
     "argument_integrity": "argument_integrity.txt",
-    "red_team":           "red_team.txt",
+    "red_team": "red_team.txt",
 }
 
 #: Maps model names to their adapter module path.
 _ADAPTER_MODULES: dict[str, str] = {
-    "gemini":     "ci_article_review.adapters.review.gemini",
-    "openai":     "ci_article_review.adapters.review.openai",
-    "mistral":    "ci_article_review.adapters.review.mistral",
-    "grok":       "ci_article_review.adapters.review.grok",
-    "claude":     "ci_article_review.adapters.review.claude",
+    "gemini": "ci_article_review.adapters.review.gemini",
+    "openai": "ci_article_review.adapters.review.openai",
+    "mistral": "ci_article_review.adapters.review.mistral",
+    "grok": "ci_article_review.adapters.review.grok",
+    "claude": "ci_article_review.adapters.review.claude",
     "perplexity": "ci_article_review.adapters.review.perplexity",
 }
 
@@ -96,29 +101,36 @@ _ADAPTER_MODULES: dict[str, str] = {
 _THOROUGHNESS_PRESETS: dict[str, dict[str, list[str]]] = {
     "standard": {
         # One primary model per domain — current baseline behavior.
-        "fact_check":         ["gemini"],
-        "voice_style":        ["openai"],
-        "completeness":       ["openai"],
+        "fact_check": ["gemini"],
+        "voice_style": ["openai"],
+        "completeness": ["openai"],
         "argument_integrity": ["mistral", "claude"],
-        "red_team":           ["mistral", "grok"],
+        "red_team": ["mistral", "grok"],
     },
     "thorough": {
         # Two to three well-suited models per domain.
         # fact_check limited to search-grounded models for quality.
-        "fact_check":         ["gemini", "perplexity"],
-        "voice_style":        ["openai", "claude"],
-        "completeness":       ["openai", "mistral"],
+        "fact_check": ["gemini", "perplexity"],
+        "voice_style": ["openai", "claude"],
+        "completeness": ["openai", "mistral"],
         "argument_integrity": ["mistral", "claude", "openai"],
-        "red_team":           ["mistral", "grok", "claude"],
+        "red_team": ["mistral", "grok", "claude"],
     },
     "maximum": {
         # Every configured model runs every domain.
         # Domain-specific weights in consolidation sort the signal from the noise.
-        "fact_check":         ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
-        "voice_style":        ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
-        "completeness":       ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
-        "argument_integrity": ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
-        "red_team":           ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
+        "fact_check": ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
+        "voice_style": ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
+        "completeness": ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
+        "argument_integrity": [
+            "gemini",
+            "perplexity",
+            "openai",
+            "mistral",
+            "grok",
+            "claude",
+        ],
+        "red_team": ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
     },
 }
 
@@ -211,18 +223,28 @@ def _build_custom_assignments(pub_config, model_configs, api_keys):
         elif cfg.get("prompt_file"):
             p = Path(cfg["prompt_file"])
             if not p.exists():
-                log.warning("Custom domain %r: prompt_file %r not found — skipping", domain_name, str(p))
+                log.warning(
+                    "Custom domain %r: prompt_file %r not found — skipping",
+                    domain_name,
+                    str(p),
+                )
                 continue
             prompt_str = p.read_text(encoding="utf-8")
         else:
-            log.warning("Custom domain %r has no prompt or prompt_file — skipping", domain_name)
+            log.warning(
+                "Custom domain %r has no prompt or prompt_file — skipping", domain_name
+            )
             continue
 
         prompts_by_domain[domain_name] = prompt_str
 
-        for model_name in (cfg.get("models") or []):
+        for model_name in cfg.get("models") or []:
             if model_name not in _ADAPTER_MODULES:
-                log.warning("Custom domain %r: unknown model %r — skipping", domain_name, model_name)
+                log.warning(
+                    "Custom domain %r: unknown model %r — skipping",
+                    domain_name,
+                    model_name,
+                )
                 continue
             model_cfg = model_configs.get(model_name, {})
             if not model_cfg.get("enabled", True):
@@ -239,6 +261,7 @@ def _build_custom_assignments(pub_config, model_configs, api_keys):
 # ---------------------------------------------------------------------------
 # Prompt helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_prompt(name: str) -> str:
     if name not in _PROMPT_CACHE:
@@ -274,8 +297,7 @@ def _read_handoff_file(path: str) -> str:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
-            f"Handoff file not found: {path}\n"
-            "Check the path and try again."
+            f"Handoff file not found: {path}\nCheck the path and try again."
         )
     try:
         return p.read_text(encoding="utf-8")
@@ -286,6 +308,7 @@ def _read_handoff_file(path: str) -> str:
 # ---------------------------------------------------------------------------
 # Generic domain runner
 # ---------------------------------------------------------------------------
+
 
 def _run_domain(
     model_name: str,
@@ -306,7 +329,9 @@ def _run_domain(
     """
     adapter = importlib.import_module(_ADAPTER_MODULES[model_name])
 
-    template = prompt_str if prompt_str is not None else _load_prompt(_DOMAIN_PROMPTS[domain])
+    template = (
+        prompt_str if prompt_str is not None else _load_prompt(_DOMAIN_PROMPTS[domain])
+    )
     style = pub_config.get("style_rules", {})
     system = _render_prompt(
         template,
@@ -323,7 +348,9 @@ def _run_domain(
     api_key = api_keys.get(model_name, {}).get("api_key", "")
 
     result = adapter.call(
-        system, user, api_key,
+        system,
+        user,
+        api_key,
         retry=pipeline_cfg.get("retry_on_failure", True),
         retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
         provider_config=model_configs.get(model_name, {}),
@@ -336,6 +363,7 @@ def _run_domain(
 # ---------------------------------------------------------------------------
 # Draft mode
 # ---------------------------------------------------------------------------
+
 
 def _global_ceiling(per_task_timeouts, retry_delay):
     """Outer wall-clock bound for the whole parallel batch.
@@ -351,8 +379,16 @@ def _global_ceiling(per_task_timeouts, retry_delay):
     return max(per_task_timeouts) + retry_delay + 30
 
 
-def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cost_preset=None,
-                       no_timeout=False, only_model=None, only_domain=None, handoff=None):
+def run_draft_pipeline(
+    handoff_path,
+    publication_name,
+    config_dir="configs",
+    cost_preset=None,
+    no_timeout=False,
+    only_model=None,
+    only_domain=None,
+    handoff=None,
+):
     """Run the full draft review pipeline.
 
     Normally ``handoff_path`` points at a handoff document that is read and
@@ -393,14 +429,14 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
             "Consider re-checking for newer models."
         )
 
-    api_keys     = config["api_keys"]
+    api_keys = config["api_keys"]
     pipeline_cfg = config["pipeline"]
-    pub_config   = config["publication"]
-    delta_cfg    = config["delta"]
+    pub_config = config["publication"]
+    delta_cfg = config["delta"]
     ensemble_cfg = config.get("ensemble", {})
     model_configs = config.get("models", {})
-    task_timeout  = pipeline_cfg.get("task_timeout_seconds", 180)
-    thoroughness  = pipeline_cfg.get("thoroughness", "standard")
+    task_timeout = pipeline_cfg.get("task_timeout_seconds", 180)
+    thoroughness = pipeline_cfg.get("thoroughness", "standard")
 
     if handoff is None:
         log.info(f"Parsing draft submission: {handoff_path}")
@@ -416,10 +452,10 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
         )
         sys.exit(1)
 
-    run_start_ts  = datetime.now(timezone.utc)
-    run_number   = handoff.get("run_number", 1)
+    run_start_ts = datetime.now(timezone.utc)
+    run_number = handoff.get("run_number", 1)
     article_title = handoff.get("title", "Untitled")
-    lt_config    = pub_config.get("languagetool", {})
+    lt_config = pub_config.get("languagetool", {})
 
     # Pass 1: LanguageTool grammar correction (optional)
     grammar_enabled = pipeline_cfg.get("grammar_pass", True)
@@ -428,15 +464,28 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
 
     if not grammar_enabled:
         log.info("Pass 1: Grammar pass disabled (grammar_pass: false) — skipping.")
-        lt_result = {"failed": True, "skipped": True, "change_log": [], "flagged_matches": []}
+        lt_result = {
+            "failed": True,
+            "skipped": True,
+            "change_log": [],
+            "flagged_matches": [],
+        }
         corrected_draft = handoff["draft"]
     elif not lt_has_creds:
-        log.info("Pass 1: No LanguageTool credentials configured — skipping grammar pass.")
-        lt_result = {"failed": True, "skipped": True, "change_log": [], "flagged_matches": []}
+        log.info(
+            "Pass 1: No LanguageTool credentials configured — skipping grammar pass."
+        )
+        lt_result = {
+            "failed": True,
+            "skipped": True,
+            "change_log": [],
+            "flagged_matches": [],
+        }
         corrected_draft = handoff["draft"]
     else:
         log.info("Pass 1: LanguageTool grammar correction")
         from .adapters.grammar import languagetool as lt
+
         lt_result = lt.run(
             handoff["draft"],
             lt_config,
@@ -473,31 +522,48 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
     link_check_enabled = pipeline_cfg.get("link_validation", True)
     if link_check_enabled:
         from .analysis import links as links_analysis
+
         check_wayback_links = pipeline_cfg.get("wayback_link_check", True)
         # Use `is not None` rather than `or` so an explicit 0 isn't coalesced to the default.
         wayback_stale_days = pipeline_cfg.get("wayback_snapshot_stale_days")
         if wayback_stale_days is not None:
             wayback_stale_days = int(wayback_stale_days)
-        log.info("Link validation: scanning for URLs%s", " + Wayback check" if check_wayback_links else "")
+        log.info(
+            "Link validation: scanning for URLs%s",
+            " + Wayback check" if check_wayback_links else "",
+        )
         pre_analysis["links"] = links_analysis.validate_links(
-            corrected_draft, check_wayback=check_wayback_links,
+            corrected_draft,
+            check_wayback=check_wayback_links,
             wayback_stale_days=wayback_stale_days,
         )
         broken = [r for r in pre_analysis["links"] if not r.get("ok")]
-        not_archived = [r for r in pre_analysis["links"] if r.get("wayback", {}).get("archived") is False]
+        not_archived = [
+            r
+            for r in pre_analysis["links"]
+            if r.get("wayback", {}).get("archived") is False
+        ]
         log.info(
             "Links: %d found, %d broken/error, %d not archived in Wayback",
-            len(pre_analysis["links"]), len(broken), len(not_archived),
+            len(pre_analysis["links"]),
+            len(broken),
+            len(not_archived),
         )
     else:
         pre_analysis["links"] = []
 
     pre_analysis["seo"] = seo_analysis.analyze(
-        corrected_draft, handoff, seo_rules=pub_config.get("seo_rules"),
+        corrected_draft,
+        handoff,
+        seo_rules=pub_config.get("seo_rules"),
     )
     seo_issues = pre_analysis["seo"]["issues"]
     if seo_issues:
-        log.info("SEO: %d issue(s): %s", len(seo_issues), "; ".join(i["type"] for i in seo_issues))
+        log.info(
+            "SEO: %d issue(s): %s",
+            len(seo_issues),
+            "; ".join(i["type"] for i in seo_issues),
+        )
     else:
         log.info("SEO: no issues detected")
 
@@ -529,7 +595,9 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
             CALIBRATION_TIMEOUT,
         )
     else:
-        computed_timeouts = timeout_model.compute_all(char_count, model_configs, task_timeout)
+        computed_timeouts = timeout_model.compute_all(
+            char_count, model_configs, task_timeout
+        )
         for _prov, _t in computed_timeouts.items():
             if isinstance(model_configs.get(_prov), dict):
                 model_configs[_prov]["timeout_seconds"] = _t
@@ -548,7 +616,9 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
     assignments = _build_assignments(thoroughness, model_configs, api_keys)
 
     # Custom publication-defined domains
-    custom_assignments, custom_prompts = _build_custom_assignments(pub_config, model_configs, api_keys)
+    custom_assignments, custom_prompts = _build_custom_assignments(
+        pub_config, model_configs, api_keys
+    )
     if custom_assignments:
         log.info("Custom domains: %d assignment(s)", len(custom_assignments))
         for model_name, domain in custom_assignments:
@@ -573,7 +643,8 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
         log.error(
             "No assignments match the calibration filters (--only-model=%r --only-domain=%r). "
             "Check spelling against the configured models and domain names.",
-            only_model, only_domain,
+            only_model,
+            only_domain,
         )
         sys.exit(1)
 
@@ -593,8 +664,14 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
         (
             f"{model_name}:{domain}",
             lambda m=model_name, d=domain, ps=custom_prompts.get(domain): _run_domain(
-                m, d, corrected_draft, handoff,
-                pub_config, api_keys, pipeline_cfg, model_configs,
+                m,
+                d,
+                corrected_draft,
+                handoff,
+                pub_config,
+                api_keys,
+                pipeline_cfg,
+                model_configs,
                 prompt_str=ps,
             ),
         )
@@ -628,7 +705,9 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
                     inner_future.cancel()
                     raise TimeoutError(f"Timed out after {timeout}s")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(runner_timeouts)) as executor:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(runner_timeouts)
+        ) as executor:
             future_to_name = {
                 executor.submit(_run_with_timeout, fn, timeout, name): name
                 for name, fn, timeout in runner_timeouts
@@ -640,7 +719,9 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
             for future in not_done:
                 name = future_to_name[future]
                 future.cancel()
-                log.error(f"Review pass {name} exceeded global ceiling {global_ceiling}s and was cancelled.")
+                log.error(
+                    f"Review pass {name} exceeded global ceiling {global_ceiling}s and was cancelled."
+                )
                 raw_results[name] = {
                     "failed": True,
                     "error": f"Exceeded global timeout of {global_ceiling}s",
@@ -686,7 +767,7 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
     results: dict[tuple[str, str], dict] = {}
     for result in raw_results.values():
         model_name = result.get("_model", "unknown")
-        domain     = result.get("_domain", "unknown")
+        domain = result.get("_domain", "unknown")
         results[(model_name, domain)] = result
 
     # Build API call log. Each entry also carries the calibration inputs (effort,
@@ -700,35 +781,54 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
         if result.get("fallback_from"):
             model_tag = f"{model_tag} [FALLBACK from {result['fallback_from']}]"
         grounding = " [grounded]" if result.get("grounding_available") else ""
-        mcfg = model_configs.get(model_name) if isinstance(model_configs.get(model_name), dict) else {}
-        effort = (mcfg or {}).get("reasoning_effort") or (mcfg or {}).get("effort") or "none"
+        mcfg = (
+            model_configs.get(model_name)
+            if isinstance(model_configs.get(model_name), dict)
+            else {}
+        )
+        effort = (
+            (mcfg or {}).get("reasoning_effort") or (mcfg or {}).get("effort") or "none"
+        )
         budget = (mcfg or {}).get("timeout_seconds")
         elapsed = result.get("elapsed_seconds")
         out_tokens = (result.get("tokens") or {}).get("completion")
         timed_out = "timed out" in str(result.get("error", "")).lower()
         status = "ok" if status_ok else ("timeout" if timed_out else "failed")
-        headroom = round(budget - elapsed, 1) if (budget is not None and elapsed is not None) else None
-        api_call_log.append({
-            "pass": f"{model_name}:{domain}",
-            "model": f"{model_tag}{grounding}",
-            "failed": not status_ok,
-            "tokens": result.get("tokens", {}),
-            "elapsed_seconds": elapsed,
-            "error": result.get("error") if not status_ok else None,
-            # calibration fields
-            "effort": effort,
-            "timeout_budget_seconds": budget,
-            "headroom_seconds": headroom,
-            "char_count": char_count,
-            "status": status,
-        })
+        headroom = (
+            round(budget - elapsed, 1)
+            if (budget is not None and elapsed is not None)
+            else None
+        )
+        api_call_log.append(
+            {
+                "pass": f"{model_name}:{domain}",
+                "model": f"{model_tag}{grounding}",
+                "failed": not status_ok,
+                "tokens": result.get("tokens", {}),
+                "elapsed_seconds": elapsed,
+                "error": result.get("error") if not status_ok else None,
+                # calibration fields
+                "effort": effort,
+                "timeout_budget_seconds": budget,
+                "headroom_seconds": headroom,
+                "char_count": char_count,
+                "status": status,
+            }
+        )
         # Machine-facing structured record — one grep-able line per call, persisted
         # to pipeline_history/pipeline_<date>.log for cross-run calibration analysis.
         log.info(
             "[CALIBRATION] model=%s domain=%s effort=%s chars=%s budget=%ss "
             "elapsed=%ss out_tokens=%s status=%s headroom=%ss",
-            model_tag.split(" ")[0], domain, effort, char_count,
-            budget, elapsed, out_tokens, status, headroom,
+            model_tag.split(" ")[0],
+            domain,
+            effort,
+            char_count,
+            budget,
+            elapsed,
+            out_tokens,
+            status,
+            headroom,
         )
         if status_ok:
             log.info(
@@ -767,12 +867,21 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
     # Pass 3: Citation resolution — extract factual claims from fact-check results
     citation_sources = pub_config.get("citation_sources", [])
     if citation_sources:
-        log.info("Pass 3: Citation resolution (%d source adapters configured)", len(citation_sources))
+        log.info(
+            "Pass 3: Citation resolution (%d source adapters configured)",
+            len(citation_sources),
+        )
         from .adapters.citation.resolver import resolve_citations
+
         fact_check = report.get("section_2_fact_check") or {}
         # Pull claim text from outdated, contradicted, and unverifiable lists
         claims = []
-        for key in ("outdated", "contradicted", "unverifiable", "primary_source_needed"):
+        for key in (
+            "outdated",
+            "contradicted",
+            "unverifiable",
+            "primary_source_needed",
+        ):
             for item in fact_check.get(key, []):
                 claim = item.get("claim", "")
                 if claim and claim not in claims:
@@ -782,7 +891,8 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
             resolved_count = sum(1 for r in citation_results if r.get("resolved"))
             log.info(
                 "Citations: %d claim(s), %d resolved to primary sources",
-                len(claims), resolved_count,
+                len(claims),
+                resolved_count,
             )
         else:
             citation_results = []
@@ -797,7 +907,9 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
     log.info(
         "Estimated cost: $%.4f (%s)",
         cost_summary["total_usd"],
-        "exact" if cost_summary["pricing_known"] else "estimated — some model prices unknown",
+        "exact"
+        if cost_summary["pricing_known"]
+        else "estimated — some model prices unknown",
     )
 
     # Attach pre-analysis
@@ -821,8 +933,11 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
     report["model_currency"] = currency
 
     paths = hist.save_run(
-        HISTORY_ROOT, article_title, run_number,
-        report, lt_result.get("change_log", []),
+        HISTORY_ROOT,
+        article_title,
+        run_number,
+        report,
+        lt_result.get("change_log", []),
         run_ts=run_start_ts,
     )
     if paths["report_path"]:
@@ -838,6 +953,7 @@ def run_draft_pipeline(handoff_path, publication_name, config_dir="configs", cos
 # Summary printer
 # ---------------------------------------------------------------------------
 
+
 def _print_draft_summary(report, delta_cfg, elapsed_total=None):
     print("\n" + "=" * 60)
     print(f"REVIEW COMPLETE: {report['article_title']}")
@@ -852,14 +968,22 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
     print("=" * 60)
 
     if report.get("model_failures"):
-        print(f"\nWARNING: These model passes failed: {', '.join(report['model_failures'])}")
+        print(
+            f"\nWARNING: These model passes failed: {', '.join(report['model_failures'])}"
+        )
 
     if report.get("fallback_warnings"):
         print(f"\n{'!' * 60}")
-        print("WARNING: One or more passes ran on fallback models due to capacity limits.")
-        print("Results from fallback models may be less thorough than preferred models.")
+        print(
+            "WARNING: One or more passes ran on fallback models due to capacity limits."
+        )
+        print(
+            "Results from fallback models may be less thorough than preferred models."
+        )
         for fw in report["fallback_warnings"]:
-            print(f"  {fw['pass']}: ran on '{fw['used']}' (preferred: '{fw['requested']}')")
+            print(
+                f"  {fw['pass']}: ran on '{fw['used']}' (preferred: '{fw['requested']}')"
+            )
         print("Re-run when preferred models are available to confirm findings.")
         print("!" * 60)
 
@@ -870,12 +994,16 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
             print("MODEL CURRENCY: Outdated model(s) detected — update user.yaml")
             for w in currency["warnings"]:
                 note = f" ({w['note']})" if w.get("note") else ""
-                print(f"  {w['provider']}: {w['model']!r} → replace with {w['replacement']!r}{note}")
+                print(
+                    f"  {w['provider']}: {w['model']!r} → replace with {w['replacement']!r}{note}"
+                )
             print("!" * 60)
         if currency.get("notices"):
             print("\nModel upgrades available (optional):")
             for n in currency["notices"]:
-                print(f"  {n['provider']}: {n['model']!r} — {n.get('note') or 'newer: ' + n['newer']}")
+                print(
+                    f"  {n['provider']}: {n['model']!r} — {n.get('note') or 'newer: ' + n['newer']}"
+                )
         age = currency.get("registry_age_days", 0)
         reg_date = currency.get("registry_date", "unknown")
         if currency.get("registry_warning"):
@@ -892,18 +1020,26 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
                 "Consider re-checking for newer models."
             )
         else:
-            print(f"\nModel registry: current (last updated {reg_date}, {age} days ago)")
+            print(
+                f"\nModel registry: current (last updated {reg_date}, {age} days ago)"
+            )
 
     if report.get("lt_skipped"):
-        print("\nGrammar pass: skipped (no LanguageTool credentials — run manual Grammarly pass before publishing)")
+        print(
+            "\nGrammar pass: skipped (no LanguageTool credentials — run manual Grammarly pass before publishing)"
+        )
     elif report.get("lt_failed"):
         print("\nWARNING: LanguageTool failed — draft not grammar-corrected")
     else:
-        print(f"\nLanguageTool: {len(report['lt_corrections_applied'])} corrections applied")
+        print(
+            f"\nLanguageTool: {len(report['lt_corrections_applied'])} corrections applied"
+        )
 
     print(f"\nSection 1 — Consensus flags: {len(report['section_1_consensus'])}")
     fact = report["section_2_fact_check"]
-    fact_count = sum(len(v) for v in fact.values() if isinstance(v, list)) if fact else 0
+    fact_count = (
+        sum(len(v) for v in fact.values() if isinstance(v, list)) if fact else 0
+    )
     print(f"Section 2 — Fact check items: {fact_count}")
     print(f"Section 3 — Voice flags: {len(report['section_3_voice'])}")
     print(f"Section 4 — Argument flags: {len(report['section_4_argument'])}")
@@ -918,7 +1054,9 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
         n_src = len(rt)
         _rt_display = f"{n_src * 3} findings ({n_src} sources)"
     print(f"Section 6 — Red team: {_rt_display}")
-    print(f"Section 7 — Low-confidence flags: {len(report['section_7_low_confidence'])}")
+    print(
+        f"Section 7 — Low-confidence flags: {len(report['section_7_low_confidence'])}"
+    )
 
     additional = report.get("section_8_additional", [])
     if additional:
@@ -927,7 +1065,9 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
             cat = obs.get("category", "unknown")
             by_cat[cat] = by_cat.get(cat, 0) + 1
         cat_summary = ", ".join(f"{c}: {n}" for c, n in sorted(by_cat.items()))
-        print(f"Section 8 — Cross-model observations: {len(additional)} ({cat_summary})")
+        print(
+            f"Section 8 — Cross-model observations: {len(additional)} ({cat_summary})"
+        )
     else:
         print("Section 8 — Cross-model observations: 0")
 
@@ -953,8 +1093,14 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
         links = pre.get("links", [])
         if links:
             broken = [lk for lk in links if not lk.get("ok")]
-            not_archived = [lk for lk in links if lk.get("wayback", {}).get("archived") is False]
-            stale_archive = [lk for lk in links if lk.get("wayback", {}).get("snapshot_stale") is True]
+            not_archived = [
+                lk for lk in links if lk.get("wayback", {}).get("archived") is False
+            ]
+            stale_archive = [
+                lk
+                for lk in links
+                if lk.get("wayback", {}).get("snapshot_stale") is True
+            ]
             print(f"\nLinks: {len(links)} found", end="")
             if broken:
                 print(f", {len(broken)} broken/error", end="")
@@ -964,14 +1110,22 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
                 print(f", {len(stale_archive)} stale archive", end="")
             print()
             for lk in links:
-                status = "OK" if lk.get("ok") else f"BROKEN ({lk.get('status_code') or lk.get('error', '?')})"
+                status = (
+                    "OK"
+                    if lk.get("ok")
+                    else f"BROKEN ({lk.get('status_code') or lk.get('error', '?')})"
+                )
                 wb = lk.get("wayback", {})
                 age = wb.get("snapshot_age_days")
                 if wb.get("is_archive_url"):
                     # The cited link is itself a Wayback snapshot; HTTP status (OK/BROKEN
                     # above) is the functional check. Flag staleness from its own timestamp.
                     stale = " STALE" if wb.get("snapshot_stale") else ""
-                    wb_str = f"archive link{stale} ({age}d)" if age is not None else "archive link"
+                    wb_str = (
+                        f"archive link{stale} ({age}d)"
+                        if age is not None
+                        else "archive link"
+                    )
                 elif wb.get("archived") is False:
                     wb_str = "not archived"
                 elif wb.get("snapshot_stale"):
@@ -981,21 +1135,31 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
                 else:
                     wb_str = ""
                 extras = f"  [{wb_str}]" if wb_str else ""
-                redirect = f" → {lk['redirected_to']}" if lk.get("redirected_to") else ""
+                redirect = (
+                    f" → {lk['redirected_to']}" if lk.get("redirected_to") else ""
+                )
                 print(f"  {status:30s} {lk['url'][:60]}{redirect}{extras}")
 
     if report.get("api_call_log"):
         print("\nAPI call times  (elapsed / budget — headroom shows timeout margin):")
         for entry in report["api_call_log"]:
             status = "OK" if not entry["failed"] else "FAILED"
-            elapsed = f"{entry['elapsed_seconds']}s" if entry.get("elapsed_seconds") is not None else "?"
+            elapsed = (
+                f"{entry['elapsed_seconds']}s"
+                if entry.get("elapsed_seconds") is not None
+                else "?"
+            )
             budget = entry.get("timeout_budget_seconds")
             head = entry.get("headroom_seconds")
             budget_str = f"/{budget}s" if budget is not None else ""
             head_str = f"(+{head}s)" if head is not None else ""
             effort = entry.get("effort", "")
             tokens = entry.get("tokens", {})
-            tok_str = f"{tokens.get('prompt', 0)}+{tokens.get('completion', 0)} tok" if tokens else ""
+            tok_str = (
+                f"{tokens.get('prompt', 0)}+{tokens.get('completion', 0)} tok"
+                if tokens
+                else ""
+            )
             print(
                 f"  {entry['pass']:30s} {status:6s} {elapsed:>8s}{budget_str:>7s} {head_str:>10s}  "
                 f"{entry['model']}  effort={effort}  {tok_str}"
@@ -1003,34 +1167,48 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
 
     delta = report.get("delta")
     if delta:
-        print(f"\nDelta from prior run:")
+        print("\nDelta from prior run:")
         print(f"  Word change: {delta['word_change_pct']}%")
-        print(f"  Resolved consensus flags: {delta['resolved_consensus_count']}/{delta['prior_consensus_count']}")
+        print(
+            f"  Resolved consensus flags: {delta['resolved_consensus_count']}/{delta['prior_consensus_count']}"
+        )
         print(f"  New consensus flags: {delta['new_consensus_count']}")
         if delta.get("claim_changed"):
-            print(f"  Primary claim: CHANGED since prior run")
+            print("  Primary claim: CHANGED since prior run")
         if delta.get("structure_changed"):
-            print(f"  Heading structure: CHANGED since prior run")
+            print("  Heading structure: CHANGED since prior run")
         if consolidation.rerun_recommended(delta, delta_cfg):
-            print("\n  RECOMMENDATION: Re-run after editing (significant changes detected)")
+            print(
+                "\n  RECOMMENDATION: Re-run after editing (significant changes detected)"
+            )
         else:
-            print("\n  RECOMMENDATION: Draft appears stable — proceed to Grammarly pass")
+            print(
+                "\n  RECOMMENDATION: Draft appears stable — proceed to Grammarly pass"
+            )
 
     # Cost summary
     cost = report.get("cost_summary")
     if cost:
-        known_flag = "" if cost["pricing_known"] else " (estimated — unknown model in pricing table)"
+        known_flag = (
+            ""
+            if cost["pricing_known"]
+            else " (estimated — unknown model in pricing table)"
+        )
         print(f"\nEstimated cost: ${cost['total_usd']:.4f}{known_flag}")
         if cost.get("by_pass"):
             for entry in cost["by_pass"]:
                 if entry["total_usd"] > 0:
-                    print(f"  {entry['pass']:30s}  ${entry['total_usd']:.4f}  {entry['model']}")
+                    print(
+                        f"  {entry['pass']:30s}  ${entry['total_usd']:.4f}  {entry['model']}"
+                    )
 
     # Contradiction summary
     contradictions = report.get("contradictions", [])
     if contradictions:
         print(f"\n{'!' * 60}")
-        print(f"FACT-CHECK CONTRADICTIONS: {len(contradictions)} claim(s) confirmed by one model, challenged by another")
+        print(
+            f"FACT-CHECK CONTRADICTIONS: {len(contradictions)} claim(s) confirmed by one model, challenged by another"
+        )
         for c in contradictions:
             print(
                 f"  [{c['challenge_type'].upper()}] confirmed by {', '.join(c['confirmed_by'])}; "
@@ -1043,15 +1221,23 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
     citations = report.get("section_9_citations", [])
     if citations:
         resolved = [c for c in citations if c.get("resolved")]
-        not_archived = [c for c in resolved if c.get("wayback", {}).get("archived") is False]
+        not_archived = [
+            c for c in resolved if c.get("wayback", {}).get("archived") is False
+        ]
         stale = [c for c in resolved if c.get("wayback", {}).get("snapshot_stale")]
         print(f"\nSection 9 — Citations: {len(resolved)}/{len(citations)} resolved")
         if not_archived:
-            print(f"  {len(not_archived)} resolved URL(s) not yet archived in Wayback Machine")
+            print(
+                f"  {len(not_archived)} resolved URL(s) not yet archived in Wayback Machine"
+            )
         if stale:
-            print(f"  {len(stale)} resolved URL(s) have a stale Wayback snapshot (>180 days)")
+            print(
+                f"  {len(stale)} resolved URL(s) have a stale Wayback snapshot (>180 days)"
+            )
 
-    print(f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/")
+    print(
+        f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/"
+    )
     print("=" * 60)
 
 
@@ -1059,7 +1245,10 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
 # Publish mode
 # ---------------------------------------------------------------------------
 
-def run_publish_pipeline(handoff_path, publication_name, publish_live=False, config_dir="configs"):
+
+def run_publish_pipeline(
+    handoff_path, publication_name, publish_live=False, config_dir="configs"
+):
     log.info(f"Loading configs (publication={publication_name})")
     user_config = load_user_config(config_dir)
     pub_config_raw = load_publication_config(publication_name, config_dir)
@@ -1088,8 +1277,14 @@ def run_publish_pipeline(handoff_path, publication_name, publish_live=False, con
 
     pub_params = {
         "title": pub_handoff.get("title", ""),
-        "wordpress_category": pub_handoff["publication_parameters"].get("wordpress_category"),
-        "tags": [t.strip() for t in pub_handoff["publication_parameters"].get("tags", "").split(",") if t.strip()],
+        "wordpress_category": pub_handoff["publication_parameters"].get(
+            "wordpress_category"
+        ),
+        "tags": [
+            t.strip()
+            for t in pub_handoff["publication_parameters"].get("tags", "").split(",")
+            if t.strip()
+        ],
         "author": pub_handoff["publication_parameters"].get("author"),
         "seo": pub_handoff.get("seo", {}),
     }
@@ -1097,13 +1292,17 @@ def run_publish_pipeline(handoff_path, publication_name, publish_live=False, con
     content = pub_handoff["final_draft"]
 
     log.info(f"Pushing to WordPress (status={'publish' if publish_live else 'draft'})")
-    result = wp.push(content, pub_params, wp_config, rank_math_config, publish_live=publish_live)
+    result = wp.push(
+        content, pub_params, wp_config, rank_math_config, publish_live=publish_live
+    )
 
     if result["success"]:
-        print(f"\nWordPress push successful.")
+        print("\nWordPress push successful.")
         print(f"Post URL: {result['post_url']}")
         print(f"Post ID:  {result['post_id']}")
-        print(f"Status:   {'PUBLISHED' if publish_live else 'DRAFT (pass --publish-live to publish)'}")
+        print(
+            f"Status:   {'PUBLISHED' if publish_live else 'DRAFT (pass --publish-live to publish)'}"
+        )
     else:
         print(f"\nWordPress push FAILED: {result['error']}")
         sys.exit(1)
@@ -1112,6 +1311,7 @@ def run_publish_pipeline(handoff_path, publication_name, publish_live=False, con
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1126,36 +1326,61 @@ def main():
         ),
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--draft", metavar="HANDOFF_PATH", help="Path to draft submission handoff document")
-    group.add_argument("--url", metavar="URL", help="Fetch a published web page and run the review on its extracted content")
-    group.add_argument("--publish", metavar="HANDOFF_PATH", help="Path to publication handoff document")
-    parser.add_argument("--publication", required=True, help="Publication config name (without .yaml)")
-    parser.add_argument("--publish-live", action="store_true", help="Publish to live (default: save as draft)")
-    parser.add_argument("--config-dir", default="configs", help="Directory containing config files")
+    group.add_argument(
+        "--draft",
+        metavar="HANDOFF_PATH",
+        help="Path to draft submission handoff document",
+    )
+    group.add_argument(
+        "--url",
+        metavar="URL",
+        help="Fetch a published web page and run the review on its extracted content",
+    )
+    group.add_argument(
+        "--publish", metavar="HANDOFF_PATH", help="Path to publication handoff document"
+    )
+    parser.add_argument(
+        "--publication", required=True, help="Publication config name (without .yaml)"
+    )
+    parser.add_argument(
+        "--publish-live",
+        action="store_true",
+        help="Publish to live (default: save as draft)",
+    )
+    parser.add_argument(
+        "--config-dir", default="configs", help="Directory containing config files"
+    )
     parser.add_argument(
         "--cost-preset",
         choices=["economy", "standard", "balanced", "thorough", "maximum"],
         help="Override cost_preset from user.yaml for this run only (useful for calibration sweeps)",
     )
     parser.add_argument(
-        "--no-timeout", action="store_true",
+        "--no-timeout",
+        action="store_true",
         help="Calibration: disable timeout truncation so true completion times are measured",
     )
     parser.add_argument(
-        "--only-model", metavar="PROVIDER",
+        "--only-model",
+        metavar="PROVIDER",
         help="Calibration: run only this provider (e.g. openai) instead of the full ensemble",
     )
     parser.add_argument(
-        "--only-domain", metavar="DOMAIN",
+        "--only-domain",
+        metavar="DOMAIN",
         help="Calibration: run only this domain (e.g. fact_check, voice_style, completeness, "
-             "argument_integrity, red_team)",
+        "argument_integrity, red_team)",
     )
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG logging")
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
+    )
 
     args = parser.parse_args()
 
     if args.publish_live and args.draft:
-        print("WARNING: --publish-live has no effect in --draft mode and will be ignored.")
+        print(
+            "WARNING: --publish-live has no effect in --draft mode and will be ignored."
+        )
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -1167,11 +1392,16 @@ def main():
     _log_dir = Path(HISTORY_ROOT)
     _log_dir.mkdir(parents=True, exist_ok=True)
     _log_date = datetime.now(timezone.utc).strftime("%Y%m%d")
-    _file_handler = logging.FileHandler(_log_dir / f"pipeline_{_log_date}.log", encoding="utf-8")
+    _file_handler = logging.FileHandler(
+        _log_dir / f"pipeline_{_log_date}.log", encoding="utf-8"
+    )
     _file_handler.setLevel(logging.DEBUG if args.verbose else logging.INFO)
-    _file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
-    ))
+    _file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    )
     logging.getLogger().addHandler(_file_handler)
 
     try:
@@ -1183,23 +1413,30 @@ def main():
     try:
         if args.draft:
             run_draft_pipeline(
-                args.draft, args.publication,
-                config_dir=args.config_dir, cost_preset=args.cost_preset,
+                args.draft,
+                args.publication,
+                config_dir=args.config_dir,
+                cost_preset=args.cost_preset,
                 no_timeout=args.no_timeout,
-                only_model=args.only_model, only_domain=args.only_domain,
+                only_model=args.only_model,
+                only_domain=args.only_domain,
             )
         elif args.url:
             handoff = build_handoff_from_url(args.url)
             run_draft_pipeline(
-                None, args.publication,
-                config_dir=args.config_dir, cost_preset=args.cost_preset,
+                None,
+                args.publication,
+                config_dir=args.config_dir,
+                cost_preset=args.cost_preset,
                 no_timeout=args.no_timeout,
-                only_model=args.only_model, only_domain=args.only_domain,
+                only_model=args.only_model,
+                only_domain=args.only_domain,
                 handoff=handoff,
             )
         elif args.publish:
             run_publish_pipeline(
-                args.publish, args.publication,
+                args.publish,
+                args.publication,
                 publish_live=args.publish_live,
                 config_dir=args.config_dir,
             )

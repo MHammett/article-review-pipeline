@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_capacity_error(exc):
     """Return True if the exception represents a 503 capacity/availability error."""
     return "503" in str(exc)
@@ -70,6 +71,7 @@ def _resolve_model(model_arg, cfg):
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def call(
     system_prompt,
@@ -91,16 +93,25 @@ def call(
 
     if provider == "azure":
         return _call_azure(
-            system_prompt, user_prompt, api_key, cfg,
-            retry=retry, retry_delay=retry_delay, timeout=timeout,
+            system_prompt,
+            user_prompt,
+            api_key,
+            cfg,
+            retry=retry,
+            retry_delay=retry_delay,
+            timeout=timeout,
         )
 
     # web_search: true → try Responses API with live search, fall back if unavailable
     if cfg.get("web_search"):
         requested_model = _resolve_model(model, cfg)
         result = _call_with_web_search(
-            system_prompt, user_prompt, api_key,
-            model=requested_model, retry=retry, retry_delay=retry_delay,
+            system_prompt,
+            user_prompt,
+            api_key,
+            model=requested_model,
+            retry=retry,
+            retry_delay=retry_delay,
             timeout=timeout,
         )
         if not result.get("failed"):
@@ -114,14 +125,21 @@ def call(
     # --- openai.com path with fallback chain ---
     requested_model = _resolve_model(model, cfg)
     reasoning_effort = cfg.get("reasoning_effort")
-    models_to_try = [requested_model] + [m for m in _FALLBACK_MODELS if m != requested_model]
+    models_to_try = [requested_model] + [
+        m for m in _FALLBACK_MODELS if m != requested_model
+    ]
 
     result = None
     for attempt_model in models_to_try:
         result = _call_openai(
-            system_prompt, user_prompt, api_key,
-            model=attempt_model, retry=retry, retry_delay=retry_delay,
-            reasoning_effort=reasoning_effort, timeout=timeout,
+            system_prompt,
+            user_prompt,
+            api_key,
+            model=attempt_model,
+            retry=retry,
+            retry_delay=retry_delay,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -132,8 +150,13 @@ def call(
                     f"Review quality may be reduced."
                 )
             return result
-        if _is_capacity_error(result.get("error", "")) and attempt_model != models_to_try[-1]:
-            log.warning(f"OpenAI {attempt_model} unavailable (capacity). Trying next fallback model.")
+        if (
+            _is_capacity_error(result.get("error", ""))
+            and attempt_model != models_to_try[-1]
+        ):
+            log.warning(
+                f"OpenAI {attempt_model} unavailable (capacity). Trying next fallback model."
+            )
             continue
         return result
 
@@ -144,7 +167,10 @@ def call(
 # OpenAI Responses API (web search)
 # ---------------------------------------------------------------------------
 
-def _call_with_web_search(system_prompt, user_prompt, api_key, model, retry, retry_delay, timeout=None):
+
+def _call_with_web_search(
+    system_prompt, user_prompt, api_key, model, retry, retry_delay, timeout=None
+):
     """Call via the OpenAI Responses API with the web_search_preview tool.
 
     The Responses API has a different payload and response shape from chat
@@ -173,7 +199,13 @@ def _call_with_web_search(system_prompt, user_prompt, api_key, model, retry, ret
     t0 = time.monotonic()
 
     def _post():
-        resp = session.post(OPENAI_RESPONSES_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            OPENAI_RESPONSES_URL,
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=timeout,
+        )
         if resp.status_code in (429, 500, 502, 503, 504) and retry:
             log.warning(
                 f"OpenAI Responses API {model} HTTP {resp.status_code}. "
@@ -181,7 +213,13 @@ def _call_with_web_search(system_prompt, user_prompt, api_key, model, retry, ret
             )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(OPENAI_RESPONSES_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                OPENAI_RESPONSES_URL,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
         resp.raise_for_status()
         return resp
 
@@ -218,7 +256,9 @@ def _call_with_web_search(system_prompt, user_prompt, api_key, model, retry, ret
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError:
-            log.warning(f"OpenAI (web search) {model} returned non-JSON content after {elapsed}s")
+            log.warning(
+                f"OpenAI (web search) {model} returned non-JSON content after {elapsed}s"
+            )
             return {
                 "failed": True,
                 "error": "Malformed JSON response",
@@ -247,7 +287,17 @@ def _call_with_web_search(system_prompt, user_prompt, api_key, model, retry, ret
 # openai.com backend
 # ---------------------------------------------------------------------------
 
-def _call_openai(system_prompt, user_prompt, api_key, model, retry=True, retry_delay=10, reasoning_effort=None, timeout=None):
+
+def _call_openai(
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry=True,
+    retry_delay=10,
+    reasoning_effort=None,
+    timeout=None,
+):
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -277,8 +327,13 @@ def _call_openai(system_prompt, user_prompt, api_key, model, retry=True, retry_d
         return p
 
     result = _execute_request(
-        headers, _build_payload(True), model, api_key=api_key,
-        url=OPENAI_API_URL, retry=retry, retry_delay=retry_delay,
+        headers,
+        _build_payload(True),
+        model,
+        api_key=api_key,
+        url=OPENAI_API_URL,
+        retry=retry,
+        retry_delay=retry_delay,
         timeout=timeout,
     )
 
@@ -286,8 +341,11 @@ def _call_openai(system_prompt, user_prompt, api_key, model, retry=True, retry_d
     # This is a MISCONFIGURATION: the preset specifies a reasoning model (o4-mini, o3)
     # but user.yaml overrides it with a non-reasoning model. Fix by not overriding the
     # model in user.yaml for balanced+ presets, or switching to a standard/economy preset.
-    if (reasoning_effort and result.get("failed")
-            and _is_reasoning_param_error(result.get("error_body", ""))):
+    if (
+        reasoning_effort
+        and result.get("failed")
+        and _is_reasoning_param_error(result.get("error_body", ""))
+    ):
         msg = (
             f"[MISCONFIGURATION] OpenAI {model} rejected reasoning_effort={reasoning_effort!r}. "
             f"Reasoning is only supported on o-series models (o4-mini, o3, etc.). "
@@ -296,8 +354,13 @@ def _call_openai(system_prompt, user_prompt, api_key, model, retry=True, retry_d
         )
         log.error(msg)
         retry_result = _execute_request(
-            headers, _build_payload(False), model, api_key=api_key,
-            url=OPENAI_API_URL, retry=retry, retry_delay=retry_delay,
+            headers,
+            _build_payload(False),
+            model,
+            api_key=api_key,
+            url=OPENAI_API_URL,
+            retry=retry,
+            retry_delay=retry_delay,
             timeout=timeout,
         )
         retry_result["misconfiguration_warning"] = msg
@@ -318,7 +381,10 @@ def _is_reasoning_param_error(body_text):
 # Azure OpenAI backend
 # ---------------------------------------------------------------------------
 
-def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_delay=10, timeout=None):
+
+def _call_azure(
+    system_prompt, user_prompt, api_key, cfg, retry=True, retry_delay=10, timeout=None
+):
     endpoint = cfg.get("endpoint", "").rstrip("/")
     deployment = cfg.get("deployment", "")
     api_version = cfg.get("api_version", "2024-02-01")
@@ -343,7 +409,7 @@ def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_dela
         "Content-Type": "application/json",
     }
     payload = {
-        "model": deployment,   # Azure accepts this; ignored by the service but harmless
+        "model": deployment,  # Azure accepts this; ignored by the service but harmless
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -354,8 +420,13 @@ def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_dela
         "stream_options": {"include_usage": True},
     }
     result = _execute_request(
-        headers, payload, model_name, api_key=None,
-        url=url, retry=retry, retry_delay=retry_delay,
+        headers,
+        payload,
+        model_name,
+        api_key=None,
+        url=url,
+        retry=retry,
+        retry_delay=retry_delay,
         timeout=timeout,
     )
     # Tag so callers know which endpoint was used
@@ -367,19 +438,28 @@ def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_dela
 # Shared HTTP execution
 # ---------------------------------------------------------------------------
 
-def _execute_request(headers, payload, model, api_key, url, retry, retry_delay, timeout=None):
+
+def _execute_request(
+    headers, payload, model, api_key, url, retry, retry_delay, timeout=None
+):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
     session = requests.Session()
     t0 = time.monotonic()
 
     def _post():
-        resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            url, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503, 504) and retry:
-            log.warning(f"OpenAI {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry.")
+            log.warning(
+                f"OpenAI {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry."
+            )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                url, headers=headers, json=payload, stream=True, timeout=timeout
+            )
         resp.raise_for_status()
         return resp
 
@@ -431,7 +511,9 @@ def _execute_request(headers, payload, model, api_key, url, retry, retry_delay, 
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(f"OpenAI {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)")
+    log.debug(
+        f"OpenAI {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
+    )
     return {
         "failed": False,
         "data": parsed,

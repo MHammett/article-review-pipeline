@@ -6,6 +6,7 @@ the full URL — key included — in the exception string.  Printing that string
 to the terminal or a log file leaks the credential.  These helpers scrub keys
 out before any error text is surfaced.
 """
+
 import re
 
 # Matches ?key=..., &apiKey=..., &api_key=... in a URL and replaces the value.
