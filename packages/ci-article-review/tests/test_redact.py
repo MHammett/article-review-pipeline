@@ -1,13 +1,14 @@
 """Tests for redact — secret scrubbing before error output."""
-import sys, os
 
 from ci_article_review.redact import redact_url_keys, redact_value
 
 
 class TestRedactUrlKeys:
     def test_redacts_gemini_key_query_param(self):
-        err = ("HTTPSConnectionPool(host='generativelanguage.googleapis.com', "
-               "port=443): url: /v1beta/models?key=AIzaSyABC_REALKEY123 (Caused by ...)")
+        err = (
+            "HTTPSConnectionPool(host='generativelanguage.googleapis.com', "
+            "port=443): url: /v1beta/models?key=AIzaSyABC_REALKEY123 (Caused by ...)"
+        )
         out = redact_url_keys(err)
         assert "AIzaSyABC_REALKEY123" not in out
         assert "key=[REDACTED]" in out
@@ -35,7 +36,10 @@ class TestRedactUrlKeys:
 
 class TestRedactValue:
     def test_redacts_known_value(self):
-        assert redact_value("error: sk-abc123 failed", "sk-abc123") == "error: [REDACTED] failed"
+        assert (
+            redact_value("error: sk-abc123 failed", "sk-abc123")
+            == "error: [REDACTED] failed"
+        )
 
     def test_no_op_when_value_absent(self):
         assert redact_value("clean message", "sk-abc123") == "clean message"

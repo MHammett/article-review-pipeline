@@ -1,4 +1,5 @@
 """EIA (Energy Information Administration) data resolver."""
+
 import os
 import requests
 import logging
@@ -40,6 +41,16 @@ def resolve(claim, api_key=None):
 
 
 def _extract_keywords(claim):
-    energy_terms = ["electricity", "natural gas", "petroleum", "coal", "renewable",
-                    "kwh", "mwh", "btu", "barrel", "mcf"]
+    energy_terms = [
+        "electricity",
+        "natural gas",
+        "petroleum",
+        "coal",
+        "renewable",
+        "kwh",
+        "mwh",
+        "btu",
+        "barrel",
+        "mcf",
+    ]
     return [t for t in energy_terms if t.lower() in claim.lower()]

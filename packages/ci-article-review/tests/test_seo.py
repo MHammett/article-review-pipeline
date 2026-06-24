@@ -1,15 +1,16 @@
 """Tests for analysis.seo."""
-import sys, os
 
 from ci_article_review.analysis.seo import analyze
 
-_GOOD_ARTICLE = "\n".join([
-    "# A Well-Constructed Article About Important Things",
-    "",
-    "## Introduction",
-    "",
-    " ".join(["word"] * 320),  # 320 words, meets minimum
-])
+_GOOD_ARTICLE = "\n".join(
+    [
+        "# A Well-Constructed Article About Important Things",
+        "",
+        "## Introduction",
+        "",
+        " ".join(["word"] * 320),  # 320 words, meets minimum
+    ]
+)
 
 _HANDOFF_WITH_META = {
     "title": "A Well-Constructed Article About Important Things",
@@ -20,8 +21,16 @@ _HANDOFF_WITH_META = {
 class TestSeoAnalyze:
     def test_returns_all_keys(self):
         result = analyze(_GOOD_ARTICLE, _HANDOFF_WITH_META)
-        for k in ("title", "title_length", "h1_count", "h2_count", "h3_count",
-                   "word_count", "has_meta_description", "issues"):
+        for k in (
+            "title",
+            "title_length",
+            "h1_count",
+            "h2_count",
+            "h3_count",
+            "word_count",
+            "has_meta_description",
+            "issues",
+        ):
             assert k in result, f"missing: {k}"
 
     def test_good_article_no_issues(self):
@@ -71,7 +80,9 @@ class TestSeoAnalyze:
         assert isinstance(result["issues"], list)
 
     def test_h1_falls_back_to_first_heading(self):
-        text = "# A Detected Title Here That Is Long Enough\n\n" + " ".join(["word"] * 320)
+        text = "# A Detected Title Here That Is Long Enough\n\n" + " ".join(
+            ["word"] * 320
+        )
         result = analyze(text, {"seo": {"meta_description": "ok"}})
         assert result["title"] == "A Detected Title Here That Is Long Enough"
 
@@ -85,11 +96,16 @@ class TestSeoRules:
 
     def test_custom_min_words_flags_longer_article(self):
         # 320 words passes the default 300 but fails a custom 500 minimum.
-        result = analyze(_GOOD_ARTICLE, _HANDOFF_WITH_META, seo_rules={"min_article_words": 500})
+        result = analyze(
+            _GOOD_ARTICLE, _HANDOFF_WITH_META, seo_rules={"min_article_words": 500}
+        )
         assert "thin_content" in [i["type"] for i in result["issues"]]
 
     def test_custom_title_min(self):
-        handoff = {"title": "Short title here", "seo": {"meta_description": "fine"}}  # 16 chars
+        handoff = {
+            "title": "Short title here",
+            "seo": {"meta_description": "fine"},
+        }  # 16 chars
         result = analyze(_GOOD_ARTICLE, handoff, seo_rules={"title_min_chars": 30})
         assert "title_too_short" in [i["type"] for i in result["issues"]]
 
@@ -101,7 +117,9 @@ class TestSeoRules:
         assert "title_too_long" not in [i["type"] for i in result["issues"]]
 
     def test_zero_or_negative_rule_falls_back_to_default(self):
-        result = analyze(_GOOD_ARTICLE, _HANDOFF_WITH_META, seo_rules={"min_article_words": 0})
+        result = analyze(
+            _GOOD_ARTICLE, _HANDOFF_WITH_META, seo_rules={"min_article_words": 0}
+        )
         # 0 is invalid → default 300 → 320-word article is not thin
         assert "thin_content" not in [i["type"] for i in result["issues"]]
 

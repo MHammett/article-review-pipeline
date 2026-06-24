@@ -95,14 +95,15 @@ def _lookup_term_ids(api_base, headers, taxonomy, items):
     return resolved
 
 
-def _build_post_payload(pub_params, wp_config, rank_math_config, content,
-                        category_ids, tag_ids):
+def _build_post_payload(
+    pub_params, wp_config, rank_math_config, content, category_ids, tag_ids
+):
     payload = {
-        "title":      pub_params.get("title", ""),
-        "content":    content,
-        "status":     "draft",          # always draft unless --publish-live
+        "title": pub_params.get("title", ""),
+        "content": content,
+        "status": "draft",  # always draft unless --publish-live
         "categories": category_ids,
-        "tags":       tag_ids,
+        "tags": tag_ids,
     }
 
     author = pub_params.get("author")
@@ -112,11 +113,13 @@ def _build_post_payload(pub_params, wp_config, rank_math_config, content,
     # Rank Math SEO meta fields
     meta = {}
     seo = pub_params.get("seo", {})
-    focus_keyword   = seo.get("focus_keyword")
+    focus_keyword = seo.get("focus_keyword")
     meta_description = seo.get("meta_description")
-    og_title        = seo.get("og_title") or pub_params.get("title", "")
-    og_description  = seo.get("og_description") or meta_description
-    schema_type     = seo.get("schema_type") or rank_math_config.get("default_schema_type", "BlogPosting")
+    og_title = seo.get("og_title") or pub_params.get("title", "")
+    og_description = seo.get("og_description") or meta_description
+    schema_type = seo.get("schema_type") or rank_math_config.get(
+        "default_schema_type", "BlogPosting"
+    )
 
     if focus_keyword:
         meta["rank_math_focus_keyword"] = focus_keyword
@@ -145,25 +148,32 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
     site_url = wp_config["site_url"].rstrip("/")
     endpoint = wp_config.get("rest_api_endpoint", "/wp-json/wp/v2")
     api_base = f"{site_url}{endpoint}"
-    username    = wp_config["username"]
+    username = wp_config["username"]
     app_password = wp_config["application_password"]
 
     headers = _auth_header(username, app_password)
     headers["Content-Type"] = "application/json"
-    auth_headers = _auth_header(username, app_password)   # without Content-Type for GETs
+    auth_headers = _auth_header(username, app_password)  # without Content-Type for GETs
 
     # Resolve slugs → IDs before building the post payload
     category_ids = _lookup_term_ids(
-        api_base, auth_headers, "categories",
+        api_base,
+        auth_headers,
+        "categories",
         pub_params.get("wordpress_category"),
     )
     tag_ids = _lookup_term_ids(
-        api_base, auth_headers, "tags",
+        api_base,
+        auth_headers,
+        "tags",
         pub_params.get("tags", []),
     )
 
     payload = _build_post_payload(
-        pub_params, wp_config, rank_math_config, content,
+        pub_params,
+        wp_config,
+        rank_math_config,
+        content,
         category_ids=category_ids,
         tag_ids=tag_ids,
     )
@@ -172,10 +182,12 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
         payload["status"] = "publish"
 
     try:
-        resp = requests.post(f"{api_base}/posts", headers=headers, json=payload, timeout=60)
+        resp = requests.post(
+            f"{api_base}/posts", headers=headers, json=payload, timeout=60
+        )
         resp.raise_for_status()
         data = resp.json()
-        post_id  = data.get("id")
+        post_id = data.get("id")
         post_url = data.get("link")
         log.info(
             f"WordPress push successful: post_id={post_id} url={post_url} "
@@ -197,7 +209,11 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
 
 def print_checklist_and_confirm():
     print(CHECKLIST)
-    answer = input("Have you reviewed the checklist and confirmed all items? [yes/no]: ").strip().lower()
+    answer = (
+        input("Have you reviewed the checklist and confirmed all items? [yes/no]: ")
+        .strip()
+        .lower()
+    )
     if answer not in ("yes", "y"):
         print("Publication aborted. Complete the checklist and re-run.")
         return False

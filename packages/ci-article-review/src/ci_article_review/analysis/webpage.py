@@ -10,6 +10,7 @@ built-in heuristic HTML parser that removes obvious boilerplate, prefers the
 <article>/<main> region, and keeps h1-h3 headings (the SEO and structure checks
 key off heading markup).
 """
+
 import logging
 import re
 from html.parser import HTMLParser
@@ -27,9 +28,35 @@ _FETCH_TIMEOUT = 20
 _MIN_WORDS = 200
 
 # Elements whose text is never article content.
-_SKIP_TAGS = {"script", "style", "nav", "header", "footer", "aside", "noscript", "form", "svg", "template"}
+_SKIP_TAGS = {
+    "script",
+    "style",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    "noscript",
+    "form",
+    "svg",
+    "template",
+}
 # Block-level elements that mark a text-fragment boundary.
-_BLOCK_TAGS = {"p", "div", "section", "article", "main", "li", "tr", "br", "ul", "ol", "blockquote", "pre", "figure", "figcaption"}
+_BLOCK_TAGS = {
+    "p",
+    "div",
+    "section",
+    "article",
+    "main",
+    "li",
+    "tr",
+    "br",
+    "ul",
+    "ol",
+    "blockquote",
+    "pre",
+    "figure",
+    "figcaption",
+}
 # Headings we preserve, mapped to their markdown prefix.
 _HEADING_TAGS = {"h1": "#", "h2": "##", "h3": "###"}
 
@@ -57,11 +84,13 @@ class _ArticleParser(HTMLParser):
         self._buf = []
         if not text:
             return
-        self.nodes.append({
-            "kind": self.cur_heading or "p",
-            "text": text,
-            "in_main": self.main_depth > 0,
-        })
+        self.nodes.append(
+            {
+                "kind": self.cur_heading or "p",
+                "text": text,
+                "in_main": self.main_depth > 0,
+            }
+        )
 
     def handle_starttag(self, tag, attrs):
         if tag in _SKIP_TAGS:

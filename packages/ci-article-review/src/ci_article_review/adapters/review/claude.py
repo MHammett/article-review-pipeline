@@ -51,20 +51,24 @@ _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 # Extended thinking (thinking_budget) is deprecated or unsupported on these.
 # Use the `effort` parameter to control reasoning depth.
 # For Sonnet 4.6 / Opus 4.6, also send thinking: {type: "adaptive"} alongside effort.
-_ADAPTIVE_THINKING_MODELS = frozenset({
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-fable-5",
-    "claude-mythos-5",
-    "claude-mythos-preview",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-})
+_ADAPTIVE_THINKING_MODELS = frozenset(
+    {
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+    }
+)
 
 # Models that require the interleaved-thinking beta header when thinking_budget is set.
-_BETA_HEADER_MODELS = frozenset({
-    "claude-haiku-4-5-20251001",
-})
+_BETA_HEADER_MODELS = frozenset(
+    {
+        "claude-haiku-4-5-20251001",
+    }
+)
 
 # Fallback chain tried in order when primary model returns a capacity error (529).
 _FALLBACK_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
@@ -86,14 +90,28 @@ def _is_capacity_error(exc):
 def _is_adaptive_model(model):
     if model in _ADAPTIVE_THINKING_MODELS:
         return True
-    for prefix in ("claude-opus-4-8", "claude-opus-4-7", "claude-fable-", "claude-mythos-",
-                   "claude-sonnet-4-6", "claude-opus-4-6"):
+    for prefix in (
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-fable-",
+        "claude-mythos-",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+    ):
         if model.startswith(prefix):
             return True
     return False
 
 
-def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=None, provider_config=None):
+def call(
+    system_prompt,
+    user_prompt,
+    api_key,
+    retry=True,
+    retry_delay=10,
+    model=None,
+    provider_config=None,
+):
     cfg = provider_config or {}
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     thinking_budget = cfg.get("thinking_budget")
@@ -101,12 +119,18 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=
     # Streaming socket timeout = inter-token read-gap (small constant). The big
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
-    models_to_try = [requested_model] + [m for m in _FALLBACK_MODELS if m != requested_model]
+    models_to_try = [requested_model] + [
+        m for m in _FALLBACK_MODELS if m != requested_model
+    ]
 
     for attempt_model in models_to_try:
         result = _call_model(
-            system_prompt, user_prompt, api_key,
-            model=attempt_model, retry=retry, retry_delay=retry_delay,
+            system_prompt,
+            user_prompt,
+            api_key,
+            model=attempt_model,
+            retry=retry,
+            retry_delay=retry_delay,
             thinking_budget=thinking_budget,
             effort=effort,
             timeout=timeout,
@@ -120,8 +144,13 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=
                     f"Review quality may be reduced."
                 )
             return result
-        if _is_capacity_error(result.get("error", "")) and attempt_model != models_to_try[-1]:
-            log.warning(f"Claude {attempt_model} unavailable (capacity). Trying next fallback model.")
+        if (
+            _is_capacity_error(result.get("error", ""))
+            and attempt_model != models_to_try[-1]
+        ):
+            log.warning(
+                f"Claude {attempt_model} unavailable (capacity). Trying next fallback model."
+            )
             continue
         return result
 
@@ -129,9 +158,15 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=
 
 
 def _call_model(
-    system_prompt, user_prompt, api_key, model,
-    retry=True, retry_delay=10,
-    thinking_budget=None, effort=None, timeout=None,
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry=True,
+    retry_delay=10,
+    thinking_budget=None,
+    effort=None,
+    timeout=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
@@ -187,12 +222,22 @@ def _call_model(
     t0 = time.monotonic()
 
     def _post():
-        resp = session.post(CLAUDE_API_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            CLAUDE_API_URL, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503, 529) and retry:
-            log.warning(f"Claude {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry.")
+            log.warning(
+                f"Claude {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry."
+            )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(CLAUDE_API_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                CLAUDE_API_URL,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
         resp.raise_for_status()
         return resp
 
@@ -205,8 +250,12 @@ def _call_model(
         log.error(f"Claude {model} call failed after {elapsed}s: {safe_err}")
         session.close()
         return {
-            "failed": True, "error": safe_err, "raw": None,
-            "model": model, "tokens": {}, "elapsed_seconds": elapsed,
+            "failed": True,
+            "error": safe_err,
+            "raw": None,
+            "model": model,
+            "tokens": {},
+            "elapsed_seconds": elapsed,
         }
     finally:
         session.close()
@@ -229,7 +278,10 @@ def _call_model(
             "error": f"Empty text response (stop_reason={stop_reason!r})",
             "raw": None,
             "model": model,
-            "tokens": {"prompt": usage.get("input_tokens"), "completion": usage.get("output_tokens")},
+            "tokens": {
+                "prompt": usage.get("input_tokens"),
+                "completion": usage.get("output_tokens"),
+            },
             "elapsed_seconds": elapsed,
         }
 
@@ -255,7 +307,9 @@ def _call_model(
                 "elapsed_seconds": elapsed,
             }
 
-    thinking_mode = "adaptive" if adaptive else ("extended" if thinking_budget else "standard")
+    thinking_mode = (
+        "adaptive" if adaptive else ("extended" if thinking_budget else "standard")
+    )
     log.debug(
         f"Claude {model} call succeeded in {elapsed}s "
         f"(thinking={thinking_mode}, {usage.get('input_tokens', '?')} input tokens)"

@@ -1,7 +1,6 @@
 """Tests for analysis.links — URL extraction, SSRF guard, parallel validation."""
-import sys, os
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from ci_article_review.analysis import links
 
@@ -11,7 +10,9 @@ class TestExtractUrls:
         assert links.extract_urls("See https://example.com.") == ["https://example.com"]
 
     def test_strips_trailing_comma(self):
-        assert links.extract_urls("https://example.com, and more") == ["https://example.com"]
+        assert links.extract_urls("https://example.com, and more") == [
+            "https://example.com"
+        ]
 
     def test_preserves_query_string(self):
         urls = links.extract_urls("Go to https://example.com/p?q=1&r=2 now")
@@ -27,7 +28,9 @@ class TestExtractUrls:
 
 class TestSsrfGuard:
     def test_blocks_cloud_metadata(self):
-        assert links._is_public_host("http://169.254.169.254/latest/meta-data/") is False
+        assert (
+            links._is_public_host("http://169.254.169.254/latest/meta-data/") is False
+        )
 
     def test_blocks_localhost(self):
         assert links._is_public_host("http://localhost:6379/") is False
@@ -57,12 +60,19 @@ class TestValidateLinks:
 
     def test_preserves_url_order(self):
         text = "First https://zzz.example.com then https://aaa.example.com"
+
         # Mock the per-URL worker so no network happens
         def fake_check(url, timeout):
             return {"status_code": 200, "ok": True, "redirected_to": None}
-        with patch("ci_article_review.analysis.links._check_http", side_effect=fake_check):
+
+        with patch(
+            "ci_article_review.analysis.links._check_http", side_effect=fake_check
+        ):
             results = links.validate_links(text, check_wayback=False)
-        assert [r["url"] for r in results] == ["https://zzz.example.com", "https://aaa.example.com"]
+        assert [r["url"] for r in results] == [
+            "https://zzz.example.com",
+            "https://aaa.example.com",
+        ]
 
     def test_internal_url_not_sent_to_wayback(self):
         text = "Internal http://localhost:8080/x"
@@ -75,10 +85,19 @@ class TestValidateLinks:
     def test_wayback_stale_days_threaded_through(self):
         # The wayback_stale_days arg must reach wayback_check as stale_days.
         text = "See https://example.com"
+
         def fake_http(url, timeout):
             return {"status_code": 200, "ok": True, "redirected_to": None}
-        with patch("ci_article_review.analysis.links._check_http", side_effect=fake_http), \
-             patch("ci_article_review.analysis.links.wayback_check", return_value={"archived": True}) as mock_wb:
+
+        with (
+            patch(
+                "ci_article_review.analysis.links._check_http", side_effect=fake_http
+            ),
+            patch(
+                "ci_article_review.analysis.links.wayback_check",
+                return_value={"archived": True},
+            ) as mock_wb,
+        ):
             links.validate_links(text, check_wayback=True, wayback_stale_days=90)
         _, kwargs = mock_wb.call_args
         assert kwargs.get("stale_days") == 90

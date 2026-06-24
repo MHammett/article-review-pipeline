@@ -79,7 +79,7 @@ def iter_sse_data(resp):
             raw_line = raw_line.decode("utf-8", "replace")
         if not raw_line.startswith("data:"):
             continue
-        payload = raw_line[len("data:"):].strip()
+        payload = raw_line[len("data:") :].strip()
         if payload == "[DONE]":
             return
         try:
@@ -153,10 +153,12 @@ def accumulate_anthropic(resp):
         if etype == "message_start":
             msg_usage = obj.get("message", {}).get("usage", {})
             if msg_usage:
-                usage.update({
-                    "input_tokens": msg_usage.get("input_tokens"),
-                    "output_tokens": msg_usage.get("output_tokens"),
-                })
+                usage.update(
+                    {
+                        "input_tokens": msg_usage.get("input_tokens"),
+                        "output_tokens": msg_usage.get("output_tokens"),
+                    }
+                )
         elif etype == "content_block_delta":
             delta = obj.get("delta", {})
             if delta.get("type") == "text_delta":

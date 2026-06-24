@@ -15,9 +15,7 @@ the balanced/thorough/maximum presets so we know they'll work before we pay
 for a full article run.
 """
 
-import sys
 import os
-import json
 import time
 import argparse
 import requests
@@ -25,7 +23,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OK   = "\033[32m OK  \033[0m"
+OK = "\033[32m OK  \033[0m"
 FAIL = "\033[31m FAIL\033[0m"
 WARN = "\033[33m WARN\033[0m"
 SKIP = "\033[33m SKIP\033[0m"
@@ -38,37 +36,42 @@ MINI_PROMPT = "Reply with the single word: ok"
 
 OPENAI_MODELS = [
     # (model_id, reasoning_effort_or_None, label)
-    ("gpt-5.4-mini",  None,     "economy/standard non-reasoning"),
-    ("gpt-5.4",       None,     "standard non-reasoning"),
-    ("o4-mini",       "low",    "balanced/thorough reasoning"),
-    ("o3",            "high",   "maximum reasoning"),
+    ("gpt-5.4-mini", None, "economy/standard non-reasoning"),
+    ("gpt-5.4", None, "standard non-reasoning"),
+    ("o4-mini", "low", "balanced/thorough reasoning"),
+    ("o3", "high", "maximum reasoning"),
 ]
 
 MISTRAL_MODELS = [
-    ("mistral-small-latest",       None,     "economy non-reasoning"),
-    ("mistral-large-latest",       None,     "standard non-reasoning"),
-    ("mistral-medium-3-5",  "high", "balanced+ reasoning (replaces magistral-medium-latest; only high/none supported)"),
+    ("mistral-small-latest", None, "economy non-reasoning"),
+    ("mistral-large-latest", None, "standard non-reasoning"),
+    (
+        "mistral-medium-3-5",
+        "high",
+        "balanced+ reasoning (replaces magistral-medium-latest; only high/none supported)",
+    ),
 ]
 
 GEMINI_MODELS = [
-    "gemini-2.5-flash",    # standard / thorough
-    "gemini-3.5-flash",    # maximum preset
+    "gemini-2.5-flash",  # standard / thorough
+    "gemini-3.5-flash",  # maximum preset
 ]
 
 GROK_MODELS = [
-    "grok-4.3",    # standard — also supports reasoning_effort for balanced+ (no separate model needed)
-    "grok-build-0.1",   # capacity fallback
+    "grok-4.3",  # standard — also supports reasoning_effort for balanced+ (no separate model needed)
+    "grok-build-0.1",  # capacity fallback
 ]
 
 PERPLEXITY_MODELS = [
-    "sonar",                # economy
-    "sonar-pro",            # standard
+    "sonar",  # economy
+    "sonar-pro",  # standard
     "sonar-reasoning-pro",  # balanced+
 ]
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _result(ok, label, detail=""):
     tag = OK if ok else FAIL
@@ -89,6 +92,7 @@ def _warn(label, detail=""):
 # ---------------------------------------------------------------------------
 # OpenAI
 # ---------------------------------------------------------------------------
+
 
 def probe_openai():
     print("\n-- OpenAI ------------------------------------------------------")
@@ -113,7 +117,10 @@ def probe_openai():
         try:
             resp = requests.post(
                 "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
                 json=payload,
                 timeout=60,
             )
@@ -125,11 +132,17 @@ def probe_openai():
                 raw_content = data["choices"][0]["message"]["content"]
                 if isinstance(raw_content, list):
                     reply = "".join(
-                        c.get("text", "") for c in raw_content if c.get("type") == "text"
+                        c.get("text", "")
+                        for c in raw_content
+                        if c.get("type") == "text"
                     ).strip()[:60]
                 else:
                     reply = raw_content.strip()[:60]
-                _result(True, f"{model} ({label})", f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s")
+                _result(
+                    True,
+                    f"{model} ({label})",
+                    f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s",
+                )
             else:
                 body = resp.text[:300]
                 _result(False, f"{model} ({label})", f"HTTP {resp.status_code}: {body}")
@@ -141,6 +154,7 @@ def probe_openai():
 # ---------------------------------------------------------------------------
 # Mistral
 # ---------------------------------------------------------------------------
+
 
 def probe_mistral():
     print("\n-- Mistral -----------------------------------------------------")
@@ -164,7 +178,10 @@ def probe_mistral():
         try:
             resp = requests.post(
                 "https://api.mistral.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
                 json=payload,
                 timeout=90,
             )
@@ -176,11 +193,17 @@ def probe_mistral():
                 raw_content = data["choices"][0]["message"]["content"]
                 if isinstance(raw_content, list):
                     reply = "".join(
-                        c.get("text", "") for c in raw_content if c.get("type") == "text"
+                        c.get("text", "")
+                        for c in raw_content
+                        if c.get("type") == "text"
                     ).strip()[:60]
                 else:
                     reply = raw_content.strip()[:60]
-                _result(True, f"{model} ({label})", f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s")
+                _result(
+                    True,
+                    f"{model} ({label})",
+                    f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s",
+                )
             else:
                 body = resp.text[:300]
                 _result(False, f"{model} ({label})", f"HTTP {resp.status_code}: {body}")
@@ -193,6 +216,7 @@ def probe_mistral():
 # Gemini (Vertex AI — uses your configured credentials)
 # ---------------------------------------------------------------------------
 
+
 def probe_gemini_vertex():
     print("\n-- Gemini (Vertex AI) ------------------------------------------")
 
@@ -201,10 +225,14 @@ def probe_gemini_vertex():
         import google.auth.transport.requests
         from google.oauth2 import service_account
     except ImportError:
-        print(f"  {SKIP}  google-auth not installed — run: pip install 'google-auth>=2.22.0,<3.0'")
+        print(
+            f"  {SKIP}  google-auth not installed — run: pip install 'google-auth>=2.22.0,<3.0'"
+        )
         return
 
-    credentials_file = r"C:\Users\mhammett.HAMMETT\gcp-keys\mikehammett-317d1e506314.json"
+    credentials_file = (
+        r"C:\Users\mhammett.HAMMETT\gcp-keys\mikehammett-317d1e506314.json"
+    )
     project = "mikehammett"
     location = "us-central1"
 
@@ -236,7 +264,10 @@ def probe_gemini_vertex():
         try:
             resp = requests.post(
                 url,
-                headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {creds.token}",
+                    "Content-Type": "application/json",
+                },
                 json=payload,
                 timeout=45,
             )
@@ -245,8 +276,14 @@ def probe_gemini_vertex():
                 candidates = resp.json().get("candidates", [])
                 if candidates:
                     parts = candidates[0].get("content", {}).get("parts", [])
-                    text_parts = [p for p in parts if not p.get("thought") and "text" in p]
-                    reply = (text_parts[0]["text"].strip()[:60]) if text_parts else "(no text part)"
+                    text_parts = [
+                        p for p in parts if not p.get("thought") and "text" in p
+                    ]
+                    reply = (
+                        (text_parts[0]["text"].strip()[:60])
+                        if text_parts
+                        else "(no text part)"
+                    )
                 else:
                     reply = "(no candidates)"
                 _result(True, f"{model}", f"replied={reply!r} {elapsed}s")
@@ -261,6 +298,7 @@ def probe_gemini_vertex():
 # ---------------------------------------------------------------------------
 # Grok
 # ---------------------------------------------------------------------------
+
 
 def probe_grok():
     print("\n-- Grok --------------------------------------------------------")
@@ -279,7 +317,10 @@ def probe_grok():
         try:
             resp = requests.post(
                 "https://api.x.ai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
                 json=payload,
                 timeout=60,
             )
@@ -288,7 +329,11 @@ def probe_grok():
                 data = resp.json()
                 actual_model = data.get("model", "?")
                 reply = data["choices"][0]["message"]["content"].strip()[:60]
-                _result(True, f"{model}", f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s")
+                _result(
+                    True,
+                    f"{model}",
+                    f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s",
+                )
             else:
                 body = resp.text[:300]
                 _result(False, f"{model}", f"HTTP {resp.status_code}: {body}")
@@ -300,6 +345,7 @@ def probe_grok():
 # ---------------------------------------------------------------------------
 # Perplexity
 # ---------------------------------------------------------------------------
+
 
 def probe_perplexity():
     print("\n-- Perplexity --------------------------------------------------")
@@ -318,7 +364,10 @@ def probe_perplexity():
         try:
             resp = requests.post(
                 "https://api.perplexity.ai/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
                 json=payload,
                 timeout=60,
             )
@@ -327,7 +376,11 @@ def probe_perplexity():
                 data = resp.json()
                 actual_model = data.get("model", "?")
                 reply = data["choices"][0]["message"]["content"].strip()[:60]
-                _result(True, f"{model}", f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s")
+                _result(
+                    True,
+                    f"{model}",
+                    f"model_in_response={actual_model!r} reply={reply!r} {elapsed}s",
+                )
             else:
                 body = resp.text[:300]
                 _result(False, f"{model}", f"HTTP {resp.status_code}: {body}")
@@ -339,6 +392,7 @@ def probe_perplexity():
 # ---------------------------------------------------------------------------
 # OpenAI — list available models (confirms IDs without making a chat call)
 # ---------------------------------------------------------------------------
+
 
 def list_openai_models():
     print("\n-- OpenAI available models (filtered for relevant families) ----")
@@ -355,9 +409,13 @@ def list_openai_models():
         )
         resp.raise_for_status()
         models = sorted(m["id"] for m in resp.json().get("data", []))
-        relevant = [m for m in models if any(
-            m.startswith(prefix) for prefix in ("gpt-5", "gpt-4o", "o3", "o4", "o1")
-        )]
+        relevant = [
+            m
+            for m in models
+            if any(
+                m.startswith(prefix) for prefix in ("gpt-5", "gpt-4o", "o3", "o4", "o1")
+            )
+        ]
         for m in relevant:
             print(f"    {m}")
         if not relevant:
@@ -369,6 +427,7 @@ def list_openai_models():
 # ---------------------------------------------------------------------------
 # Mistral — list available models
 # ---------------------------------------------------------------------------
+
 
 def list_mistral_models():
     print("\n-- Mistral available models (filtered for relevant families) ---")
@@ -385,9 +444,11 @@ def list_mistral_models():
         )
         resp.raise_for_status()
         models = sorted(m["id"] for m in resp.json().get("data", []))
-        relevant = [m for m in models if any(
-            kw in m for kw in ("mistral", "magistral", "codestral", "pixtral")
-        )]
+        relevant = [
+            m
+            for m in models
+            if any(kw in m for kw in ("mistral", "magistral", "codestral", "pixtral"))
+        ]
         for m in relevant:
             print(f"    {m}")
         if not relevant:
@@ -399,6 +460,7 @@ def list_mistral_models():
 # ---------------------------------------------------------------------------
 # Grok — list available models
 # ---------------------------------------------------------------------------
+
 
 def list_grok_models():
     print("\n-- Grok available models ---------------------------------------")
@@ -428,23 +490,28 @@ def list_grok_models():
 # ---------------------------------------------------------------------------
 
 PROVIDER_MAP = {
-    "openai":      (probe_openai, list_openai_models),
-    "mistral":     (probe_mistral, list_mistral_models),
-    "gemini":      (probe_gemini_vertex, None),
-    "grok":        (probe_grok, list_grok_models),
-    "perplexity":  (probe_perplexity, None),
+    "openai": (probe_openai, list_openai_models),
+    "mistral": (probe_mistral, list_mistral_models),
+    "gemini": (probe_gemini_vertex, None),
+    "grok": (probe_grok, list_grok_models),
+    "perplexity": (probe_perplexity, None),
 }
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Probe preset model IDs and parameters.")
+    parser = argparse.ArgumentParser(
+        description="Probe preset model IDs and parameters."
+    )
     parser.add_argument(
-        "providers", nargs="*",
+        "providers",
+        nargs="*",
         choices=list(PROVIDER_MAP) + ["all"],
         default=["all"],
         help="Providers to probe (default: all)",
     )
     parser.add_argument(
-        "--list-models", action="store_true",
+        "--list-models",
+        action="store_true",
         help="Also fetch the provider's models list to confirm available IDs",
     )
     args = parser.parse_args()
@@ -452,7 +519,9 @@ def main():
     providers = list(PROVIDER_MAP) if "all" in args.providers else args.providers
 
     print("Probing preset model assumptions...")
-    print("Each call sends a one-word prompt.  Results show model ID from response body.")
+    print(
+        "Each call sends a one-word prompt.  Results show model ID from response body."
+    )
 
     for name in providers:
         probe_fn, list_fn = PROVIDER_MAP[name]

@@ -110,15 +110,18 @@ def _validate_user_config(config):
         # Gemini API key is not required when using Vertex AI (which uses google-auth instead).
         if key_path == ("api_keys", "gemini", "api_key"):
             gemini_model_raw = config.get("models", {}).get("gemini", {})
-            if isinstance(gemini_model_raw, dict) and gemini_model_raw.get("provider") == "vertex_ai":
+            if (
+                isinstance(gemini_model_raw, dict)
+                and gemini_model_raw.get("provider") == "vertex_ai"
+            ):
                 continue
         if _get_nested(config, *key_path) is None:
             missing.append(" -> ".join(key_path))
     if missing:
         raise ValueError(
-            "User config is missing required fields:\n" +
-            "\n".join(f"  {m}" for m in missing) +
-            "\nSee configs/user.example.yaml for the expected structure."
+            "User config is missing required fields:\n"
+            + "\n".join(f"  {m}" for m in missing)
+            + "\nSee configs/user.example.yaml for the expected structure."
         )
 
 
@@ -129,9 +132,9 @@ def _validate_publication_config(config, publication_name):
             missing.append(" -> ".join(key_path))
     if missing:
         raise ValueError(
-            f"Publication config '{publication_name}' is missing required fields:\n" +
-            "\n".join(f"  {m}" for m in missing) +
-            "\nSee configs/publication.example.yaml for the expected structure."
+            f"Publication config '{publication_name}' is missing required fields:\n"
+            + "\n".join(f"  {m}" for m in missing)
+            + "\nSee configs/publication.example.yaml for the expected structure."
         )
 
 
@@ -160,12 +163,12 @@ _COST_PRESETS = {
     "economy": {
         "thoroughness": "standard",
         "models": {
-            "openai":     {"model": "gpt-5.4-mini"},
-            "gemini":     {"model": "gemini-2.5-flash"},
-            "mistral":    {"model": "mistral-small-latest"},
+            "openai": {"model": "gpt-5.4-mini"},
+            "gemini": {"model": "gemini-2.5-flash"},
+            "mistral": {"model": "mistral-small-latest"},
             "perplexity": {"model": "sonar"},
-            "grok":       {"enabled": False},
-            "claude":     {"enabled": False},
+            "grok": {"enabled": False},
+            "claude": {"enabled": False},
         },
     },
     # standard: solid quality, no reasoning overhead — flagship non-reasoning models.
@@ -173,12 +176,12 @@ _COST_PRESETS = {
     "standard": {
         "thoroughness": "standard",
         "models": {
-            "openai":     {"model": "gpt-5.4"},
-            "gemini":     {"model": "gemini-2.5-flash"},
-            "mistral":    {"model": "mistral-large-latest"},
+            "openai": {"model": "gpt-5.4"},
+            "gemini": {"model": "gemini-2.5-flash"},
+            "mistral": {"model": "mistral-large-latest"},
             "perplexity": {"model": "sonar-pro"},
-            "grok":       {"model": "grok-4.3"},
-            "claude":     {"model": "claude-haiku-4-5-20251001"},
+            "grok": {"model": "grok-4.3"},
+            "claude": {"model": "claude-haiku-4-5-20251001"},
         },
     },
     # balanced: thorough coverage with light reasoning.
@@ -190,12 +193,12 @@ _COST_PRESETS = {
     "balanced": {
         "thoroughness": "thorough",
         "models": {
-            "openai":     {"model": "gpt-5.4", "reasoning_effort": "low"},
-            "gemini":     {"model": "gemini-2.5-flash"},
-            "mistral":    {"model": "mistral-medium-3-5"},
+            "openai": {"model": "gpt-5.4", "reasoning_effort": "low"},
+            "gemini": {"model": "gemini-2.5-flash"},
+            "mistral": {"model": "mistral-medium-3-5"},
             "perplexity": {"model": "sonar-reasoning-pro"},
-            "grok":       {"model": "grok-4.20-0309-reasoning"},
-            "claude":     {"model": "claude-sonnet-4-6", "effort": "medium"},
+            "grok": {"model": "grok-4.20-0309-reasoning"},
+            "claude": {"model": "claude-sonnet-4-6", "effort": "medium"},
         },
     },
     # thorough: deep reasoning, thorough coverage.
@@ -204,12 +207,12 @@ _COST_PRESETS = {
     "thorough": {
         "thoroughness": "thorough",
         "models": {
-            "openai":     {"model": "gpt-5.4", "reasoning_effort": "high"},
-            "gemini":     {"model": "gemini-2.5-pro"},
-            "mistral":    {"model": "mistral-medium-3-5", "reasoning_effort": "high"},
+            "openai": {"model": "gpt-5.4", "reasoning_effort": "high"},
+            "gemini": {"model": "gemini-2.5-pro"},
+            "mistral": {"model": "mistral-medium-3-5", "reasoning_effort": "high"},
             "perplexity": {"model": "sonar-reasoning-pro"},
-            "grok":       {"model": "grok-4.20-0309-reasoning"},
-            "claude":     {"model": "claude-opus-4-8", "effort": "high"},
+            "grok": {"model": "grok-4.20-0309-reasoning"},
+            "claude": {"model": "claude-opus-4-8", "effort": "high"},
         },
     },
     # maximum: highest capability, all domains, max reasoning.
@@ -219,12 +222,12 @@ _COST_PRESETS = {
     "maximum": {
         "thoroughness": "maximum",
         "models": {
-            "openai":     {"model": "gpt-5.5", "reasoning_effort": "xhigh"},
-            "gemini":     {"model": "gemini-2.5-pro", "thinking_budget": 16000},
-            "mistral":    {"model": "mistral-medium-3-5", "reasoning_effort": "high"},
+            "openai": {"model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            "gemini": {"model": "gemini-2.5-pro", "thinking_budget": 16000},
+            "mistral": {"model": "mistral-medium-3-5", "reasoning_effort": "high"},
             "perplexity": {"model": "sonar-reasoning-pro"},
-            "grok":       {"model": "grok-4.20-0309-reasoning"},
-            "claude":     {"model": "claude-opus-4-8", "effort": "high"},
+            "grok": {"model": "grok-4.20-0309-reasoning"},
+            "claude": {"model": "claude-opus-4-8", "effort": "high"},
         },
     },
 }
@@ -232,11 +235,19 @@ _COST_PRESETS = {
 # Keys that identify provider infrastructure or per-model tuning that the user
 # controls independently of which cost_preset is active.  These are preserved from
 # user config even when cost_preset overrides model names and reasoning flags.
-_INFRA_KEYS = frozenset({
-    "provider", "endpoint", "deployment", "api_version",
-    "project", "location", "credentials_file", "prompts",
-    "timeout_seconds",   # user-tuned HTTP timeout; preserved so long articles don't time out
-})
+_INFRA_KEYS = frozenset(
+    {
+        "provider",
+        "endpoint",
+        "deployment",
+        "api_version",
+        "project",
+        "location",
+        "credentials_file",
+        "prompts",
+        "timeout_seconds",  # user-tuned HTTP timeout; preserved so long articles don't time out
+    }
+)
 
 
 def _load_presets_from_yaml(config_dir=None):
@@ -247,6 +258,7 @@ def _load_presets_from_yaml(config_dir=None):
     behavior of analysis/cost.py and model_registry.py.
     """
     import logging
+
     if config_dir is None:
         config_dir = Path(__file__).parent / "configs"
     yaml_path = Path(config_dir) / "presets.yaml"
@@ -294,9 +306,7 @@ def _apply_cost_preset(pipeline_cfg, models_raw):
     preset = presets.get(preset_name)
     if not preset:
         valid = ", ".join(f"'{k}'" for k in presets)
-        raise ValueError(
-            f"Unknown cost_preset {preset_name!r}. Valid values: {valid}"
-        )
+        raise ValueError(f"Unknown cost_preset {preset_name!r}. Valid values: {valid}")
 
     new_pipeline = dict(pipeline_cfg)
     # Set thoroughness from preset only if user has not already set it explicitly.
@@ -372,7 +382,11 @@ def _apply_preset_overrides(pipeline_cfg, models_raw):
     for provider, override_cfg in overrides.items():
         if provider not in merged:
             continue  # provider not configured; skip silently
-        current = dict(merged[provider]) if isinstance(merged[provider], dict) else {"model": merged[provider]}
+        current = (
+            dict(merged[provider])
+            if isinstance(merged[provider], dict)
+            else {"model": merged[provider]}
+        )
         current.update(override_cfg)
         merged[provider] = current
 
@@ -381,11 +395,11 @@ def _apply_preset_overrides(pipeline_cfg, models_raw):
 
 # Default provider for each adapter when user.yaml uses the simple string form.
 _DEFAULT_PROVIDERS = {
-    "gemini":     "ai_studio",
-    "openai":     "openai",
-    "mistral":    "mistral",
-    "grok":       "grok",
-    "claude":     "anthropic",
+    "gemini": "ai_studio",
+    "openai": "openai",
+    "mistral": "mistral",
+    "grok": "grok",
+    "claude": "anthropic",
     "perplexity": "perplexity",
 }
 
@@ -443,14 +457,17 @@ def _normalize_model_configs(models_raw):
 
 
 def merge_configs(user_config, pub_config):
-    pipeline = user_config.get("pipeline", {
-        "parallel_review_calls": True,
-        "retry_on_failure": True,
-        "retry_delay_seconds": 10,
-        "abort_if_all_provider_calls_fail": False,
-        "task_timeout_seconds": 180,
-        "thoroughness": "standard",
-    })
+    pipeline = user_config.get(
+        "pipeline",
+        {
+            "parallel_review_calls": True,
+            "retry_on_failure": True,
+            "retry_delay_seconds": 10,
+            "abort_if_all_provider_calls_fail": False,
+            "task_timeout_seconds": 180,
+            "thoroughness": "standard",
+        },
+    )
     models_raw = user_config.get("models", {})
 
     # Apply cost_preset when present — overrides model variants, reasoning flags,
@@ -464,11 +481,14 @@ def merge_configs(user_config, pub_config):
     return {
         "api_keys": user_config.get("api_keys", {}),
         "pipeline": pipeline,
-        "delta": user_config.get("delta", {
-            "word_change_threshold_pct": 15,
-            "claim_change_triggers_rerun": True,
-            "structure_change_triggers_rerun": True,
-        }),
+        "delta": user_config.get(
+            "delta",
+            {
+                "word_change_threshold_pct": 15,
+                "claim_change_triggers_rerun": True,
+                "structure_change_triggers_rerun": True,
+            },
+        ),
         "ensemble": user_config.get("ensemble", {}),
         "models": _normalize_model_configs(models_raw),
         "publication": pub_config,

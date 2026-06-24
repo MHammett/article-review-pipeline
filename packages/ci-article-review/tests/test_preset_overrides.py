@@ -1,6 +1,5 @@
 """Tests for config_loader._apply_preset_overrides and cost preset interaction."""
-import sys
-import os
+
 import pytest
 
 
@@ -8,7 +7,6 @@ from ci_article_review.config_loader import _apply_preset_overrides, _apply_cost
 
 
 class TestApplyPresetOverrides:
-
     def test_no_overrides_returns_models_unchanged(self):
         models = {"openai": {"model": "gpt-5.4"}}
         result = _apply_preset_overrides({"cost_preset": "balanced"}, models)
@@ -36,7 +34,9 @@ class TestApplyPresetOverrides:
         result = _apply_preset_overrides(pipeline, models)
         assert result["claude"]["model"] == "claude-opus-4-8"
         assert result["claude"]["effort"] == "high"
-        assert result["claude"]["thinking_budget"] == 8000  # still present; set to null to neutralize
+        assert (
+            result["claude"]["thinking_budget"] == 8000
+        )  # still present; set to null to neutralize
 
     def test_override_null_removes_effect_of_key(self):
         # Setting a key to None (YAML: null) effectively disables it —
@@ -44,7 +44,11 @@ class TestApplyPresetOverrides:
         models = {"claude": {"model": "claude-sonnet-4-6", "thinking_budget": 8000}}
         pipeline = {
             "preset_overrides": {
-                "claude": {"model": "claude-opus-4-8", "effort": "high", "thinking_budget": None},
+                "claude": {
+                    "model": "claude-opus-4-8",
+                    "effort": "high",
+                    "thinking_budget": None,
+                },
             }
         }
         result = _apply_preset_overrides(pipeline, models)
@@ -63,7 +67,7 @@ class TestApplyPresetOverrides:
 
     def test_override_preserves_other_providers(self):
         models = {
-            "openai":  {"model": "gpt-5.4"},
+            "openai": {"model": "gpt-5.4"},
             "mistral": {"model": "mistral-large-latest"},
         }
         pipeline = {"preset_overrides": {"openai": {"reasoning_effort": "xhigh"}}}

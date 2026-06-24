@@ -47,6 +47,7 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_capacity_error(exc):
     """Return True if the exception represents a 503 capacity/availability error."""
     return "503" in str(exc)
@@ -65,14 +66,17 @@ def _is_reasoning_param_error(body_text):
     """
     lower = body_text.lower()
     return "reasoning_effort" in lower and (
-        "not enabled" in lower or "not supported" in lower
-        or "unknown" in lower or "invalid" in lower
+        "not enabled" in lower
+        or "not supported" in lower
+        or "unknown" in lower
+        or "invalid" in lower
     )
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
 
 def call(
     system_prompt,
@@ -91,21 +95,33 @@ def call(
 
     if provider == "azure":
         return _call_azure(
-            system_prompt, user_prompt, api_key, cfg,
-            retry=retry, retry_delay=retry_delay, timeout=timeout,
+            system_prompt,
+            user_prompt,
+            api_key,
+            cfg,
+            retry=retry,
+            retry_delay=retry_delay,
+            timeout=timeout,
         )
 
     # --- La Plateforme path with fallback chain ---
     requested_model = _resolve_model(model, cfg)
     reasoning_effort = cfg.get("reasoning_effort")
-    models_to_try = [requested_model] + [m for m in _FALLBACK_MODELS if m != requested_model]
+    models_to_try = [requested_model] + [
+        m for m in _FALLBACK_MODELS if m != requested_model
+    ]
 
     result = None
     for attempt_model in models_to_try:
         result = _call_laplateforme(
-            system_prompt, user_prompt, api_key,
-            model=attempt_model, retry=retry, retry_delay=retry_delay,
-            reasoning_effort=reasoning_effort, timeout=timeout,
+            system_prompt,
+            user_prompt,
+            api_key,
+            model=attempt_model,
+            retry=retry,
+            retry_delay=retry_delay,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -116,8 +132,13 @@ def call(
                     f"Review quality may be reduced."
                 )
             return result
-        if _is_capacity_error(result.get("error", "")) and attempt_model != models_to_try[-1]:
-            log.warning(f"Mistral {attempt_model} unavailable (capacity). Trying next fallback model.")
+        if (
+            _is_capacity_error(result.get("error", ""))
+            and attempt_model != models_to_try[-1]
+        ):
+            log.warning(
+                f"Mistral {attempt_model} unavailable (capacity). Trying next fallback model."
+            )
             continue
         return result
 
@@ -128,9 +149,20 @@ def call(
 # La Plateforme backend
 # ---------------------------------------------------------------------------
 
-def _call_laplateforme(system_prompt, user_prompt, api_key, model, retry=True, retry_delay=10, reasoning_effort=None, timeout=None):
+
+def _call_laplateforme(
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry=True,
+    retry_delay=10,
+    reasoning_effort=None,
+    timeout=None,
+):
     return _execute_request(
-        system_prompt, user_prompt,
+        system_prompt,
+        user_prompt,
         url=MISTRAL_API_URL,
         api_key=api_key,
         model=model,
@@ -145,7 +177,10 @@ def _call_laplateforme(system_prompt, user_prompt, api_key, model, retry=True, r
 # Azure AI (serverless inference) backend
 # ---------------------------------------------------------------------------
 
-def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_delay=10, timeout=None):
+
+def _call_azure(
+    system_prompt, user_prompt, api_key, cfg, retry=True, retry_delay=10, timeout=None
+):
     endpoint = cfg.get("endpoint", "").rstrip("/")
     model_name = cfg.get("model", DEFAULT_MODEL)
 
@@ -165,7 +200,8 @@ def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_dela
     # Azure AI serverless inference appends /v1/chat/completions to the base endpoint.
     url = f"{endpoint}/v1/chat/completions"
     result = _execute_request(
-        system_prompt, user_prompt,
+        system_prompt,
+        user_prompt,
         url=url,
         api_key=api_key,
         model=model_name,
@@ -181,7 +217,18 @@ def _call_azure(system_prompt, user_prompt, api_key, cfg, retry=True, retry_dela
 # Shared HTTP execution (La Plateforme and Azure use the same payload format)
 # ---------------------------------------------------------------------------
 
-def _execute_request(system_prompt, user_prompt, url, api_key, model, retry, retry_delay, reasoning_effort=None, timeout=None):
+
+def _execute_request(
+    system_prompt,
+    user_prompt,
+    url,
+    api_key,
+    model,
+    retry,
+    retry_delay,
+    reasoning_effort=None,
+    timeout=None,
+):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
     headers = {
@@ -216,10 +263,14 @@ def _execute_request(system_prompt, user_prompt, url, api_key, model, retry, ret
     def _post(pl):
         resp = session.post(url, headers=headers, json=pl, stream=True, timeout=timeout)
         if resp.status_code in (429, 500, 502, 503, 504) and retry:
-            log.warning(f"Mistral {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry.")
+            log.warning(
+                f"Mistral {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry."
+            )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(url, headers=headers, json=pl, stream=True, timeout=timeout)
+            resp = session.post(
+                url, headers=headers, json=pl, stream=True, timeout=timeout
+            )
         resp.raise_for_status()
         return streaming.accumulate_chat_completions(resp)
 
@@ -245,17 +296,31 @@ def _execute_request(system_prompt, user_prompt, url, api_key, model, retry, ret
             except requests.HTTPError as e2:
                 elapsed = round(time.monotonic() - t0, 2)
                 body2 = e2.response.text[:400] if e2.response is not None else ""
-                log.error(f"Mistral {model} fallback call failed after {elapsed}s: {e2} | {body2}")
+                log.error(
+                    f"Mistral {model} fallback call failed after {elapsed}s: {e2} | {body2}"
+                )
                 return {
-                    "failed": True, "error": str(e2), "error_body": body2,
-                    "raw": None, "model": model, "tokens": {}, "elapsed_seconds": elapsed,
+                    "failed": True,
+                    "error": str(e2),
+                    "error_body": body2,
+                    "raw": None,
+                    "model": model,
+                    "tokens": {},
+                    "elapsed_seconds": elapsed,
                 }
             except Exception as e2:
                 elapsed = round(time.monotonic() - t0, 2)
-                log.error(f"Mistral {model} fallback call failed after {elapsed}s: {e2}")
+                log.error(
+                    f"Mistral {model} fallback call failed after {elapsed}s: {e2}"
+                )
                 return {
-                    "failed": True, "error": str(e2), "error_body": "",
-                    "raw": None, "model": model, "tokens": {}, "elapsed_seconds": elapsed,
+                    "failed": True,
+                    "error": str(e2),
+                    "error_body": "",
+                    "raw": None,
+                    "model": model,
+                    "tokens": {},
+                    "elapsed_seconds": elapsed,
                 }
             # fallback succeeded — assembled is set, fall through to success path below
         else:
@@ -303,6 +368,7 @@ def _execute_request(system_prompt, user_prompt, url, api_key, model, retry, ret
         # Strip leading markdown fences (```json or ```)
         if "```" in cleaned:
             import re
+
             m = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", cleaned)
             if m:
                 try:
@@ -329,7 +395,9 @@ def _execute_request(system_prompt, user_prompt, url, api_key, model, retry, ret
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(f"Mistral {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)")
+    log.debug(
+        f"Mistral {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
+    )
     result = {
         "failed": False,
         "data": parsed,

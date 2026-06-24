@@ -1,6 +1,7 @@
 """
 Save and load pipeline run artifacts in pipeline_history/[article_slug]/.
 """
+
 import json
 import re
 import logging
@@ -11,9 +12,28 @@ log = logging.getLogger(__name__)
 
 # Windows reserved device names that cannot be used as filenames or directory names.
 _WINDOWS_RESERVED = {
-    "con", "prn", "aux", "nul",
-    "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
 }
 
 
@@ -34,7 +54,9 @@ def _run_dir(history_root, article_title, run_number):
     return path
 
 
-def save_run(history_root, article_title, run_number, report, corrections_log, run_ts=None):
+def save_run(
+    history_root, article_title, run_number, report, corrections_log, run_ts=None
+):
     if run_ts is None:
         run_ts = datetime.now(timezone.utc)
     ts_str = run_ts.strftime("%Y%m%d_%H%M%S")
@@ -57,7 +79,7 @@ def save_run(history_root, article_title, run_number, report, corrections_log, r
 
     try:
         lines = [
-            f"[{c.get('category','?')}] {c.get('original','')!r} -> {c.get('replacement','')!r}  ({c.get('message','')})"
+            f"[{c.get('category', '?')}] {c.get('original', '')!r} -> {c.get('replacement', '')!r}  ({c.get('message', '')})"
             for c in corrections_log
         ]
         with open(corrections_path, "w", encoding="utf-8") as f:

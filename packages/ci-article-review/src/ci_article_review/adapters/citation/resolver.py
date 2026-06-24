@@ -60,7 +60,9 @@ def _resolve_one(claim, citation_sources):
                     "wayback": wb,
                 }
         except Exception as e:
-            log.warning(f"Citation adapter {adapter_name} failed for claim '{claim[:50]}': {e}")
+            log.warning(
+                f"Citation adapter {adapter_name} failed for claim '{claim[:50]}': {e}"
+            )
 
     return {
         "claim": claim,
@@ -79,7 +81,9 @@ def resolve_citations(claims, citation_sources):
     if not claims:
         return []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(claims), _MAX_PARALLEL)) as pool:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(claims), _MAX_PARALLEL)
+    ) as pool:
         futures = {
             pool.submit(_resolve_one, claim, citation_sources): idx
             for idx, claim in enumerate(claims)

@@ -1,7 +1,4 @@
 """Tests for the sliding-scale timeout model."""
-import sys
-import os
-
 
 import ci_article_review.timeout_model as tm
 
@@ -19,6 +16,7 @@ class TestComputeTimeout:
         # The configured variance_margin must scale the result above the bare
         # base × model × effort product.
         import copy
+
         cfg = copy.deepcopy(tm._CONFIG)
         cfg["variance_margin"] = 1.0
         bare = tm.compute_timeout(ANCHOR, "gpt-5.5", "xhigh", CEILING, config=cfg)
@@ -77,7 +75,13 @@ class TestComputeTimeout:
 
 class TestComputeAll:
     def test_respects_explicit_override(self):
-        cfgs = {"openai": {"model": "gpt-5.5", "reasoning_effort": "xhigh", "timeout_seconds": 999}}
+        cfgs = {
+            "openai": {
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
+                "timeout_seconds": 999,
+            }
+        }
         out = tm.compute_all(ANCHOR, cfgs, CEILING)
         assert out["openai"] == 999  # explicit wins, formula skipped
 
@@ -97,15 +101,21 @@ class TestComputeAll:
 
     def test_reads_effort_from_either_key(self):
         # reasoning_effort (openai/mistral/grok) and effort (claude) both recognized.
-        a = tm.compute_all(ANCHOR, {"x": {"model": "gpt-5.4", "reasoning_effort": "high"}}, CEILING)
-        b = tm.compute_all(ANCHOR, {"x": {"model": "gpt-5.4", "effort": "high"}}, CEILING)
+        a = tm.compute_all(
+            ANCHOR, {"x": {"model": "gpt-5.4", "reasoning_effort": "high"}}, CEILING
+        )
+        b = tm.compute_all(
+            ANCHOR, {"x": {"model": "gpt-5.4", "effort": "high"}}, CEILING
+        )
         assert a["x"] == b["x"]
 
 
 class TestGlobalCeiling:
     """The parallel batch's outer wall-clock bound (pipeline._global_ceiling)."""
+
     def test_exceeds_slowest_task_with_retry_room(self):
         from ci_article_review.pipeline import _global_ceiling
+
         # Must sit above the slowest task + a retry_delay + slack, so a transient
         # retry or clean timeout isn't masked as a global-ceiling cancellation.
         c = _global_ceiling([819, 273, 240, 60], retry_delay=10)
@@ -113,10 +123,12 @@ class TestGlobalCeiling:
 
     def test_margin_above_slowest_is_more_than_old_plus_10(self):
         from ci_article_review.pipeline import _global_ceiling
+
         # Regression: the old +10 margin let a retry collide with the ceiling.
         c = _global_ceiling([647], retry_delay=10)
         assert c - 647 > 10
 
     def test_empty_list_safe(self):
         from ci_article_review.pipeline import _global_ceiling
+
         assert _global_ceiling([], retry_delay=10) == 40

@@ -29,11 +29,21 @@ def _is_capacity_error(exc):
     return "503" in msg
 
 
-def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=None, provider_config=None):
+def call(
+    system_prompt,
+    user_prompt,
+    api_key,
+    retry=True,
+    retry_delay=10,
+    model=None,
+    provider_config=None,
+):
     cfg = provider_config or {}
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     reasoning_effort = cfg.get("reasoning_effort")
-    models_to_try = [requested_model] + [m for m in _FALLBACK_MODELS if m != requested_model]
+    models_to_try = [requested_model] + [
+        m for m in _FALLBACK_MODELS if m != requested_model
+    ]
 
     # Streaming socket timeout = inter-token read-gap (small constant). The big
     # sliding-scale timeout_seconds is no longer a socket timeout; it survives only
@@ -42,9 +52,14 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=
 
     for attempt_model in models_to_try:
         result = _call_model(
-            system_prompt, user_prompt, api_key,
-            model=attempt_model, retry=retry, retry_delay=retry_delay,
-            reasoning_effort=reasoning_effort, timeout=timeout,
+            system_prompt,
+            user_prompt,
+            api_key,
+            model=attempt_model,
+            retry=retry,
+            retry_delay=retry_delay,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -55,15 +70,29 @@ def call(system_prompt, user_prompt, api_key, retry=True, retry_delay=10, model=
                     f"Review quality may be reduced."
                 )
             return result
-        if _is_capacity_error(result.get("error", "")) and attempt_model != models_to_try[-1]:
-            log.warning(f"Grok {attempt_model} unavailable (capacity). Trying next fallback model.")
+        if (
+            _is_capacity_error(result.get("error", ""))
+            and attempt_model != models_to_try[-1]
+        ):
+            log.warning(
+                f"Grok {attempt_model} unavailable (capacity). Trying next fallback model."
+            )
             continue
         return result
 
     return result  # exhausted fallbacks
 
 
-def _call_model(system_prompt, user_prompt, api_key, model, retry=True, retry_delay=10, reasoning_effort=None, timeout=None):
+def _call_model(
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry=True,
+    retry_delay=10,
+    reasoning_effort=None,
+    timeout=None,
+):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
     headers = {
@@ -90,12 +119,22 @@ def _call_model(system_prompt, user_prompt, api_key, model, retry=True, retry_de
     t0 = time.monotonic()
 
     def _post():
-        resp = session.post(GROK_API_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            GROK_API_URL, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503, 504) and retry:
-            log.warning(f"Grok {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry.")
+            log.warning(
+                f"Grok {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry."
+            )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(GROK_API_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                GROK_API_URL,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
         resp.raise_for_status()
         return resp
 
@@ -107,7 +146,14 @@ def _call_model(system_prompt, user_prompt, api_key, model, retry=True, retry_de
         safe_err = _redact_key(e, api_key)
         log.error(f"Grok {model} call failed after {elapsed}s: {safe_err}")
         session.close()
-        return {"failed": True, "error": safe_err, "raw": None, "model": model, "tokens": {}, "elapsed_seconds": elapsed}
+        return {
+            "failed": True,
+            "error": safe_err,
+            "raw": None,
+            "model": model,
+            "tokens": {},
+            "elapsed_seconds": elapsed,
+        }
     finally:
         session.close()
 
@@ -128,11 +174,16 @@ def _call_model(system_prompt, user_prompt, api_key, model, retry=True, retry_de
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(f"Grok {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)")
+    log.debug(
+        f"Grok {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
+    )
     return {
         "failed": False,
         "data": parsed,
         "model": model,
-        "tokens": {"prompt": usage.get("prompt_tokens"), "completion": usage.get("completion_tokens")},
+        "tokens": {
+            "prompt": usage.get("prompt_tokens"),
+            "completion": usage.get("completion_tokens"),
+        },
         "elapsed_seconds": elapsed,
     }

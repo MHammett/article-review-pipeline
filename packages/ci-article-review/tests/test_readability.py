@@ -1,5 +1,4 @@
 """Tests for analysis.readability."""
-import sys, os
 
 from ci_article_review.analysis.readability import analyze, _count_syllables
 
@@ -34,10 +33,15 @@ class TestReadabilityAnalyze:
     def test_returns_all_keys(self):
         result = analyze(self._SIMPLE)
         for key in (
-            "word_count", "sentence_count", "paragraph_count",
-            "avg_sentence_length", "avg_syllables_per_word",
-            "flesch_reading_ease", "flesch_kincaid_grade",
-            "reading_level", "longest_paragraph_words",
+            "word_count",
+            "sentence_count",
+            "paragraph_count",
+            "avg_sentence_length",
+            "avg_syllables_per_word",
+            "flesch_reading_ease",
+            "flesch_kincaid_grade",
+            "reading_level",
+            "longest_paragraph_words",
         ):
             assert key in result, f"missing key: {key}"
 
@@ -57,8 +61,13 @@ class TestReadabilityAnalyze:
     def test_reading_level_string_present(self):
         result = analyze(self._SIMPLE)
         assert result["reading_level"] in (
-            "Very Easy", "Easy", "Fairly Easy", "Standard",
-            "Fairly Difficult", "Difficult", "Very Confusing",
+            "Very Easy",
+            "Easy",
+            "Fairly Easy",
+            "Standard",
+            "Fairly Difficult",
+            "Difficult",
+            "Very Confusing",
         )
 
     def test_grade_level_nonnegative(self):

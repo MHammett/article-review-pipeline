@@ -1,4 +1,5 @@
 """Basic SEO structural analysis — no external APIs required."""
+
 import logging
 import re
 
@@ -20,10 +21,14 @@ def _positive_int(seo_rules, key, default):
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        log.warning("seo_rules.%s = %r is not an integer — using default %d", key, raw, default)
+        log.warning(
+            "seo_rules.%s = %r is not an integer — using default %d", key, raw, default
+        )
         return default
     if value <= 0:
-        log.warning("seo_rules.%s = %r must be positive — using default %d", key, raw, default)
+        log.warning(
+            "seo_rules.%s = %r must be positive — using default %d", key, raw, default
+        )
         return default
     return value
 
@@ -80,44 +85,58 @@ def analyze(text, handoff=None, seo_rules=None):
 
     if title:
         if len(title) > title_max:
-            issues.append({
-                "type": "title_too_long",
-                "detail": f"{len(title)} chars — recommended ≤{title_max} for search snippets",
-            })
+            issues.append(
+                {
+                    "type": "title_too_long",
+                    "detail": f"{len(title)} chars — recommended ≤{title_max} for search snippets",
+                }
+            )
         elif len(title) < title_min:
-            issues.append({
-                "type": "title_too_short",
-                "detail": f"{len(title)} chars — recommended ≥{title_min}",
-            })
+            issues.append(
+                {
+                    "type": "title_too_short",
+                    "detail": f"{len(title)} chars — recommended ≥{title_min}",
+                }
+            )
     else:
-        issues.append({"type": "no_title", "detail": "No title found in handoff or H1 heading"})
+        issues.append(
+            {"type": "no_title", "detail": "No title found in handoff or H1 heading"}
+        )
 
     if len(h1s) == 0:
         issues.append({"type": "no_h1", "detail": "No H1 heading in article body"})
     elif len(h1s) > 1:
-        issues.append({
-            "type": "multiple_h1",
-            "detail": f"{len(h1s)} H1 headings found — should be exactly one",
-        })
+        issues.append(
+            {
+                "type": "multiple_h1",
+                "detail": f"{len(h1s)} H1 headings found — should be exactly one",
+            }
+        )
 
     if word_count < min_words:
-        issues.append({
-            "type": "thin_content",
-            "detail": f"{word_count} words — recommended ≥{min_words} for indexability",
-        })
+        issues.append(
+            {
+                "type": "thin_content",
+                "detail": f"{word_count} words — recommended ≥{min_words} for indexability",
+            }
+        )
 
     if not has_meta:
-        issues.append({
-            "type": "no_meta_description",
-            "detail": "No meta description in handoff SEO METADATA section",
-        })
+        issues.append(
+            {
+                "type": "no_meta_description",
+                "detail": "No meta description in handoff SEO METADATA section",
+            }
+        )
 
     # Flag H2/H3 imbalance: H3s without any H2 parent
     if h3s and not h2s:
-        issues.append({
-            "type": "heading_hierarchy",
-            "detail": f"{len(h3s)} H3 heading(s) present but no H2 — headings should nest logically",
-        })
+        issues.append(
+            {
+                "type": "heading_hierarchy",
+                "detail": f"{len(h3s)} H3 heading(s) present but no H2 — headings should nest logically",
+            }
+        )
 
     return {
         "title": title,

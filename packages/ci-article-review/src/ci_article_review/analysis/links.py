@@ -1,4 +1,5 @@
 """URL extraction, HTTP status validation, and Wayback Machine archive checks."""
+
 import concurrent.futures
 import ipaddress
 import logging
@@ -58,15 +59,23 @@ def _is_public_host(url):
 def _check_http(url, timeout=_HEAD_TIMEOUT):
     """HEAD-check a single URL. Falls back to GET if HEAD returns 405."""
     if not _is_public_host(url):
-        return {"status_code": None, "ok": False, "error": "skipped: non-public host (SSRF guard)"}
+        return {
+            "status_code": None,
+            "ok": False,
+            "error": "skipped: non-public host (SSRF guard)",
+        }
     try:
         resp = requests.head(
-            url, allow_redirects=True, timeout=timeout,
+            url,
+            allow_redirects=True,
+            timeout=timeout,
             headers={"User-Agent": "ArticleReviewPipeline/1.0"},
         )
         if resp.status_code == 405:
             with requests.get(
-                url, allow_redirects=True, timeout=timeout,
+                url,
+                allow_redirects=True,
+                timeout=timeout,
                 headers={"User-Agent": "ArticleReviewPipeline/1.0"},
                 stream=True,
             ) as resp:
@@ -88,7 +97,9 @@ def _check_http(url, timeout=_HEAD_TIMEOUT):
         return {"status_code": None, "ok": False, "error": str(exc)}
 
 
-def _check_one(url, check_wayback, http_timeout, wayback_timeout, wayback_stale_days=None):
+def _check_one(
+    url, check_wayback, http_timeout, wayback_timeout, wayback_stale_days=None
+):
     entry = {"url": url}
     http_result = _check_http(url, timeout=http_timeout)
     entry.update(http_result)
@@ -96,12 +107,19 @@ def _check_one(url, check_wayback, http_timeout, wayback_timeout, wayback_stale_
     # internal URL to archive.org, and it can't be publicly archived anyway.
     skipped_for_ssrf = "SSRF guard" in (http_result.get("error") or "")
     if check_wayback and not skipped_for_ssrf:
-        entry["wayback"] = wayback_check(url, timeout=wayback_timeout, stale_days=wayback_stale_days)
+        entry["wayback"] = wayback_check(
+            url, timeout=wayback_timeout, stale_days=wayback_stale_days
+        )
     return entry
 
 
-def validate_links(text, check_wayback=True, http_timeout=_HEAD_TIMEOUT, wayback_timeout=10,
-                   wayback_stale_days=None):
+def validate_links(
+    text,
+    check_wayback=True,
+    http_timeout=_HEAD_TIMEOUT,
+    wayback_timeout=10,
+    wayback_stale_days=None,
+):
     """Extract and validate every URL found in text.
 
     Checks run in parallel (up to _MAX_PARALLEL threads) so a 15-URL article
@@ -122,10 +140,18 @@ def validate_links(text, check_wayback=True, http_timeout=_HEAD_TIMEOUT, wayback
     if not urls:
         return []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(urls), _MAX_PARALLEL)) as pool:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(urls), _MAX_PARALLEL)
+    ) as pool:
         futures = {
-            pool.submit(_check_one, url, check_wayback, http_timeout, wayback_timeout,
-                        wayback_stale_days): url
+            pool.submit(
+                _check_one,
+                url,
+                check_wayback,
+                http_timeout,
+                wayback_timeout,
+                wayback_stale_days,
+            ): url
             for url in urls
         }
         # Collect results preserving original URL order
@@ -135,6 +161,11 @@ def validate_links(text, check_wayback=True, http_timeout=_HEAD_TIMEOUT, wayback
             try:
                 results_map[url] = future.result()
             except Exception as exc:
-                results_map[url] = {"url": url, "status_code": None, "ok": False, "error": str(exc)}
+                results_map[url] = {
+                    "url": url,
+                    "status_code": None,
+                    "ok": False,
+                    "error": str(exc),
+                }
 
     return [results_map[url] for url in urls if url in results_map]

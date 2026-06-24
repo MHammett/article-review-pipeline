@@ -1,8 +1,6 @@
 """Tests for adapters.citation.wayback (all HTTP mocked)."""
-import sys, os
 
 from unittest.mock import patch, MagicMock
-import json
 
 from ci_article_review.adapters.citation import wayback
 
@@ -25,7 +23,10 @@ class TestWaybackCheck:
                 }
             }
         }
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", return_value=_mock_response(payload)):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
             result = wayback.check("https://example.com")
         assert result["archived"] is True
         assert result["snapshot_url"].startswith("https://web.archive.org")
@@ -34,13 +35,19 @@ class TestWaybackCheck:
 
     def test_not_archived(self):
         payload = {"archived_snapshots": {}}
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", return_value=_mock_response(payload)):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
             result = wayback.check("https://example.com")
         assert result["archived"] is False
         assert "snapshot_url" not in result
 
     def test_network_error_returns_none_archived(self):
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", side_effect=Exception("timeout")):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            side_effect=Exception("timeout"),
+        ):
             result = wayback.check("https://example.com")
         assert result["archived"] is None
         assert "error" in result
@@ -56,13 +63,19 @@ class TestWaybackCheck:
                 }
             }
         }
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", return_value=_mock_response(payload)):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
             result = wayback.check("https://old.com")
         assert result["snapshot_stale"] is True
 
     def test_fresh_snapshot_not_stale(self):
         from datetime import datetime, timezone, timedelta
-        recent_ts = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d") + "000000"
+
+        recent_ts = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+            "%Y%m%d"
+        ) + "000000"
         payload = {
             "archived_snapshots": {
                 "closest": {
@@ -72,14 +85,20 @@ class TestWaybackCheck:
                 }
             }
         }
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", return_value=_mock_response(payload)):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
             result = wayback.check("https://fresh.com")
         assert result["snapshot_stale"] is False
 
     def test_custom_stale_days_override(self):
         from datetime import datetime, timezone, timedelta
+
         # Snapshot from 100 days ago: NOT stale at default 180, but stale at a custom 90.
-        ts = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y%m%d") + "000000"
+        ts = (datetime.now(timezone.utc) - timedelta(days=100)).strftime(
+            "%Y%m%d"
+        ) + "000000"
         payload = {
             "archived_snapshots": {
                 "closest": {
@@ -89,7 +108,10 @@ class TestWaybackCheck:
                 }
             }
         }
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", return_value=_mock_response(payload)):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
             default_result = wayback.check("https://x.com")
             strict_result = wayback.check("https://x.com", stale_days=90)
         assert default_result["snapshot_stale"] is False
@@ -99,9 +121,14 @@ class TestWaybackCheck:
         # A web.archive.org link is recognized from its embedded timestamp — no
         # archive-of-an-archive lookup. requests.get must not be called.
         from datetime import datetime, timezone, timedelta
-        recent = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y%m%d") + "120000"
+
+        recent = (datetime.now(timezone.utc) - timedelta(days=20)).strftime(
+            "%Y%m%d"
+        ) + "120000"
         url = f"https://web.archive.org/web/{recent}/https://example.com/article"
-        with patch("ci_article_review.adapters.citation.wayback.requests.get") as mock_get:
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get"
+        ) as mock_get:
             result = wayback.check(url)
         mock_get.assert_not_called()
         assert result["is_archive_url"] is True
@@ -117,15 +144,21 @@ class TestWaybackCheck:
 
     def test_archive_url_respects_custom_stale_days(self):
         from datetime import datetime, timezone, timedelta
-        ts = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y%m%d") + "000000"
+
+        ts = (datetime.now(timezone.utc) - timedelta(days=100)).strftime(
+            "%Y%m%d"
+        ) + "000000"
         url = f"https://web.archive.org/web/{ts}/https://example.com"
-        assert wayback.check(url)["snapshot_stale"] is False              # default 180
+        assert wayback.check(url)["snapshot_stale"] is False  # default 180
         assert wayback.check(url, stale_days=90)["snapshot_stale"] is True
 
     def test_non_archive_url_still_queries_api(self):
         # Regression: ordinary URLs must still hit the availability API.
         payload = {"archived_snapshots": {}}
-        with patch("ci_article_review.adapters.citation.wayback.requests.get", return_value=_mock_response(payload)) as mock_get:
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ) as mock_get:
             wayback.check("https://example.com/normal")
         mock_get.assert_called_once()
 
@@ -134,11 +167,18 @@ class TestWaybackCheck:
         assert "Not archived" in summary
 
     def test_format_summary_network_error(self):
-        summary = wayback.format_summary({"url": "https://x.com", "archived": None, "error": "timeout"})
+        summary = wayback.format_summary(
+            {"url": "https://x.com", "archived": None, "error": "timeout"}
+        )
         assert "failed" in summary.lower()
 
     def test_format_summary_archived(self):
-        wb = {"archived": True, "snapshot_age_days": 30, "snapshot_stale": False, "snapshot_url": "https://web.archive.org/..."}
+        wb = {
+            "archived": True,
+            "snapshot_age_days": 30,
+            "snapshot_stale": False,
+            "snapshot_url": "https://web.archive.org/...",
+        }
         summary = wayback.format_summary(wb)
         assert "30d" in summary
         assert "[STALE]" not in summary

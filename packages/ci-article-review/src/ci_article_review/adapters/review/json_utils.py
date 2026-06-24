@@ -6,6 +6,7 @@ preamble, or surround it with prose. A bare ``json.loads`` fails on all of those
 This helper tries, in order: direct parse; a fenced block; and finally the
 outermost ``{`` … ``}`` span. Returns the parsed object, or None if nothing parses.
 """
+
 import json
 import re
 

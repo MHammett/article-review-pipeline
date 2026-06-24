@@ -18,7 +18,6 @@ is requested via the system prompt; responses are occasionally wrapped in
 markdown code fences, which this adapter strips before parsing.
 """
 
-import json
 import time
 import logging
 import requests
@@ -46,6 +45,7 @@ log = logging.getLogger(__name__)
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 def call(
     system_prompt,
     user_prompt,
@@ -61,14 +61,21 @@ def call(
     # Streaming socket timeout = inter-token read-gap (small constant). The big
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
-    models_to_try = [requested_model] + [m for m in _FALLBACK_MODELS if m != requested_model]
+    models_to_try = [requested_model] + [
+        m for m in _FALLBACK_MODELS if m != requested_model
+    ]
 
     result = None
     for attempt_model in models_to_try:
         result = _call_perplexity(
-            system_prompt, user_prompt, api_key,
-            model=attempt_model, retry=retry, retry_delay=retry_delay,
-            reasoning_effort=reasoning_effort, timeout=timeout,
+            system_prompt,
+            user_prompt,
+            api_key,
+            model=attempt_model,
+            retry=retry,
+            retry_delay=retry_delay,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -80,7 +87,9 @@ def call(
             return result
 
         if "503" in str(result.get("error", "")) and attempt_model != models_to_try[-1]:
-            log.warning(f"Perplexity {attempt_model} unavailable. Trying next fallback model.")
+            log.warning(
+                f"Perplexity {attempt_model} unavailable. Trying next fallback model."
+            )
             continue
 
         return result
@@ -92,7 +101,17 @@ def call(
 # HTTP execution
 # ---------------------------------------------------------------------------
 
-def _call_perplexity(system_prompt, user_prompt, api_key, model, retry, retry_delay, reasoning_effort=None, timeout=None):
+
+def _call_perplexity(
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry,
+    retry_delay,
+    reasoning_effort=None,
+    timeout=None,
+):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
     headers = {
@@ -119,7 +138,13 @@ def _call_perplexity(system_prompt, user_prompt, api_key, model, retry, retry_de
     t0 = time.monotonic()
 
     def _post():
-        resp = session.post(PERPLEXITY_API_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            PERPLEXITY_API_URL,
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=timeout,
+        )
         if resp.status_code in (429, 500, 502, 503, 504) and retry:
             log.warning(
                 f"Perplexity {model} HTTP {resp.status_code}. "
@@ -127,7 +152,13 @@ def _call_perplexity(system_prompt, user_prompt, api_key, model, retry, retry_de
             )
             resp.close()
             time.sleep(retry_delay)
-            resp = session.post(PERPLEXITY_API_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                PERPLEXITY_API_URL,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
         resp.raise_for_status()
         return resp
 

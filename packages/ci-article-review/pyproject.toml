@@ -27,3 +27,8 @@ testpaths = ["tests"]
 python_version = "3.10"
 strict = false
 ignore_missing_imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"src/ci_article_review/check.py" = ["E402"]
+"src/ci_article_review/discover.py" = ["E402"]
+"src/ci_article_review/pipeline.py" = ["E402"]
