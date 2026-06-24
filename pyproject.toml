@@ -9,3 +9,13 @@ dev = [
     "ruff>=0.4",
     "pytest-cov>=5.0",
 ]
+
+# Authoritative mypy config. CI runs `mypy` from the repo root, so this is the
+# config mypy actually reads — per-package [tool.mypy] sections are not consulted
+# in that invocation. ci-article-review is legacy code with many untyped
+# functions and optional/lazy third-party imports (yaml, google.auth,
+# trafilatura), so we stay non-strict and ignore missing import stubs.
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true

@@ -24,3 +24,5 @@ voice-profile-bootstrap/profiles/
 .venv/
 *.egg-info/
 dist/
+.coverage
+htmlcov/
