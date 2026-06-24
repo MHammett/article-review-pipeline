@@ -12,6 +12,10 @@ dev = [
     "httpx2>=2.4.0",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+addopts = "--import-mode=importlib"
+
 # Authoritative mypy config. CI runs `mypy` from the repo root, so this is the
 # config mypy actually reads — per-package [tool.mypy] sections are not consulted
 # in that invocation. ci-article-review is legacy code with many untyped
