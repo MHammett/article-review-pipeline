@@ -18,8 +18,8 @@ At `standard` thoroughness (one model per domain), typical cost is under $1.00 p
 All commands run in **Command Prompt** or **PowerShell** on Windows. macOS/Linux: substitute `cp` for `copy` and use forward slashes.
 
 ```
-git clone https://github.com/MHammett/article-review-pipeline.git
-cd article-review-pipeline
+git clone https://github.com/MHammett/content-intelligence.git
+cd content-intelligence
 pip install -r requirements.txt
 ```
 
@@ -149,7 +149,7 @@ pytest tests/
 ## Project structure
 
 ```
-article-review-pipeline/
+content-intelligence/
 ├── pipeline.py                   orchestration engine — start here
 ├── config_loader.py              config parsing and validation
 ├── consolidation.py              weighted ensemble consolidation → one report

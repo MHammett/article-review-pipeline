@@ -1,13 +1,13 @@
 # voice-profile-bootstrap — Development Plan
 
-Analyzes a writing corpus across multiple platforms and synthesizes a structured voice/style profile for use in `publication.yaml`. Lives at `voice-profile-bootstrap/` inside the article-review-pipeline repo; shares no runtime code with the pipeline but follows the same conventions (YAML config, secrets in gitignored files, `tests/` with mocked network).
+Analyzes a writing corpus across multiple platforms and synthesizes a structured voice/style profile for use in `publication.yaml`. Lives at `voice-profile-bootstrap/` inside the content-intelligence repo; shares no runtime code with the pipeline but follows the same conventions (YAML config, secrets in gitignored files, `tests/` with mocked network).
 
 ---
 
 ## Repo layout
 
 ```
-article-review-pipeline/
+content-intelligence/
   voice-profile-bootstrap/
     bootstrap.py              ← CLI entry point
     normalize.py              ← corpus cleaning, deduplication, per-doc metrics
