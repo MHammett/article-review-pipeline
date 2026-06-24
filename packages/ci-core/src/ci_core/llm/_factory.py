@@ -20,12 +20,39 @@ _REGISTRY: dict[str, type] = {
 
 
 class AdapterFactory:
+    """Creates ``Adapter`` instances by provider name.
+
+    Provider config is read from a ``LLMSettings`` object (which in turn is
+    read from environment variables or a config file via ``get_settings()``).
+    Each entry in ``LLMSettings`` is a ``ProviderConfig`` named after its
+    provider, so ``getattr(llm_settings, "anthropic")`` returns the
+    ``ProviderConfig`` for Anthropic — no lookup table needed.
+    """
+
     @staticmethod
     def get(provider: str, llm_settings: LLMSettings | None = None) -> Adapter:
-        """Return an Adapter instance for *provider*.
+        """Return a configured ``Adapter`` instance for *provider*.
 
-        Reads provider config from *llm_settings*, defaulting to the global
-        Settings singleton when not supplied.
+        Resolves the correct ``ProviderConfig`` from *llm_settings* using
+        ``getattr(llm_settings, provider)`` — this works because
+        ``LLMSettings`` has one attribute per provider, named to match the
+        registry keys (``"anthropic"``, ``"openai"``, ``"gemini"``,
+        ``"mistral"``, ``"grok"``).
+
+        Args:
+            provider: Provider name.  Must be one of the keys in ``_REGISTRY``:
+                ``"anthropic"``, ``"openai"``, ``"gemini"``, ``"mistral"``,
+                or ``"grok"``.
+            llm_settings: Optional settings object.  Defaults to the global
+                ``Settings`` singleton (``get_settings().llm``) when ``None``.
+
+        Returns:
+            A concrete adapter instance that satisfies the ``Adapter`` protocol.
+
+        Raises:
+            ValueError: If *provider* is not a recognised provider name.
+            RuntimeError: If the provider's optional SDK package is not
+                installed (propagated from the adapter's ``__init__``).
         """
         if provider not in _REGISTRY:
             raise ValueError(

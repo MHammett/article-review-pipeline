@@ -7,6 +7,8 @@ from ._base import _with_retry
 
 _DEFAULT_MODEL = "gpt-4o"
 
+# ``as AsyncOpenAI`` (same name) makes the binding re-exportable and
+# visible to mypy even though the import is inside a try block.
 try:
     from openai import AsyncOpenAI as AsyncOpenAI
     from openai import RateLimitError as _OpenAIRateLimit
@@ -19,7 +21,29 @@ except ImportError:
 
 
 class OpenAIAdapter:
+    """LLM adapter for OpenAI GPT models.
+
+    Uses the ``openai`` SDK (optional dep: ``ci-core[openai]``).
+    Config is read from ``LLMSettings.openai`` (a ``ProviderConfig``):
+    ``api_key``, ``model`` (defaults to ``gpt-4o``), ``timeout``,
+    and ``max_retries``.
+
+    Also serves as the base for ``GrokAdapter``, which passes a custom
+    *base_url* to redirect calls to xAI's OpenAI-compatible endpoint.
+    """
+
     def __init__(self, config: ProviderConfig, *, base_url: str | None = None) -> None:
+        """Initialise the OpenAI async client.
+
+        Args:
+            config: Provider config from ``LLMSettings.openai`` (or
+                ``LLMSettings.grok`` when called from ``GrokAdapter``).
+            base_url: Override the API base URL.  ``None`` uses the default
+                OpenAI endpoint; ``GrokAdapter`` passes ``https://api.x.ai/v1``.
+
+        Raises:
+            RuntimeError: If the ``openai`` package is not installed.
+        """
         if not _available:
             raise RuntimeError(
                 "openai package not installed; pip install 'ci-core[openai]'"
@@ -27,7 +51,7 @@ class OpenAIAdapter:
         self._client = AsyncOpenAI(  # type: ignore[misc]
             api_key=config.api_key,
             timeout=float(config.timeout),
-            max_retries=0,
+            max_retries=0,  # retry logic lives in _with_retry, not the SDK
             **({"base_url": base_url} if base_url else {}),
         )
         self._model = config.model or _DEFAULT_MODEL
@@ -40,6 +64,11 @@ class OpenAIAdapter:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> str:
+        """Send *prompt* to the model and return the response text.
+
+        When *system* is non-empty it is prepended as a ``{"role": "system"}``
+        message, which is the standard OpenAI chat-completions convention.
+        """
         rate_limit_excs = (_OpenAIRateLimit,) if _OpenAIRateLimit else ()
         messages = []
         if system:

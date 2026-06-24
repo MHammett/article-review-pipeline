@@ -9,6 +9,7 @@ dev = [
     "ruff>=0.4",
     "pytest-cov>=5.0",
     "pytest-asyncio>=0.23",
+    "httpx2>=2.4.0",
 ]
 
 # Authoritative mypy config. CI runs `mypy` from the repo root, so this is the
