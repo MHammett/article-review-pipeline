@@ -148,54 +148,83 @@ pytest tests/
 
 ## Project structure
 
+The repository is a [uv](https://docs.astral.sh/uv/) workspace. Code lives under
+`packages/`, one package per tool, each with its own `pyproject.toml`, `src/`
+layout, and `tests/`. The article-review pipeline is the mature package; the
+others are early-stage.
+
 ```
 content-intelligence/
-├── pipeline.py                   orchestration engine — start here
-├── config_loader.py              config parsing and validation
-├── consolidation.py              weighted ensemble consolidation → one report
-├── handoff_parser.py             parses Template A and Template C documents
-├── history.py                    saves run artifacts to pipeline_history/
-├── check.py                      connectivity/credential check for all services
-├── discover.py                   live model discovery — queries provider APIs for available models
-├── model_registry.py             loads configs/model_registry.yaml — current/superseded model detection
-├── timeout_model.py              sliding-scale per-call timeout from size × model × effort
-├── redact.py                     scrubs API keys from error output before logging/printing
+├── pyproject.toml                workspace root — [tool.uv.workspace] members, dev deps, mypy config
+├── uv.lock                       resolved lockfile for the whole workspace
+├── Makefile                      common dev tasks
 ├── requirements.txt              runtime dependencies
-├── requirements-dev.txt          adds pytest for development
+├── requirements-dev.txt          adds pytest and other dev tooling
 ├── .env.example                  documents all supported environment variables
+├── .pre-commit-config.yaml       ruff + mypy pre-commit hooks
 │
-├── adapters/
-│   ├── grammar/languagetool.py   grammar correction (Pass 1)
-│   ├── review/gemini.py          fact verification with live search
-│   ├── review/openai.py          voice/style, completeness, optional web search
-│   ├── review/mistral.py         argument integrity and red team
-│   ├── review/perplexity.py      search-grounded fact-check (optional)
-│   ├── review/grok.py            red team — contrarian corpus (optional)
-│   ├── review/claude.py          argument integrity — independent lineage (optional)
-│   ├── review/json_utils.py      shared robust JSON extraction (fences, think-preambles)
-│   ├── cms/wordpress.py          WordPress REST API publisher
-│   └── citation/
-│       ├── resolver.py           primary source resolution and checksums
-│       ├── wayback.py            Wayback Machine archive availability check
-│       └── sources/              FRED, EIA, Census, FHWA data adapters
+├── packages/
+│   ├── ci-article-review/        the article-review pipeline (the bulk of the code)
+│   │   ├── pyproject.toml
+│   │   ├── src/ci_article_review/
+│   │   │   ├── pipeline.py            orchestration engine — start here
+│   │   │   ├── config_loader.py       config parsing and validation
+│   │   │   ├── consolidation.py       weighted ensemble consolidation → one report
+│   │   │   ├── handoff_parser.py      parses Template A and Template C documents
+│   │   │   ├── history.py             saves run artifacts to pipeline_history/
+│   │   │   ├── check.py               connectivity/credential check for all services
+│   │   │   ├── discover.py            live model discovery — queries provider APIs
+│   │   │   ├── model_registry.py      loads configs/model_registry.yaml — current/superseded detection
+│   │   │   ├── timeout_model.py       sliding-scale per-call timeout from size × model × effort
+│   │   │   ├── probe.py               lightweight provider reachability probe
+│   │   │   ├── redact.py              scrubs API keys from error output before logging/printing
+│   │   │   │
+│   │   │   ├── adapters/
+│   │   │   │   ├── grammar/languagetool.py   grammar correction (Pass 1)
+│   │   │   │   ├── review/gemini.py          fact verification with live search
+│   │   │   │   ├── review/openai.py          voice/style, completeness, optional web search
+│   │   │   │   ├── review/mistral.py         argument integrity and red team
+│   │   │   │   ├── review/perplexity.py      search-grounded fact-check (optional)
+│   │   │   │   ├── review/grok.py            red team — contrarian corpus (optional)
+│   │   │   │   ├── review/claude.py          argument integrity — independent lineage (optional)
+│   │   │   │   ├── review/json_utils.py      shared robust JSON extraction (fences, think-preambles)
+│   │   │   │   ├── review/streaming.py       streaming response helpers
+│   │   │   │   ├── cms/wordpress.py          WordPress REST API publisher
+│   │   │   │   └── citation/
+│   │   │   │       ├── resolver.py           primary source resolution and checksums
+│   │   │   │       ├── wayback.py            Wayback Machine archive availability check
+│   │   │   │       └── sources/              FRED, EIA, Census, FHWA data adapters
+│   │   │   │
+│   │   │   ├── analysis/
+│   │   │   │   ├── readability.py     Flesch-Kincaid grade, word count, sentence stats
+│   │   │   │   ├── links.py           URL extraction, HTTP status check, Wayback archive check
+│   │   │   │   ├── seo.py             title length, heading structure, meta description
+│   │   │   │   ├── webpage.py         webpage fetch/extraction helpers
+│   │   │   │   └── cost.py            token-based cost estimation with per-model pricing table
+│   │   │   │
+│   │   │   ├── prompts/               system prompts for each review domain
+│   │   │   ├── configs/               committed defaults: presets.yaml, pricing.yaml,
+│   │   │   │                          timeouts.yaml, model_registry.yaml, *.example.yaml
+│   │   │   │                          (real user.yaml + publication.yaml are gitignored)
+│   │   │   └── handoff_templates/     fill these out to submit drafts and publish
+│   │   └── tests/                     pipeline test suite, all external calls mocked
+│   │
+│   ├── ci-core/                  shared library for CI tools (early stage)
+│   │   ├── pyproject.toml
+│   │   ├── src/ci_core/
+│   │   └── tests/
+│   │
+│   └── ci-web-intel/             web intelligence gathering tools (stub)
+│       ├── pyproject.toml
+│       ├── src/ci_web_intel/
+│       └── tests/
 │
-├── analysis/
-│   ├── readability.py            Flesch-Kincaid grade, word count, sentence stats
-│   ├── links.py                  URL extraction, HTTP status check, Wayback archive check
-│   ├── seo.py                    title length, heading structure, meta description
-│   └── cost.py                   token-based cost estimation with per-model pricing table
-│
-├── prompts/                      system prompts for each review domain
-├── configs/                      API keys + publication settings (gitignored), plus
-│                                 committed defaults: presets.yaml, pricing.yaml,
-│                                 timeouts.yaml, model_registry.yaml
-├── handoff_templates/            fill these out to submit drafts and publish
+├── voice-profile-bootstrap/      voice-profile bootstrapping (see PLAN.md)
 ├── pipeline_history/             run reports saved here (gitignored, local only)
-├── docs/                         extended documentation
-│   ├── PROVIDERS.md              account setup for every service
-│   ├── CONFIGURATION.md          full config reference, thoroughness, ensemble weights
-│   └── TROUBLESHOOTING.md        error messages and fixes
-└── tests/                        279 tests, all external calls mocked
+└── docs/                         extended documentation
+    ├── PROVIDERS.md              account setup for every service
+    ├── CONFIGURATION.md          full config reference, thoroughness, ensemble weights
+    └── TROUBLESHOOTING.md        error messages and fixes
 ```
 
 ---
