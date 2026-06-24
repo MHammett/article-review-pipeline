@@ -1,7 +1,11 @@
-.PHONY: install lint test build
+.PHONY: install setup lint test build
 
 install:
 	uv sync
+
+setup:
+	uv sync
+	uv run python -m ci_article_review.setup
 
 lint:
 	uv run ruff check packages/

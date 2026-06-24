@@ -9,69 +9,71 @@ At `standard` thoroughness (one model per domain), typical cost is under $1.00 p
 ## Requirements
 
 - Python 3.10 or higher — https://www.python.org/downloads/
+- [uv](https://docs.astral.sh/uv/) — fast Python package manager
 - Git — https://git-scm.com/downloads
 
 ---
 
 ## Installation
 
-All commands run in **Command Prompt** or **PowerShell** on Windows. macOS/Linux: substitute `cp` for `copy` and use forward slashes.
+All commands run in **PowerShell** on Windows. macOS/Linux: use forward slashes.
 
-```
+```powershell
 git clone https://github.com/MHammett/content-intelligence.git
 cd content-intelligence
-pip install -r requirements.txt
+uv sync
 ```
 
-Test dependencies (optional):
-
-```
-pip install -r requirements-dev.txt
-```
+`uv sync` installs all dependencies (including dev tools) into a local `.venv/` — no `pip install` or manual venv activation needed.
 
 ---
 
 ## Quick start
 
-**1. Copy the config templates:**
+**1. Run setup:**
 
-```
-copy configs\user.example.yaml configs\user.yaml
-copy configs\publication.example.yaml configs\your_publication_name.yaml
+```powershell
+uv run python -m ci_article_review.setup
 ```
 
-**2. Fill in `configs/user.yaml`** with your API keys and model selection. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for account setup instructions. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full config reference.
+This creates `configs/`, copies the example templates, prompts for your publication name, and prints exactly what to fill in next. Run it with `--publication NAME` to skip the interactive prompt:
+
+```powershell
+uv run python -m ci_article_review.setup --publication dnacom
+```
+
+**2. Fill in `configs/user.yaml`** with your API keys and model selection. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for account setup instructions per provider. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full config reference.
 
 **3. Fill in `configs/your_publication_name.yaml`** with your voice profile, audience description, and WordPress credentials.
 
 **4. Verify your setup:**
 
-```
-python check.py --publication your_publication_name
+```powershell
+uv run python -m ci_article_review.check --publication your_publication_name
 ```
 
 Makes one minimal call to each configured service and reports pass/fail with specific error messages before you run a real article through.
 
 **Check for newer models** (optional, run any time):
 
-```
-python discover.py
+```powershell
+uv run python -m ci_article_review.discover
 ```
 
 Queries each provider's live models API and reports what's available — so you always know when a newer model exists without reading every provider's changelog. Compares against your configured models and flags anything newer.
 
 **5. Run the pipeline:**
 
-```
-python pipeline.py --draft path/to/handoff.md --publication your_publication_name
+```powershell
+uv run python -m ci_article_review.pipeline --draft path/to/handoff.md --publication your_publication_name
 ```
 
 Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` argument.
 
 **6. Publish an approved draft:**
 
-```
-python pipeline.py --publish path/to/publication_handoff.md --publication your_publication_name
+```powershell
+uv run python -m ci_article_review.pipeline --publish path/to/publication_handoff.md --publication your_publication_name
 ```
 
 Always saves as a WordPress draft unless you add `--publish-live`.
@@ -103,8 +105,8 @@ and infers only the title and body — it cannot supply an author's
 
 ## Command-line options
 
-```
-python pipeline.py --draft HANDOFF --publication NAME [options]
+```powershell
+uv run python -m ci_article_review.pipeline --draft HANDOFF --publication NAME [options]
 ```
 
 | Flag | Purpose |
@@ -128,8 +130,8 @@ python pipeline.py --draft HANDOFF --publication NAME [options]
 
 Example — measure one model/domain's true latency cheaply:
 
-```
-python pipeline.py --draft handoff.md --publication mypub --cost-preset maximum --only-model openai --only-domain fact_check --no-timeout
+```powershell
+uv run python -m ci_article_review.pipeline --draft handoff.md --publication mypub --cost-preset maximum --only-model openai --only-domain fact_check --no-timeout
 ```
 
 > On Windows `cmd.exe`, keep the whole command on one line — backslash line-continuation is a bash feature and will split the command.
@@ -138,11 +140,11 @@ python pipeline.py --draft handoff.md --publication mypub --cost-preset maximum 
 
 ## Running the tests
 
-```
-pytest tests/
+```powershell
+uv run pytest packages/
 ```
 
-279 tests, all external API calls mocked — no keys required.
+360 tests, all external API calls mocked — no keys required.
 
 ---
 

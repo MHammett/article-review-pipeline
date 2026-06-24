@@ -13,19 +13,33 @@ The first two are gitignored and have example templates you copy (`user.example.
 
 ---
 
-## Step 1: Copy the example files
+## Step 1: Run setup
 
+The fastest way to scaffold configs is the built-in setup command, which also verifies dependencies:
+
+```powershell
+uv run python -m ci_article_review.setup --publication your_publication_name
 ```
-# Windows (Command Prompt or PowerShell)
-copy configs\user.example.yaml configs\user.yaml
-copy configs\publication.example.yaml configs\your_publication_name.yaml
 
+This creates `configs/`, copies both example templates, and prints exactly what to fill in.
+
+**Manual copy** (if you prefer to do it yourself):
+
+```powershell
+# PowerShell
+New-Item -ItemType Directory -Force configs
+copy packages\ci-article-review\src\ci_article_review\configs\user.example.yaml configs\user.yaml
+copy packages\ci-article-review\src\ci_article_review\configs\publication.example.yaml configs\your_publication_name.yaml
+```
+
+```bash
 # macOS / Linux / Git Bash
-cp configs/user.example.yaml configs/user.yaml
-cp configs/publication.example.yaml configs/your_publication_name.yaml
+mkdir -p configs
+cp packages/ci-article-review/src/ci_article_review/configs/user.example.yaml configs/user.yaml
+cp packages/ci-article-review/src/ci_article_review/configs/publication.example.yaml configs/your_publication_name.yaml
 ```
 
-The `.gitignore` excludes `configs/user.yaml` and all `configs/*.yaml` files that aren't examples. Your keys will not be committed.
+The `.gitignore` excludes `configs/user.yaml` and all `configs/*.yaml` files that aren't examples or committed defaults. Your keys will not be committed.
 
 ---
 

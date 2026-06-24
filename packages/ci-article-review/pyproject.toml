@@ -10,6 +10,12 @@ dependencies = [
     "python-dotenv>=1.0.0,<2.0",
 ]
 
+[project.scripts]
+ci-setup = "ci_article_review.setup:main"
+ci-check = "ci_article_review.check:main"
+ci-discover = "ci_article_review.discover:main"
+ci-review = "ci_article_review.pipeline:main"
+
 [tool.uv.sources]
 ci-core = { workspace = true }
 
