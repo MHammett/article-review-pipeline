@@ -15,7 +15,7 @@ audience:
     Engineering managers who need to evaluate technical decisions without
     implementing them.
 
-voice_profile: |
+style_profile: |
   Direct and precise. Conclusions first, evidence second. No hedging on claims
   the data supports. Technical vocabulary used without definition — the reader
   knows what p99 latency and MTTR mean. Short declarative sentences for emphasis.

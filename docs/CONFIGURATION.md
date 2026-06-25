@@ -744,7 +744,7 @@ Open `configs/your_publication_name.yaml`. Key fields:
 |---|---|
 | `publication_description` | One paragraph: what you cover, who reads it, what makes a piece unpublishable |
 | `audience.primary` | Who reads it, what they know, what makes them stop reading |
-| `voice_profile` | Your characteristic style — see PLAYBOOK.md for how to develop this |
+| `style_profile` | Your characteristic style — see PLAYBOOK.md for how to develop this (the legacy key `voice_profile` is still accepted) |
 | `style_rules.banned_words` | Words you never want in your published writing |
 | `style_rules.banned_phrases` | Phrases you never want |
 | `seo_rules.title_max_chars` | SEO title length ceiling (default 60) |

@@ -210,7 +210,7 @@ def build_handoff_from_url(url):
     """Fetch + extract a web page and synthesize an in-memory handoff dict.
 
     The pipeline only strictly needs ``title`` and ``draft``; the publication
-    config still supplies voice_profile/audience to the review prompts. Optional
+    config still supplies style_profile/audience to the review prompts. Optional
     handoff fields (primary_claim, pre_draft_analysis, etc.) are left unset —
     URL mode cannot infer an author's intent.
     """
