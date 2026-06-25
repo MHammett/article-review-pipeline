@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from ci_core.http import USER_AGENT
+
 from ..adapters.citation.wayback import check as wayback_check
 
 log = logging.getLogger(__name__)
@@ -69,14 +71,14 @@ def _check_http(url, timeout=_HEAD_TIMEOUT):
             url,
             allow_redirects=True,
             timeout=timeout,
-            headers={"User-Agent": "ArticleReviewPipeline/1.0"},
+            headers={"User-Agent": USER_AGENT},
         )
         if resp.status_code == 405:
             with requests.get(
                 url,
                 allow_redirects=True,
                 timeout=timeout,
-                headers={"User-Agent": "ArticleReviewPipeline/1.0"},
+                headers={"User-Agent": USER_AGENT},
                 stream=True,
             ) as resp:
                 final_url = resp.url

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from ci_core.http import USER_AGENT
+
 log = logging.getLogger(__name__)
 
 _AVAILABILITY_API = "https://archive.org/wayback/available"
@@ -71,7 +73,7 @@ def check(url, timeout=10, stale_days=None):
             _AVAILABILITY_API,
             params={"url": url},
             timeout=timeout,
-            headers={"User-Agent": "ArticleReviewPipeline/1.0"},
+            headers={"User-Agent": USER_AGENT},
         )
         resp.raise_for_status()
         data = resp.json()
