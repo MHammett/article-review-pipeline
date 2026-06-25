@@ -49,7 +49,9 @@ and aligning the implementation's terminology from "voice" to "style" so the nam
 matches the code. The publication.yaml output key is `style_profile` (the legacy
 `voice_profile` key is still read for backward compatibility). "Voice" is retained
 only where it denotes the distinct-authorial-persona detection task (see the package's
-prompt files) and the `voice_style` review domain in `ci-article-review`.
+prompt files) and the `voice_style` review domain in `ci-article-review`. The full
+"voice" vs. "style" distinction and the per-spot decisions are documented in
+[TERMINOLOGY.md](TERMINOLOGY.md).
 
 ## Consistency checklist (current audit)
 

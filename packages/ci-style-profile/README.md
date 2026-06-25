@@ -2,6 +2,8 @@
 
 Analyzes your writing corpus across multiple platforms and synthesizes a structured style profile for use in `publication.yaml`.
 
+> **"voice" vs. "style":** these are distinct terms here — "voice" = a distinct authorial persona (what the detection step finds), "style" = the writing fingerprint and the published profile. The detection prompts keep "voice" on purpose. See [docs/TERMINOLOGY.md](../../docs/TERMINOLOGY.md).
+
 ## Prerequisites
 
 - Python 3.10+
