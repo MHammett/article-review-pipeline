@@ -5,10 +5,22 @@ description = "Web intelligence gathering tools"
 requires-python = ">=3.10"
 dependencies = [
     "ci-core",
+    "ci-article-review",
+    "requests>=2.31",
+    "ruamel.yaml>=0.18",
+    "google-auth>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "google-api-python-client>=2.0",
+    "msal>=1.20",
+    "python-docx>=1.1",
 ]
+
+[project.scripts]
+voice-profile-bootstrap = "ci_web_intel.bootstrap:main"
 
 [tool.uv.sources]
 ci-core = { workspace = true }
+ci-article-review = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
