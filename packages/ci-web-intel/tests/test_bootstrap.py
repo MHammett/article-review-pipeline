@@ -212,14 +212,14 @@ class TestPublicationFlag:
         from ci_web_intel.bootstrap import _resolve_output_path
 
         path = _resolve_output_path("mikehammett", None)
-        assert str(path) == "configs/mikehammett.yaml"
+        assert path == Path("configs") / "mikehammett.yaml"
 
     def test_output_yaml_explicit_path(self):
         """--output-yaml sets explicit output path."""
         from ci_web_intel.bootstrap import _resolve_output_path
 
         path = _resolve_output_path(None, "/tmp/my_profile.yaml")
-        assert str(path) == "/tmp/my_profile.yaml"
+        assert path == Path("/tmp/my_profile.yaml")
 
 
 class TestRefreshFlag:
