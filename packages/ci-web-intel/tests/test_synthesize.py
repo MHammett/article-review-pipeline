@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 
 def _make_doc(text: str, source: str = "wordpress", date: str = "2024-01-15"):
     from ci_web_intel.collectors.base import Document
-    doc = Document.from_text(text=text, source=source, register="long_form", date=date, url_or_id="http://ex.com/1")
-    doc.metrics = {"avg_sentence_words": 15.0, "hedging_ratio": 0.05, "first_person_ratio": 0.2}
+
+    doc = Document.from_text(
+        text=text,
+        source=source,
+        register="long_form",
+        date=date,
+        url_or_id="http://ex.com/1",
+    )
+    doc.metrics = {
+        "avg_sentence_words": 15.0,
+        "hedging_ratio": 0.05,
+        "first_person_ratio": 0.2,
+    }
     return doc
 
 
@@ -107,19 +118,60 @@ class TestCanonicalMode:
         docs = [_make_doc("Long article text " * 100) for _ in range(5)]
         call_count = []
 
-        def _fake_call_all(system_prompt, user_prompt, user_config, models=None, max_parallel=0, pass_name="", **kw):
+        def _fake_call_all(
+            system_prompt,
+            user_prompt,
+            user_config,
+            models=None,
+            max_parallel=0,
+            pass_name="",
+            **kw,
+        ):
             call_count.append(("call_all", models, pass_name))
             return {
-                "claude": {"content": _CANONICAL_SYNTHESIS, "failed": False, "tokens": {}, "elapsed": 1.0, "_parsed": {"voice_profile": "test", "audience_primary": "test", "banned_words": ["utilize"], "banned_phrases": [], "positive_rules": ["rule1"]}},
-                "openai": {"content": _CANONICAL_SYNTHESIS, "failed": False, "tokens": {}, "elapsed": 1.0, "_parsed": {"voice_profile": "test", "audience_primary": "test", "banned_words": ["utilize"], "banned_phrases": [], "positive_rules": ["rule1"]}},
+                "claude": {
+                    "content": _CANONICAL_SYNTHESIS,
+                    "failed": False,
+                    "tokens": {},
+                    "elapsed": 1.0,
+                    "_parsed": {
+                        "voice_profile": "test",
+                        "audience_primary": "test",
+                        "banned_words": ["utilize"],
+                        "banned_phrases": [],
+                        "positive_rules": ["rule1"],
+                    },
+                },
+                "openai": {
+                    "content": _CANONICAL_SYNTHESIS,
+                    "failed": False,
+                    "tokens": {},
+                    "elapsed": 1.0,
+                    "_parsed": {
+                        "voice_profile": "test",
+                        "audience_primary": "test",
+                        "banned_words": ["utilize"],
+                        "banned_phrases": [],
+                        "positive_rules": ["rule1"],
+                    },
+                },
             }
 
-        def _fake_call_one(model_name, model_cfg, api_keys, system_prompt, user_prompt, pass_name=""):
+        def _fake_call_one(
+            model_name, model_cfg, api_keys, system_prompt, user_prompt, pass_name=""
+        ):
             call_count.append(("call_one", model_name, pass_name))
-            return {"content": _RECONCILE_CANONICAL, "failed": False, "tokens": {}, "elapsed": 1.0}
+            return {
+                "content": _RECONCILE_CANONICAL,
+                "failed": False,
+                "tokens": {},
+                "elapsed": 1.0,
+            }
 
-        with patch("ci_web_intel.synthesize.call_all", side_effect=_fake_call_all), \
-             patch("ci_web_intel.synthesize.call_one", side_effect=_fake_call_one):
+        with (
+            patch("ci_web_intel.synthesize.call_all", side_effect=_fake_call_all),
+            patch("ci_web_intel.synthesize.call_one", side_effect=_fake_call_one),
+        ):
             result = synthesize(docs, _USER_CONFIG, mode="canonical")
 
         call_all_calls = [c for c in call_count if c[0] == "call_all"]
@@ -135,10 +187,13 @@ class TestCanonicalMode:
 
         docs = [_make_doc("Test " * 100)]
 
-        with patch("ci_web_intel.synthesize.call_all", return_value={
-            "claude": {"failed": True, "error": "timeout", "tokens": {}},
-            "openai": {"failed": True, "error": "timeout", "tokens": {}},
-        }):
+        with patch(
+            "ci_web_intel.synthesize.call_all",
+            return_value={
+                "claude": {"failed": True, "error": "timeout", "tokens": {}},
+                "openai": {"failed": True, "error": "timeout", "tokens": {}},
+            },
+        ):
             with pytest.raises(SynthesisError):
                 synthesize(docs, _USER_CONFIG, mode="canonical")
 
@@ -153,6 +208,7 @@ class TestDetectMode:
 
         def _fake_detect(docs, user_config, **kw):
             from ci_web_intel.detect import VoiceCluster
+
             c = VoiceCluster(
                 label="technical analysis",
                 description="analytical",
@@ -166,34 +222,77 @@ class TestDetectMode:
             calls.append("detect_voices")
             return [c]
 
-        def _fake_classify(docs, clusters, ambiguity_threshold=0.2, per_voice_min_words=2000, **kw):
+        def _fake_classify(
+            docs, clusters, ambiguity_threshold=0.2, per_voice_min_words=2000, **kw
+        ):
             calls.append("classify_documents")
             return {clusters[0].label: clusters[0].assigned_docs}, []
 
-        def _fake_call_all(system_prompt, user_prompt, user_config, models=None, max_parallel=0, pass_name="", **kw):
+        def _fake_call_all(
+            system_prompt,
+            user_prompt,
+            user_config,
+            models=None,
+            max_parallel=0,
+            pass_name="",
+            **kw,
+        ):
             calls.append(f"call_all:{pass_name}")
-            content = _PER_VOICE_SYNTHESIS if "voice_" in pass_name else _CANONICAL_SYNTHESIS
+            content = (
+                _PER_VOICE_SYNTHESIS if "voice_" in pass_name else _CANONICAL_SYNTHESIS
+            )
             return {
-                "claude": {"content": content, "failed": False, "tokens": {}, "elapsed": 1.0, "_parsed": {
-                    "voice_profile": "test", "audience_primary": "test",
-                    "banned_words": ["utilize"], "banned_phrases": [], "positive_rules": ["rule1"],
-                    "additional_banned_words": [], "additional_positive_rules": [],
-                }},
-                "openai": {"content": content, "failed": False, "tokens": {}, "elapsed": 1.0, "_parsed": {
-                    "voice_profile": "test", "audience_primary": "test",
-                    "banned_words": ["utilize"], "banned_phrases": [], "positive_rules": ["rule1"],
-                    "additional_banned_words": [], "additional_positive_rules": [],
-                }},
+                "claude": {
+                    "content": content,
+                    "failed": False,
+                    "tokens": {},
+                    "elapsed": 1.0,
+                    "_parsed": {
+                        "voice_profile": "test",
+                        "audience_primary": "test",
+                        "banned_words": ["utilize"],
+                        "banned_phrases": [],
+                        "positive_rules": ["rule1"],
+                        "additional_banned_words": [],
+                        "additional_positive_rules": [],
+                    },
+                },
+                "openai": {
+                    "content": content,
+                    "failed": False,
+                    "tokens": {},
+                    "elapsed": 1.0,
+                    "_parsed": {
+                        "voice_profile": "test",
+                        "audience_primary": "test",
+                        "banned_words": ["utilize"],
+                        "banned_phrases": [],
+                        "positive_rules": ["rule1"],
+                        "additional_banned_words": [],
+                        "additional_positive_rules": [],
+                    },
+                },
             }
 
-        def _fake_call_one(model_name, model_cfg, api_keys, system_prompt, user_prompt, pass_name=""):
+        def _fake_call_one(
+            model_name, model_cfg, api_keys, system_prompt, user_prompt, pass_name=""
+        ):
             calls.append(f"call_one:{pass_name}")
-            return {"content": _RECONCILE_DETECT, "failed": False, "tokens": {}, "elapsed": 1.0}
+            return {
+                "content": _RECONCILE_DETECT,
+                "failed": False,
+                "tokens": {},
+                "elapsed": 1.0,
+            }
 
-        with patch("ci_web_intel.synthesize.detect_voices", side_effect=_fake_detect), \
-             patch("ci_web_intel.synthesize.classify_documents", side_effect=_fake_classify), \
-             patch("ci_web_intel.synthesize.call_all", side_effect=_fake_call_all), \
-             patch("ci_web_intel.synthesize.call_one", side_effect=_fake_call_one):
+        with (
+            patch("ci_web_intel.synthesize.detect_voices", side_effect=_fake_detect),
+            patch(
+                "ci_web_intel.synthesize.classify_documents", side_effect=_fake_classify
+            ),
+            patch("ci_web_intel.synthesize.call_all", side_effect=_fake_call_all),
+            patch("ci_web_intel.synthesize.call_one", side_effect=_fake_call_one),
+        ):
             result = synthesize(docs, _USER_CONFIG, mode="detect")
 
         assert "canonical" in result
@@ -208,14 +307,39 @@ class TestDetectMode:
 
         docs = [_make_doc("Text " * 100)]
 
-        with patch("ci_web_intel.synthesize.detect_voices", side_effect=CanonicalFallbackWarning("low confidence")), \
-             patch("ci_web_intel.synthesize.call_all", return_value={
-                 "claude": {"content": _CANONICAL_SYNTHESIS, "failed": False, "tokens": {}, "elapsed": 1.0, "_parsed": {
-                     "voice_profile": "test", "audience_primary": "test",
-                     "banned_words": [], "banned_phrases": [], "positive_rules": [],
-                 }},
-             }), \
-             patch("ci_web_intel.synthesize.call_one", return_value={"content": _RECONCILE_CANONICAL, "failed": False, "tokens": {}, "elapsed": 1.0}):
+        with (
+            patch(
+                "ci_web_intel.synthesize.detect_voices",
+                side_effect=CanonicalFallbackWarning("low confidence"),
+            ),
+            patch(
+                "ci_web_intel.synthesize.call_all",
+                return_value={
+                    "claude": {
+                        "content": _CANONICAL_SYNTHESIS,
+                        "failed": False,
+                        "tokens": {},
+                        "elapsed": 1.0,
+                        "_parsed": {
+                            "voice_profile": "test",
+                            "audience_primary": "test",
+                            "banned_words": [],
+                            "banned_phrases": [],
+                            "positive_rules": [],
+                        },
+                    },
+                },
+            ),
+            patch(
+                "ci_web_intel.synthesize.call_one",
+                return_value={
+                    "content": _RECONCILE_CANONICAL,
+                    "failed": False,
+                    "tokens": {},
+                    "elapsed": 1.0,
+                },
+            ),
+        ):
             result = synthesize(docs, _USER_CONFIG, mode="detect")
 
         assert "voice_profile" in result

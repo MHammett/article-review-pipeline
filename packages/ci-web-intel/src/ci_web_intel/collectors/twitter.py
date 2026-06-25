@@ -26,7 +26,9 @@ class TwitterCollector(Collector):
         if missing:
             raise ConfigError(cls.SOURCE_NAME, missing_keys=missing)
         if not config.get("user_id") and not config.get("username"):
-            raise ConfigError(cls.SOURCE_NAME, message="Either 'user_id' or 'username' is required")
+            raise ConfigError(
+                cls.SOURCE_NAME, message="Either 'user_id' or 'username' is required"
+            )
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.config['bearer_token']}"}
@@ -81,7 +83,9 @@ class TwitterCollector(Collector):
                 params["pagination_token"] = pagination_token
 
             try:
-                resp = requests.get(url, headers=self._headers(), params=params, timeout=(10, 30))
+                resp = requests.get(
+                    url, headers=self._headers(), params=params, timeout=(10, 30)
+                )
             except Exception as e:
                 raise CollectorError(self.SOURCE_NAME, f"Request failed: {e}")
 
@@ -91,13 +95,18 @@ class TwitterCollector(Collector):
                 time.sleep(wait)
                 retries += 1
                 if retries > 3:
-                    raise CollectorError(self.SOURCE_NAME, "Rate limit exhausted after 3 retries")
+                    raise CollectorError(
+                        self.SOURCE_NAME, "Rate limit exhausted after 3 retries"
+                    )
                 continue
             elif resp.status_code >= 500:
                 retries += 1
                 if retries > 3:
-                    raise CollectorError(self.SOURCE_NAME, f"Server error {resp.status_code} after 3 retries")
-                time.sleep(2 ** retries)
+                    raise CollectorError(
+                        self.SOURCE_NAME,
+                        f"Server error {resp.status_code} after 3 retries",
+                    )
+                time.sleep(2**retries)
                 continue
 
             try:
@@ -116,6 +125,7 @@ class TwitterCollector(Collector):
                 date = tweet.get("created_at", "")[:10]
                 # Normalize t.co URLs
                 import re
+
                 text = re.sub(r"https://t\.co/\S+", "[link]", text)
                 # Strip leading @mentions on replies
                 text = re.sub(r"^(@\w+\s+)+", "", text).strip()

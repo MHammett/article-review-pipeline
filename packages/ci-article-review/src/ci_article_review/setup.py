@@ -149,7 +149,9 @@ def main() -> None:
     publication_name = _prompt_publication_name(args.publication)
     pub_yaml = configs_dir / f"{publication_name}.yaml"
     pub_example = _EXAMPLE_DIR / "publication.example.yaml"
-    copied_pub = _copy_if_missing(pub_example, pub_yaml, f"configs/{publication_name}.yaml")
+    copied_pub = _copy_if_missing(
+        pub_example, pub_yaml, f"configs/{publication_name}.yaml"
+    )
 
     print("\n" + "=" * 60)
     print("Setup complete. Next steps:")
@@ -164,21 +166,29 @@ def main() -> None:
         print("   See docs/PROVIDERS.md for account setup instructions.")
         step += 1
     else:
-        print(f"\n{step}. configs/user.yaml already exists — verify your API keys are set.")
+        print(
+            f"\n{step}. configs/user.yaml already exists — verify your API keys are set."
+        )
         step += 1
 
     if copied_pub:
-        print(f"\n{step}. Fill in your publication profile in configs/{publication_name}.yaml")
-        print("   Required: publication_description, audience, voice_profile, wordpress.*")
+        print(
+            f"\n{step}. Fill in your publication profile in configs/{publication_name}.yaml"
+        )
+        print(
+            "   Required: publication_description, audience, voice_profile, wordpress.*"
+        )
         print("   See docs/CONFIGURATION.md for field reference.")
         step += 1
 
     print(f"\n{step}. Verify all credentials work:")
-    print(f"   uv run python -m ci_article_review.check --publication {publication_name}")
+    print(
+        f"   uv run python -m ci_article_review.check --publication {publication_name}"
+    )
     step += 1
 
     print(f"\n{step}. Run the pipeline:")
-    print(f"   uv run python -m ci_article_review.pipeline \\")
+    print("   uv run python -m ci_article_review.pipeline \\")
     print(f"       --draft path/to/handoff.md --publication {publication_name}")
     print()
 

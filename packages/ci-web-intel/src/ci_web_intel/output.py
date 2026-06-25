@@ -5,8 +5,6 @@ from __future__ import annotations
 import difflib
 import json
 import logging
-import os
-import textwrap
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,10 +14,14 @@ log = logging.getLogger(__name__)
 try:
     from ruamel.yaml import YAML
     from ruamel.yaml.scalarstring import LiteralScalarString
+
     _RUAMEL_AVAILABLE = True
 except ImportError:
-    log.warning("ruamel.yaml not installed; falling back to PyYAML (comments in existing YAML will be lost)")
+    log.warning(
+        "ruamel.yaml not installed; falling back to PyYAML (comments in existing YAML will be lost)"
+    )
     import yaml as _pyyaml
+
     _RUAMEL_AVAILABLE = False
 
 
@@ -38,8 +40,7 @@ def _literal(text: str) -> "LiteralScalarString":
 
 class Formatter(ABC):
     @abstractmethod
-    def format(self, profile: dict, mode: str = "canonical") -> str:
-        ...
+    def format(self, profile: dict, mode: str = "canonical") -> str: ...
 
 
 class PublicationYamlFormatter(Formatter):
@@ -52,7 +53,9 @@ class PublicationYamlFormatter(Formatter):
 
     def _build_voice_block(self, profile: dict, mode: str) -> dict:
         """Build the voice section dict ready for YAML serialization."""
-        canonical = profile if mode == "canonical" else profile.get("canonical", profile)
+        canonical = (
+            profile if mode == "canonical" else profile.get("canonical", profile)
+        )
 
         voice_profile_text = canonical.get("voice_profile", "")
         audience_primary = canonical.get("audience_primary", "")
@@ -64,7 +67,9 @@ class PublicationYamlFormatter(Formatter):
         block: dict = {}
 
         if _RUAMEL_AVAILABLE:
-            block["voice_profile"] = _literal(voice_profile_text + "\n") if voice_profile_text else ""
+            block["voice_profile"] = (
+                _literal(voice_profile_text + "\n") if voice_profile_text else ""
+            )
             block["audience"] = {}
             if audience_primary:
                 block["audience"]["primary"] = audience_primary
@@ -99,7 +104,9 @@ class PublicationYamlFormatter(Formatter):
                 if vdata.get("additional_banned_words"):
                     entry["additional_banned_words"] = vdata["additional_banned_words"]
                 if vdata.get("additional_positive_rules"):
-                    entry["additional_positive_rules"] = vdata["additional_positive_rules"]
+                    entry["additional_positive_rules"] = vdata[
+                        "additional_positive_rules"
+                    ]
                 if vdata.get("voice_notes"):
                     entry["voice_notes"] = vdata["voice_notes"]
                 if vdata.get("source_distribution"):
@@ -117,6 +124,7 @@ class PublicationYamlFormatter(Formatter):
 
     def _format_ruamel(self, profile: dict, mode: str) -> str:
         import io
+
         yaml = _make_ruamel()
         block = self._build_voice_block(profile, mode)
         buf = io.StringIO()
@@ -125,9 +133,13 @@ class PublicationYamlFormatter(Formatter):
 
     def _format_pyyaml(self, profile: dict, mode: str) -> str:
         block = self._build_voice_block(profile, mode)
-        return _pyyaml.dump(block, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return _pyyaml.dump(
+            block, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
 
-    def merge_into_existing(self, existing_path: str, profile: dict, mode: str = "canonical") -> str:
+    def merge_into_existing(
+        self, existing_path: str, profile: dict, mode: str = "canonical"
+    ) -> str:
         """Load existing YAML, replace voice sections, preserve all other keys."""
         existing = Path(existing_path)
         new_voice_block = self._build_voice_block(profile, mode)
@@ -142,6 +154,7 @@ class PublicationYamlFormatter(Formatter):
 
     def _merge_ruamel(self, existing_path: Path, new_voice_block: dict) -> str:
         import io
+
         yaml = _make_ruamel()
         with open(existing_path, encoding="utf-8") as f:
             data = yaml.load(f) or {}
@@ -167,7 +180,9 @@ class PublicationYamlFormatter(Formatter):
             data.pop(key, None)
 
         data.update(new_voice_block)
-        return _pyyaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return _pyyaml.dump(
+            data, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
 
     def diff_voice_sections(self, existing_path: str, new_yaml: str) -> str:
         """Return unified diff of voice sections between existing file and new YAML."""
@@ -178,14 +193,24 @@ class PublicationYamlFormatter(Formatter):
         new_lines = new_yaml.splitlines(keepends=True)
 
         def _extract_voice_lines(lines: list[str]) -> list[str]:
-            voice_keys = {"voice_profile:", "audience:", "style_rules:", "voice_profiles:"}
+            voice_keys = {
+                "voice_profile:",
+                "audience:",
+                "style_rules:",
+                "voice_profiles:",
+            }
             result = []
             in_voice = False
             for line in lines:
                 stripped = line.lstrip()
                 if any(stripped.startswith(k) for k in voice_keys):
                     in_voice = True
-                elif not line.startswith(" ") and not line.startswith("\t") and stripped and not stripped.startswith("#"):
+                elif (
+                    not line.startswith(" ")
+                    and not line.startswith("\t")
+                    and stripped
+                    and not stripped.startswith("#")
+                ):
                     in_voice = False
                 if in_voice:
                     result.append(line)
@@ -193,18 +218,23 @@ class PublicationYamlFormatter(Formatter):
 
         old_voice = _extract_voice_lines(old_lines)
         new_voice = _extract_voice_lines(new_lines)
-        return "".join(difflib.unified_diff(
-            old_voice, new_voice,
-            fromfile=f"{existing_path} (existing)",
-            tofile="new profile",
-        ))
+        return "".join(
+            difflib.unified_diff(
+                old_voice,
+                new_voice,
+                fromfile=f"{existing_path} (existing)",
+                tofile="new profile",
+            )
+        )
 
 
 class MarkdownReportFormatter(Formatter):
     """Human-readable Markdown summary of the synthesized profile."""
 
     def format(self, profile: dict, mode: str = "canonical") -> str:
-        canonical = profile if mode == "canonical" else profile.get("canonical", profile)
+        canonical = (
+            profile if mode == "canonical" else profile.get("canonical", profile)
+        )
         lines = ["# Voice Profile Report", ""]
 
         vp = canonical.get("voice_profile", "")
@@ -228,8 +258,12 @@ class MarkdownReportFormatter(Formatter):
 
         style = canonical.get("style_rules") or {}
         banned_words = style.get("banned_words") or canonical.get("banned_words", [])
-        banned_phrases = style.get("banned_phrases") or canonical.get("banned_phrases", [])
-        positive_rules = style.get("positive_rules") or canonical.get("positive_rules", [])
+        banned_phrases = style.get("banned_phrases") or canonical.get(
+            "banned_phrases", []
+        )
+        positive_rules = style.get("positive_rules") or canonical.get(
+            "positive_rules", []
+        )
 
         if banned_words or banned_phrases:
             lines += ["## Banned Words & Phrases", ""]
@@ -252,7 +286,9 @@ class MarkdownReportFormatter(Formatter):
 
         # Per-voice section
         if mode in ("detect", "per-source"):
-            detected = profile.get("detected_voices") or profile.get("voice_profiles", {})
+            detected = profile.get("detected_voices") or profile.get(
+                "voice_profiles", {}
+            )
             if detected:
                 lines += ["## Detected Voices", ""]
                 for label, vdata in detected.items():
@@ -262,8 +298,10 @@ class MarkdownReportFormatter(Formatter):
                     if vdata.get("source_distribution"):
                         lines += ["**Source distribution:**", ""]
                         lines += ["| Source | % |", "|--------|---|"]
-                        for src, pct in sorted(vdata["source_distribution"].items(), key=lambda x: -x[1]):
-                            lines += [f"| {src} | {pct*100:.0f}% |"]
+                        for src, pct in sorted(
+                            vdata["source_distribution"].items(), key=lambda x: -x[1]
+                        ):
+                            lines += [f"| {src} | {pct * 100:.0f}% |"]
                         lines += [""]
                     if vdata.get("voice_notes"):
                         lines += [f"*{vdata['voice_notes']}*", ""]
@@ -296,7 +334,9 @@ def write_atomic(path: str | Path, content: str, encoding: str = "utf-8") -> Non
     log.info("Wrote profile to %s", output_path)
 
 
-def save_versioned_snapshot(content: str, publication: str | None, output_yaml: str | None) -> Path:
+def save_versioned_snapshot(
+    content: str, publication: str | None, output_yaml: str | None
+) -> Path:
     """Save a timestamped copy of the profile."""
     ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     profiles_dir = Path(__file__).parent / "profiles"

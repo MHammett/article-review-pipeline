@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from ci_article_review.adapters.review.json_utils import extract_json
 from .callers import call_all, call_one
 from .collectors.base import Document
-from .detect import VoiceCluster, CanonicalFallbackWarning, classify_documents, detect_voices
+from .detect import (
+    VoiceCluster,
+    CanonicalFallbackWarning,
+    classify_documents,
+    detect_voices,
+)
 from .voice_consolidation import collect_prose, consolidate_lists, DEFAULT_VOICE_WEIGHTS
 
 log = logging.getLogger(__name__)
@@ -38,24 +42,33 @@ def _load_prompt(name: str) -> str:
 def _sample_docs(docs: list[Document], max_chars: int, label: str = "") -> str:
     """Sample documents (most-recent first) within max_chars budget."""
     sorted_docs = sorted(docs, key=lambda d: d.date or "", reverse=True)
-    parts = []
+    parts: list[str] = []
     total = 0
     for doc in sorted_docs:
         snippet = f"[ID: {doc.url_or_id} | DATE: {doc.date} | SOURCE: {doc.source}]\n{doc.text}\n---\n"
         if total + len(snippet) > max_chars:
-            log.debug("Corpus budget reached for %s; sampled %d/%d docs", label or "corpus", len(parts), len(docs))
+            log.debug(
+                "Corpus budget reached for %s; sampled %d/%d docs",
+                label or "corpus",
+                len(parts),
+                len(docs),
+            )
             break
         parts.append(snippet)
         total += len(snippet)
     return "\n".join(parts)
 
 
-def _parse_synthesis_result(result: dict, model_name: str, pass_label: str) -> dict | None:
+def _parse_synthesis_result(
+    result: dict, model_name: str, pass_label: str
+) -> dict | None:
     """Parse and attach _parsed to result dict; return parsed dict or None."""
     content = result.get("content", "")
     parsed = extract_json(content)
     if parsed is None:
-        log.warning("%s: could not extract JSON from %s response", pass_label, model_name)
+        log.warning(
+            "%s: could not extract JSON from %s response", pass_label, model_name
+        )
         return None
     result["_parsed"] = parsed
     return parsed
@@ -126,6 +139,7 @@ def _reconcile(
 ) -> dict:
     """Run Claude reconciliation pass. Returns parsed result dict."""
     from ci_article_review.config_loader import _normalize_model_configs
+
     system_prompt = _load_prompt("synthesize_reconcile.txt")
     user_prompt = _build_reconcile_input(results, consolidated_lists, voice_label)
 
@@ -156,7 +170,13 @@ def _reconcile(
 def validate_synthesis_output(raw: dict, mode: str) -> dict:
     """Validate required keys; raise SynthesisError on missing."""
     if mode == "canonical":
-        required = ["voice_profile", "audience_primary", "banned_words", "banned_phrases", "positive_rules"]
+        required = [
+            "voice_profile",
+            "audience_primary",
+            "banned_words",
+            "banned_phrases",
+            "positive_rules",
+        ]
         missing = [k for k in required if k not in raw or raw[k] is None]
         if missing:
             raise SynthesisError(f"Canonical profile missing required keys: {missing}")
@@ -167,8 +187,15 @@ def validate_synthesis_output(raw: dict, mode: str) -> dict:
         raise SynthesisError("Missing top-level keys: ['canonical']")
 
     canonical = raw["canonical"]
-    canonical_required = ["voice_profile", "banned_words", "banned_phrases", "positive_rules"]
-    missing_canon = [k for k in canonical_required if k not in canonical or canonical[k] is None]
+    canonical_required = [
+        "voice_profile",
+        "banned_words",
+        "banned_phrases",
+        "positive_rules",
+    ]
+    missing_canon = [
+        k for k in canonical_required if k not in canonical or canonical[k] is None
+    ]
     if missing_canon:
         raise SynthesisError(f"Canonical section missing: {missing_canon}")
     return raw
@@ -181,10 +208,17 @@ def _canonical_mode(
     corpus_budget: int,
     max_parallel: int,
 ) -> dict:
-    log.info("Synthesis: canonical mode — %d docs, %d chars budget", len(docs), corpus_budget)
+    log.info(
+        "Synthesis: canonical mode — %d docs, %d chars budget", len(docs), corpus_budget
+    )
     results = _run_synthesis_pass(
-        docs, user_config, synthesis_models,
-        "synthesize_canonical.txt", corpus_budget, max_parallel, "canonical",
+        docs,
+        user_config,
+        synthesis_models,
+        "synthesize_canonical.txt",
+        corpus_budget,
+        max_parallel,
+        "canonical",
     )
 
     any_ok = any(not r.get("failed") for r in results.values())
@@ -224,8 +258,13 @@ def _detect_mode(
 
     # Canonical synthesis (full corpus including ambiguous)
     canonical_results = _run_synthesis_pass(
-        all_docs_for_canonical, user_config, synthesis_models,
-        "synthesize_canonical.txt", corpus_budget, max_parallel, "canonical",
+        all_docs_for_canonical,
+        user_config,
+        synthesis_models,
+        "synthesize_canonical.txt",
+        corpus_budget,
+        max_parallel,
+        "canonical",
     )
 
     canonical_consolidated = {
@@ -248,7 +287,9 @@ def _detect_mode(
             f"Source distribution: {cluster.source_distribution}\n"
         )
         voice_results = _run_synthesis_pass(
-            cluster_docs, user_config, synthesis_models,
+            cluster_docs,
+            user_config,
+            synthesis_models,
             "synthesize_per_voice.txt",
             corpus_budget // max(len(clusters), 1),
             max_parallel,
@@ -264,8 +305,12 @@ def _detect_mode(
         per_voice_results[cluster.label] = {
             "results": voice_results,
             "consolidated": {
-                "banned_words": consolidate_lists(voice_results, "additional_banned_words"),
-                "positive_rules": consolidate_lists(voice_results, "additional_positive_rules"),
+                "banned_words": consolidate_lists(
+                    voice_results, "additional_banned_words"
+                ),
+                "positive_rules": consolidate_lists(
+                    voice_results, "additional_positive_rules"
+                ),
             },
             "cluster": cluster,
         }
@@ -277,7 +322,10 @@ def _detect_mode(
             reconcile_results[f"{model_name}:{voice_label}"] = r
 
     reconciled = _reconcile(
-        canonical_results, canonical_consolidated, user_config, "reconcile_detect",
+        canonical_results,
+        canonical_consolidated,
+        user_config,
+        "reconcile_detect",
     )
 
     # Ensure structure
@@ -298,12 +346,16 @@ def _detect_mode(
         # Pick best prose from reconciliation or model outputs
         recon_voice = recon_detected.get(voice_label) or {}
         prose_entries = collect_prose(voice_results, "voice_profile")
-        voice_profile_text = recon_voice.get("voice_profile") or (prose_entries[0]["text"] if prose_entries else "")
+        voice_profile_text = recon_voice.get("voice_profile") or (
+            prose_entries[0]["text"] if prose_entries else ""
+        )
 
         detected_voices_out[voice_label] = {
             "voice_profile": voice_profile_text,
-            "additional_banned_words": recon_voice.get("additional_banned_words") or additional["banned_words"],
-            "additional_positive_rules": recon_voice.get("additional_positive_rules") or additional["positive_rules"],
+            "additional_banned_words": recon_voice.get("additional_banned_words")
+            or additional["banned_words"],
+            "additional_positive_rules": recon_voice.get("additional_positive_rules")
+            or additional["positive_rules"],
             "voice_notes": recon_voice.get("voice_notes") or "",
             "source_distribution": cluster.source_distribution,
             "doc_count": len(cluster.assigned_docs),
@@ -336,11 +388,18 @@ def _per_source_mode(
         key = doc.source if group_by == "source" else doc.register
         groups.setdefault(key, []).append(doc)
 
-    log.info("Synthesis: per-source mode (%d groups: %s)", len(groups), list(groups.keys()))
+    log.info(
+        "Synthesis: per-source mode (%d groups: %s)", len(groups), list(groups.keys())
+    )
 
     canonical_results = _run_synthesis_pass(
-        docs, user_config, synthesis_models,
-        "synthesize_canonical.txt", corpus_budget, max_parallel, "canonical",
+        docs,
+        user_config,
+        synthesis_models,
+        "synthesize_canonical.txt",
+        corpus_budget,
+        max_parallel,
+        "canonical",
     )
 
     canonical_consolidated = {
@@ -353,7 +412,9 @@ def _per_source_mode(
     for group_label, group_docs in groups.items():
         extra = f"Source group: {group_label}\nDocuments from: {group_label}\n"
         group_results = _run_synthesis_pass(
-            group_docs, user_config, synthesis_models,
+            group_docs,
+            user_config,
+            synthesis_models,
             "synthesize_per_source.txt",
             corpus_budget // max(len(groups), 1),
             max_parallel,
@@ -369,14 +430,21 @@ def _per_source_mode(
         per_source_results[group_label] = {
             "results": group_results,
             "consolidated": {
-                "banned_words": consolidate_lists(group_results, "additional_banned_words"),
-                "positive_rules": consolidate_lists(group_results, "additional_positive_rules"),
+                "banned_words": consolidate_lists(
+                    group_results, "additional_banned_words"
+                ),
+                "positive_rules": consolidate_lists(
+                    group_results, "additional_positive_rules"
+                ),
             },
             "docs": group_docs,
         }
 
     reconciled = _reconcile(
-        canonical_results, canonical_consolidated, user_config, "reconcile_per_source",
+        canonical_results,
+        canonical_consolidated,
+        user_config,
+        "reconcile_per_source",
     )
 
     canonical_out = reconciled.get("canonical") or reconciled
@@ -393,7 +461,9 @@ def _per_source_mode(
         additional = group_data["consolidated"]
         recon_voice = recon_detected.get(group_label) or {}
         prose_entries = collect_prose(group_results, "voice_profile")
-        voice_profile_text = recon_voice.get("voice_profile") or (prose_entries[0]["text"] if prose_entries else "")
+        voice_profile_text = recon_voice.get("voice_profile") or (
+            prose_entries[0]["text"] if prose_entries else ""
+        )
 
         detected_voices_out[group_label] = {
             "voice_profile": voice_profile_text,
@@ -436,20 +506,31 @@ def synthesize(
     Returns a validated profile dict.
     """
     corpus_budget = max_input_chars - prompt_overhead_chars
-    cfg = synthesis_config or {}
 
     # Pre-synthesis call count estimate
-    n_models = len(synthesis_models) if synthesis_models else len(
-        [k for k, v in user_config.get("models", {}).items()
-         if isinstance(v, dict) and v.get("enabled", True) is not False or isinstance(v, str)]
+    n_models = (
+        len(synthesis_models)
+        if synthesis_models
+        else len(
+            [
+                k
+                for k, v in user_config.get("models", {}).items()
+                if isinstance(v, dict)
+                and v.get("enabled", True) is not False
+                or isinstance(v, str)
+            ]
+        )
     )
 
     if mode == "canonical":
         log.info(
             "Pre-synthesis: canonical mode — ~%d synthesis + 1 reconciliation = ~%d calls",
-            n_models, n_models + 1,
+            n_models,
+            n_models + 1,
         )
-        result = _canonical_mode(docs, user_config, synthesis_models, corpus_budget, max_parallel)
+        result = _canonical_mode(
+            docs, user_config, synthesis_models, corpus_budget, max_parallel
+        )
         validate_synthesis_output(result, "canonical")
         return result
 
@@ -457,11 +538,13 @@ def synthesize(
         n_detection = 2  # estimated (claude + openai by default)
         log.info(
             "Pre-synthesis: detect mode — ~%d detection + 1 consolidation + N×%d synthesis + 1 reconciliation",
-            n_detection, n_models,
+            n_detection,
+            n_models,
         )
         try:
             clusters = detect_voices(
-                docs, user_config,
+                docs,
+                user_config,
                 max_voices=max_voices,
                 detection_models=detection_models,
                 max_parallel=max_parallel,
@@ -469,40 +552,61 @@ def synthesize(
             )
         except CanonicalFallbackWarning as w:
             log.warning("Falling back to canonical mode: %s", w)
-            result = _canonical_mode(docs, user_config, synthesis_models, corpus_budget, max_parallel)
+            result = _canonical_mode(
+                docs, user_config, synthesis_models, corpus_budget, max_parallel
+            )
             result["_fallback_reason"] = str(w)
             validate_synthesis_output(result, "canonical")
             return result
 
         if not clusters:
             log.warning("No clusters detected; falling back to canonical mode")
-            result = _canonical_mode(docs, user_config, synthesis_models, corpus_budget, max_parallel)
+            result = _canonical_mode(
+                docs, user_config, synthesis_models, corpus_budget, max_parallel
+            )
             result["_fallback_reason"] = "No clusters detected"
             validate_synthesis_output(result, "canonical")
             return result
 
         cluster_map, ambiguous_docs = classify_documents(
-            docs, clusters, ambiguity_threshold, per_voice_min_words,
+            docs,
+            clusters,
+            ambiguity_threshold,
+            per_voice_min_words,
         )
 
         result = _detect_mode(
-            docs, ambiguous_docs, clusters,
-            user_config, synthesis_models, corpus_budget, max_parallel,
+            docs,
+            ambiguous_docs,
+            clusters,
+            user_config,
+            synthesis_models,
+            corpus_budget,
+            max_parallel,
         )
         validate_synthesis_output(result, "detect")
         return result
 
     elif mode == "per-source":
-        n_groups = len(set(
-            doc.source if per_source_group_by == "source" else doc.register
-            for doc in docs
-        ))
+        n_groups = len(
+            set(
+                doc.source if per_source_group_by == "source" else doc.register
+                for doc in docs
+            )
+        )
         log.info(
             "Pre-synthesis: per-source mode — ~%d groups × %d models + 1 reconciliation = ~%d calls",
-            n_groups, n_models, n_groups * n_models + 1,
+            n_groups,
+            n_models,
+            n_groups * n_models + 1,
         )
         result = _per_source_mode(
-            docs, user_config, synthesis_models, corpus_budget, max_parallel, per_source_group_by,
+            docs,
+            user_config,
+            synthesis_models,
+            corpus_budget,
+            max_parallel,
+            per_source_group_by,
         )
         validate_synthesis_output(result, "detect")
         return result

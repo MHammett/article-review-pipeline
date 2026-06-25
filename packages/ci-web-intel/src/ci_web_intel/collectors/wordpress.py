@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
 from typing import Iterator
@@ -46,10 +45,12 @@ def _strip_shortcodes(text: str) -> str:
 def _is_public_host(url: str) -> bool:
     try:
         from analysis.links import _is_public_host as _pipeline_check
+
         return _pipeline_check(url)
     except ImportError:
         pass
     from urllib.parse import urlparse
+
     parsed = urlparse(url)
     host = parsed.hostname or ""
     private = ("localhost", "127.", "192.168.", "10.", "172.")
@@ -68,14 +69,17 @@ class WordPressCollector(Collector):
             raise ConfigError(cls.SOURCE_NAME, missing_keys=missing)
         site_url = config.get("site_url", "")
         if not _is_public_host(site_url):
-            raise ConfigError(cls.SOURCE_NAME, message=f"site_url {site_url!r} is not a public host")
+            raise ConfigError(
+                cls.SOURCE_NAME, message=f"site_url {site_url!r} is not a public host"
+            )
 
     def estimate_count(self) -> int | None:
         site_url = self.config["site_url"].rstrip("/")
         try:
+            params: dict[str, str | int] = {"per_page": 1, "status": "publish"}
             resp = requests.get(
                 f"{site_url}/wp-json/wp/v2/posts",
-                params={"per_page": 1, "status": "publish"},
+                params=params,
                 auth=(self.config["username"], self.config["application_password"]),
                 timeout=(10, 30),
                 allow_redirects=False,
@@ -97,18 +101,27 @@ class WordPressCollector(Collector):
 
         try:
             resp = requests.get(
-                base_url, params=params, auth=auth,
-                timeout=(10, 60), allow_redirects=False,
+                base_url,
+                params=params,
+                auth=auth,
+                timeout=(10, 60),
+                allow_redirects=False,
             )
             resp.raise_for_status()
         except requests.HTTPError as e:
-            raise CollectorError(self.SOURCE_NAME, f"HTTP {e.response.status_code}: {e}")
+            status = e.response.status_code if e.response is not None else "?"
+            raise CollectorError(self.SOURCE_NAME, f"HTTP {status}: {e}")
         except Exception as e:
             raise CollectorError(self.SOURCE_NAME, f"Request failed: {e}")
 
         total = int(resp.headers.get("X-WP-Total", 0))
         total_pages = int(resp.headers.get("X-WP-TotalPages", 1))
-        log.info("WordPress: %d posts across %d pages", total, total_pages, extra={"source": self.SOURCE_NAME})
+        log.info(
+            "WordPress: %d posts across %d pages",
+            total,
+            total_pages,
+            extra={"source": self.SOURCE_NAME},
+        )
 
         page1_posts = resp.json()
         yield from self._posts_to_docs(page1_posts)
@@ -122,8 +135,11 @@ class WordPressCollector(Collector):
                 p = dict(params)
                 p["page"] = page_num
                 r = requests.get(
-                    base_url, params=p, auth=auth,
-                    timeout=(10, 60), allow_redirects=False,
+                    base_url,
+                    params=p,
+                    auth=auth,
+                    timeout=(10, 60),
+                    allow_redirects=False,
                 )
                 r.raise_for_status()
                 return page_num, r.json()
@@ -135,8 +151,14 @@ class WordPressCollector(Collector):
                         page_num, posts = fut.result()
                         log.info(
                             "WordPress: fetched page %d/%d (%d posts so far)",
-                            page_num, total_pages, fetched + len(posts),
-                            extra={"page": page_num, "total": total_pages, "count": fetched},
+                            page_num,
+                            total_pages,
+                            fetched + len(posts),
+                            extra={
+                                "page": page_num,
+                                "total": total_pages,
+                                "count": fetched,
+                            },
                         )
                         fetched += len(posts)
                         yield from self._posts_to_docs(posts)
@@ -157,12 +179,14 @@ class WordPressCollector(Collector):
                 "categories": [str(c) for c in post.get("categories", [])],
                 "tags": [str(t) for t in post.get("tags", [])],
             }
-            docs.append(Document.from_text(
-                text=text,
-                source=self.SOURCE_NAME,
-                register="long_form",
-                date=date,
-                url_or_id=url,
-                metadata=metadata,
-            ))
+            docs.append(
+                Document.from_text(
+                    text=text,
+                    source=self.SOURCE_NAME,
+                    register="long_form",
+                    date=date,
+                    url_or_id=url,
+                    metadata=metadata,
+                )
+            )
         return docs

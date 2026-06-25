@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -22,10 +21,8 @@ from ci_article_review.adapters.review.streaming import (
     accumulate_anthropic,
     accumulate_chat_completions,
     accumulate_gemini,
-    accumulate_openai_responses,
     stream_timeout,
 )
-from ci_article_review.adapters.review.json_utils import extract_json
 from ci_article_review.analysis.cost import calculate as cost_calculate
 
 log = logging.getLogger(__name__)
@@ -36,10 +33,16 @@ _EXCLUDED_PROVIDERS = frozenset({"perplexity"})
 # Anthropic API
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
-_ADAPTIVE_CLAUDE_MODELS = frozenset({
-    "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5",
-    "claude-sonnet-4-6", "claude-opus-4-6", "claude-mythos-5",
-})
+_ADAPTIVE_CLAUDE_MODELS = frozenset(
+    {
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-fable-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-mythos-5",
+    }
+)
 
 # OpenAI-compatible base URLs
 _PROVIDER_URLS = {
@@ -67,8 +70,14 @@ def clear_api_call_log() -> None:
 def _is_adaptive_claude(model: str) -> bool:
     return model in _ADAPTIVE_CLAUDE_MODELS or any(
         model.startswith(prefix)
-        for prefix in ("claude-opus-4-8", "claude-opus-4-7", "claude-fable-",
-                       "claude-sonnet-4-6", "claude-opus-4-6", "claude-mythos-")
+        for prefix in (
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-fable-",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-mythos-",
+        )
     )
 
 
@@ -120,19 +129,33 @@ def _call_anthropic(
     t0 = time.monotonic()
     session = requests.Session()
     try:
-        resp = session.post(_ANTHROPIC_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            _ANTHROPIC_URL, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503, 529):
             log.warning("Claude %s HTTP %d; retrying in 10s", model, resp.status_code)
             resp.close()
             time.sleep(10)
-            resp = session.post(_ANTHROPIC_URL, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                _ANTHROPIC_URL,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
         resp.raise_for_status()
         assembled = accumulate_anthropic(resp)
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         err = _redact(e, api_key)
         log.error("Claude %s failed after %.1fs: %s", model, elapsed, err)
-        return {"failed": True, "error": err, "model": model, "tokens": {}, "elapsed": elapsed}
+        return {
+            "failed": True,
+            "error": err,
+            "model": model,
+            "tokens": {},
+            "elapsed": elapsed,
+        }
     finally:
         session.close()
 
@@ -143,8 +166,19 @@ def _call_anthropic(
         "completion": usage.get("output_tokens", 0),
     }
     content = assembled.get("content", "")
-    log.info("%s: synthesis complete (%d tokens, %.1fs)", model_name, sum(tokens.values()), elapsed)
-    return {"content": content, "failed": False, "tokens": tokens, "elapsed": elapsed, "model": model}
+    log.info(
+        "%s: synthesis complete (%d tokens, %.1fs)",
+        model_name,
+        sum(tokens.values()),
+        elapsed,
+    )
+    return {
+        "content": content,
+        "failed": False,
+        "tokens": tokens,
+        "elapsed": elapsed,
+        "model": model,
+    }
 
 
 def _call_chat_completions(
@@ -166,7 +200,10 @@ def _call_chat_completions(
         headers = {"api-key": api_key, "Content-Type": "application/json"}
     else:
         url = _PROVIDER_URLS.get(provider, _PROVIDER_URLS["openai"])
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
     payload: dict[str, Any] = {
         "model": model,
@@ -184,19 +221,29 @@ def _call_chat_completions(
     t0 = time.monotonic()
     session = requests.Session()
     try:
-        resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            url, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503):
             log.warning("%s HTTP %d; retrying in 10s", model_name, resp.status_code)
             resp.close()
             time.sleep(10)
-            resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                url, headers=headers, json=payload, stream=True, timeout=timeout
+            )
         resp.raise_for_status()
         assembled = accumulate_chat_completions(resp)
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         err = _redact(e, api_key)
         log.error("%s failed after %.1fs: %s", model_name, elapsed, err)
-        return {"failed": True, "error": err, "model": model, "tokens": {}, "elapsed": elapsed}
+        return {
+            "failed": True,
+            "error": err,
+            "model": model,
+            "tokens": {},
+            "elapsed": elapsed,
+        }
     finally:
         session.close()
 
@@ -207,8 +254,19 @@ def _call_chat_completions(
         "completion": usage.get("completion_tokens", 0),
     }
     content = assembled.get("content", "")
-    log.info("%s: synthesis complete (%d tokens, %.1fs)", model_name, sum(tokens.values()), elapsed)
-    return {"content": content, "failed": False, "tokens": tokens, "elapsed": elapsed, "model": model}
+    log.info(
+        "%s: synthesis complete (%d tokens, %.1fs)",
+        model_name,
+        sum(tokens.values()),
+        elapsed,
+    )
+    return {
+        "content": content,
+        "failed": False,
+        "tokens": tokens,
+        "elapsed": elapsed,
+        "model": model,
+    }
 
 
 def _call_gemini(
@@ -225,11 +283,17 @@ def _call_gemini(
     url = f"{_GEMINI_BASE}/{model}:streamGenerateContent?alt=sse&key={api_key}"
     headers = {"Content-Type": "application/json"}
 
-    gen_config: dict[str, Any] = {"temperature": 0.2, "responseMimeType": "application/json"}
+    gen_config: dict[str, Any] = {
+        "temperature": 0.2,
+        "responseMimeType": "application/json",
+    }
     if thinking_budget is not None:
-        gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget, "includeThoughts": True}
+        gen_config["thinkingConfig"] = {
+            "thinkingBudget": thinking_budget,
+            "includeThoughts": True,
+        }
 
-    payload = {
+    payload: dict[str, Any] = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "generationConfig": gen_config,
@@ -238,19 +302,29 @@ def _call_gemini(
     t0 = time.monotonic()
     session = requests.Session()
     try:
-        resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+        resp = session.post(
+            url, headers=headers, json=payload, stream=True, timeout=timeout
+        )
         if resp.status_code in (429, 500, 502, 503):
             log.warning("Gemini %s HTTP %d; retrying in 10s", model, resp.status_code)
             resp.close()
             time.sleep(10)
-            resp = session.post(url, headers=headers, json=payload, stream=True, timeout=timeout)
+            resp = session.post(
+                url, headers=headers, json=payload, stream=True, timeout=timeout
+            )
         resp.raise_for_status()
         assembled = accumulate_gemini(resp)
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         err = _redact(e, api_key)
         log.error("Gemini %s failed after %.1fs: %s", model, elapsed, err)
-        return {"failed": True, "error": err, "model": model, "tokens": {}, "elapsed": elapsed}
+        return {
+            "failed": True,
+            "error": err,
+            "model": model,
+            "tokens": {},
+            "elapsed": elapsed,
+        }
     finally:
         session.close()
 
@@ -261,8 +335,19 @@ def _call_gemini(
         "completion": usage.get("candidatesTokenCount", 0),
     }
     content = assembled.get("content", "")
-    log.info("%s: synthesis complete (%d tokens, %.1fs)", model_name, sum(tokens.values()), elapsed)
-    return {"content": content, "failed": False, "tokens": tokens, "elapsed": elapsed, "model": model}
+    log.info(
+        "%s: synthesis complete (%d tokens, %.1fs)",
+        model_name,
+        sum(tokens.values()),
+        elapsed,
+    )
+    return {
+        "content": content,
+        "failed": False,
+        "tokens": tokens,
+        "elapsed": elapsed,
+        "model": model,
+    }
 
 
 def call_one(
@@ -282,24 +367,41 @@ def call_one(
     api_key = (api_keys.get(model_name) or {}).get("api_key", "")
 
     if provider == "anthropic":
-        result = _call_anthropic(model_name, model_cfg, api_key, system_prompt, user_prompt)
+        result = _call_anthropic(
+            model_name, model_cfg, api_key, system_prompt, user_prompt
+        )
     elif provider in ("ai_studio", "vertex_ai"):
         if provider == "vertex_ai":
-            log.warning("%s: Vertex AI not supported in voice profiler callers.py; using AI Studio", model_name)
-        result = _call_gemini(model_name, model_cfg, api_key, system_prompt, user_prompt)
+            log.warning(
+                "%s: Vertex AI not supported in voice profiler callers.py; using AI Studio",
+                model_name,
+            )
+        result = _call_gemini(
+            model_name, model_cfg, api_key, system_prompt, user_prompt
+        )
     elif provider in ("openai", "azure", "mistral", "grok", "perplexity"):
-        result = _call_chat_completions(model_name, model_cfg, api_key, system_prompt, user_prompt, provider)
+        result = _call_chat_completions(
+            model_name, model_cfg, api_key, system_prompt, user_prompt, provider
+        )
     else:
         log.warning("Unknown provider %r for model %s; skipping", provider, model_name)
-        return {"failed": True, "error": f"Unknown provider {provider!r}", "model": model_name, "tokens": {}, "elapsed": 0.0}
+        return {
+            "failed": True,
+            "error": f"Unknown provider {provider!r}",
+            "model": model_name,
+            "tokens": {},
+            "elapsed": 0.0,
+        }
 
     # Append to global cost log
-    _api_call_log.append({
-        "pass": pass_name,
-        "model": result.get("model", model_cfg.get("model", model_name)),
-        "tokens": result.get("tokens", {}),
-        "failed": result.get("failed", False),
-    })
+    _api_call_log.append(
+        {
+            "pass": pass_name,
+            "model": result.get("model", model_cfg.get("model", model_name)),
+            "tokens": result.get("tokens", {}),
+            "failed": result.get("failed", False),
+        }
+    )
     return result
 
 
@@ -331,6 +433,7 @@ def call_all(
 
     # Normalize model configs (handle simple string form)
     from ci_article_review.config_loader import _normalize_model_configs
+
     models_cfg = _normalize_model_configs(models_cfg)
 
     # Filter to requested subset
@@ -347,7 +450,11 @@ def call_all(
         active = {k: v for k, v in active.items() if k != "perplexity"}
 
     if not active:
-        log.warning("call_all: no active models to call (models=%r, exclude_perplexity=%r)", models, exclude_perplexity)
+        log.warning(
+            "call_all: no active models to call (models=%r, exclude_perplexity=%r)",
+            models,
+            exclude_perplexity,
+        )
         return {}
 
     workers = len(active) if max_parallel <= 0 else max_parallel
@@ -355,7 +462,9 @@ def call_all(
     results: dict[str, dict] = {}
 
     def _task(name: str, cfg: dict) -> tuple[str, dict]:
-        return name, call_one(name, cfg, api_keys, system_prompt, user_prompt, pass_name=pass_name)
+        return name, call_one(
+            name, cfg, api_keys, system_prompt, user_prompt, pass_name=pass_name
+        )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_task, name, cfg): name for name, cfg in active.items()}
@@ -366,7 +475,12 @@ def call_all(
                 results[name] = result
             except Exception as e:
                 log.error("call_all: unexpected error from %s: %s", name, e)
-                results[name] = {"failed": True, "error": str(e), "tokens": {}, "elapsed": 0.0}
+                results[name] = {
+                    "failed": True,
+                    "error": str(e),
+                    "tokens": {},
+                    "elapsed": 0.0,
+                }
 
     return results
 

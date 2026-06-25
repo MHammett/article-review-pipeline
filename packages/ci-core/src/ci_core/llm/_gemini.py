@@ -74,7 +74,7 @@ class GeminiAdapter:
         bundles ``system_instruction`` into the model object rather than
         accepting it per-request.
         """
-        rate_limit_excs = (_GeminiRateLimit,) if _GeminiRateLimit else ()
+        rate_limit_excs = (_GeminiRateLimit,) if _GeminiRateLimit is not None else ()
         model = genai.GenerativeModel(  # type: ignore[union-attr]
             model_name=self._model_name,
             system_instruction=system or None,

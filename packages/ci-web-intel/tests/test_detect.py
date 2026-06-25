@@ -7,10 +7,20 @@ from unittest.mock import patch
 import pytest
 
 
-def _make_doc(text: str, source: str = "wordpress", date: str = "2024-01-01", url: str = "http://ex.com/1",
-              avg_sentence_words: float = 15.0, hedging_ratio: float = 0.1, first_person_ratio: float = 0.3):
+def _make_doc(
+    text: str,
+    source: str = "wordpress",
+    date: str = "2024-01-01",
+    url: str = "http://ex.com/1",
+    avg_sentence_words: float = 15.0,
+    hedging_ratio: float = 0.1,
+    first_person_ratio: float = 0.3,
+):
     from ci_web_intel.collectors.base import Document
-    doc = Document.from_text(text=text, source=source, register="long_form", date=date, url_or_id=url)
+
+    doc = Document.from_text(
+        text=text, source=source, register="long_form", date=date, url_or_id=url
+    )
     doc.metrics = {
         "avg_sentence_words": avg_sentence_words,
         "hedging_ratio": hedging_ratio,
@@ -49,15 +59,27 @@ class TestDetectVoices:
         """detect_voices: mock detection response → VoiceCluster list returned with correct fields."""
         from ci_web_intel.detect import detect_voices, VoiceCluster
 
-        docs = [_make_doc(f"Document {i} " * 100, url=f"http://ex.com/{i}") for i in range(10)]
+        docs = [
+            _make_doc(f"Document {i} " * 100, url=f"http://ex.com/{i}")
+            for i in range(10)
+        ]
         user_config = {
-            "models": {"claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}},
+            "models": {
+                "claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+            },
             "api_keys": {"claude": {"api_key": "test"}},
         }
 
-        mock_result = {"content": _DETECTION_RESPONSE, "failed": False, "tokens": {}, "elapsed": 1.0}
+        mock_result = {
+            "content": _DETECTION_RESPONSE,
+            "failed": False,
+            "tokens": {},
+            "elapsed": 1.0,
+        }
 
-        with patch("ci_web_intel.detect.call_all", return_value={"claude": mock_result}):
+        with patch(
+            "ci_web_intel.detect.call_all", return_value={"claude": mock_result}
+        ):
             clusters = detect_voices(docs, user_config, max_voices=5)
 
         assert len(clusters) == 2
@@ -70,16 +92,27 @@ class TestDetectVoices:
         """overall_confidence: 'low' → CanonicalFallbackWarning raised."""
         from ci_web_intel.detect import detect_voices, CanonicalFallbackWarning
 
-        low_conf_response = _DETECTION_RESPONSE.replace('"overall_confidence": "high"', '"overall_confidence": "low"')
+        low_conf_response = _DETECTION_RESPONSE.replace(
+            '"overall_confidence": "high"', '"overall_confidence": "low"'
+        )
         docs = [_make_doc("Text " * 50)]
         user_config = {
-            "models": {"claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}},
+            "models": {
+                "claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+            },
             "api_keys": {"claude": {"api_key": "test"}},
         }
 
-        mock_result = {"content": low_conf_response, "failed": False, "tokens": {}, "elapsed": 1.0}
+        mock_result = {
+            "content": low_conf_response,
+            "failed": False,
+            "tokens": {},
+            "elapsed": 1.0,
+        }
 
-        with patch("ci_web_intel.detect.call_all", return_value={"claude": mock_result}):
+        with patch(
+            "ci_web_intel.detect.call_all", return_value={"claude": mock_result}
+        ):
             with pytest.raises(CanonicalFallbackWarning):
                 detect_voices(docs, user_config)
 
@@ -89,11 +122,16 @@ class TestDetectVoices:
 
         docs = [_make_doc("Text " * 50)]
         user_config = {
-            "models": {"claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}},
+            "models": {
+                "claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+            },
             "api_keys": {"claude": {"api_key": "test"}},
         }
 
-        with patch("ci_web_intel.detect.call_all", return_value={"claude": {"failed": True, "error": "timeout", "tokens": {}}}):
+        with patch(
+            "ci_web_intel.detect.call_all",
+            return_value={"claude": {"failed": True, "error": "timeout", "tokens": {}}},
+        ):
             result = detect_voices(docs, user_config)
 
         assert result == []
@@ -104,27 +142,42 @@ class TestClassifyDocuments:
         """classify_documents: docs with known metrics → correct cluster assignment."""
         from ci_web_intel.detect import VoiceCluster, classify_documents
 
-        long_doc = _make_doc("Long technical " * 100, avg_sentence_words=22.0, hedging_ratio=0.02)
-        short_doc = _make_doc("Short personal " * 50, avg_sentence_words=10.0, first_person_ratio=0.6)
+        long_doc = _make_doc(
+            "Long technical " * 100, avg_sentence_words=22.0, hedging_ratio=0.02
+        )
+        short_doc = _make_doc(
+            "Short personal " * 50, avg_sentence_words=10.0, first_person_ratio=0.6
+        )
 
         clusters = [
             VoiceCluster(
                 label="technical",
                 description="Long analytical",
-                features={"avg_sentence_words": [">", 18], "hedging_ratio": ["<", 0.05]},
+                features={
+                    "avg_sentence_words": [">", 18],
+                    "hedging_ratio": ["<", 0.05],
+                },
                 source_distribution={},
                 sample_ids=[],
             ),
             VoiceCluster(
                 label="editorial",
                 description="Short personal",
-                features={"avg_sentence_words": ["<", 14], "first_person_ratio": [">", 0.4]},
+                features={
+                    "avg_sentence_words": ["<", 14],
+                    "first_person_ratio": [">", 0.4],
+                },
                 source_distribution={},
                 sample_ids=[],
             ),
         ]
 
-        assigned, ambiguous = classify_documents([long_doc, short_doc], clusters, ambiguity_threshold=0.2, per_voice_min_words=0)
+        assigned, ambiguous = classify_documents(
+            [long_doc, short_doc],
+            clusters,
+            ambiguity_threshold=0.2,
+            per_voice_min_words=0,
+        )
 
         assert long_doc in assigned.get("technical", [])
         assert short_doc in assigned.get("editorial", [])
@@ -134,7 +187,9 @@ class TestClassifyDocuments:
         from ci_web_intel.detect import VoiceCluster, classify_documents
 
         # A doc that matches BOTH clusters equally (no clear winner)
-        ambig_doc = _make_doc("Ambiguous text " * 50, avg_sentence_words=16.0, first_person_ratio=0.3)
+        ambig_doc = _make_doc(
+            "Ambiguous text " * 50, avg_sentence_words=16.0, first_person_ratio=0.3
+        )
 
         clusters = [
             VoiceCluster(
@@ -153,7 +208,9 @@ class TestClassifyDocuments:
             ),
         ]
 
-        assigned, ambiguous = classify_documents([ambig_doc], clusters, ambiguity_threshold=0.5)
+        assigned, ambiguous = classify_documents(
+            [ambig_doc], clusters, ambiguity_threshold=0.5
+        )
 
         # Both features match both clusters — should be ambiguous
         assert ambig_doc in ambiguous
@@ -163,7 +220,10 @@ class TestClassifyDocuments:
         from ci_web_intel.detect import VoiceCluster, classify_documents
 
         small_docs = [_make_doc("Short " * 20, avg_sentence_words=10.0)]  # ~20 words
-        large_docs = [_make_doc("Long technical " * 200, avg_sentence_words=22.0) for _ in range(5)]
+        large_docs = [
+            _make_doc("Long technical " * 200, avg_sentence_words=22.0)
+            for _ in range(5)
+        ]
 
         clusters = [
             VoiceCluster(
@@ -183,7 +243,9 @@ class TestClassifyDocuments:
         ]
 
         all_docs = small_docs + large_docs
-        assigned, ambiguous = classify_documents(all_docs, clusters, per_voice_min_words=500)
+        assigned, ambiguous = classify_documents(
+            all_docs, clusters, per_voice_min_words=500
+        )
 
         # small_voice had < 500 words → merged into large_voice
         assert "small_voice" not in {c.label for c in clusters}

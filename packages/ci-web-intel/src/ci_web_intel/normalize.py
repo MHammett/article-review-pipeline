@@ -10,7 +10,9 @@ from .collectors.base import Document
 
 log = logging.getLogger(__name__)
 
-_ABBREVS = re.compile(r"\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|i\.e|e\.g|U\.S|U\.K|Rev|Gen|Col|Lt|Sgt|Cpl|St)\.")
+_ABBREVS = re.compile(
+    r"\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|vs|etc|i\.e|e\.g|U\.S|U\.K|Rev|Gen|Col|Lt|Sgt|Cpl|St)\."
+)
 _SENTENCE_END = re.compile(r"(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|!)\s+")
 
 # WP shortcode pattern
@@ -26,11 +28,18 @@ _GMAIL_ON_WROTE = re.compile(r"\nOn .+wrote:\s*\n", re.DOTALL)
 _SIG_SEP = re.compile(r"\n--\s*\n")
 # Unicode smart quotes/dashes → ASCII
 _UNICODE_SUBS = [
-    ("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'),
-    ("–", "-"), ("—", "--"), ("…", "..."),
+    ("‘", "'"),
+    ("’", "'"),
+    ("“", '"'),
+    ("”", '"'),
+    ("–", "-"),
+    ("—", "--"),
+    ("…", "..."),
 ]
 
-_HEDGING = re.compile(r"\b(may|might|perhaps|could be argued|arguably|possibly|it is possible)\b", re.I)
+_HEDGING = re.compile(
+    r"\b(may|might|perhaps|could be argued|arguably|possibly|it is possible)\b", re.I
+)
 _PASSIVE = re.compile(r"\b(was|were|is|are|been)\s+\w+ed\b", re.I)
 _FIRST_PERSON = re.compile(r"\b(I|me|my|we|our|us|myself|ourselves)\b")
 _QUESTION_END = re.compile(r"\?\s*$")
@@ -78,7 +87,9 @@ def compute_metrics(doc: Document) -> dict:
     avg_sentence_words = sum(words_per_sentence) / n
     sorted_wps = sorted(words_per_sentence)
     mid = n // 2
-    median_sentence_words = sorted_wps[mid] if n % 2 else (sorted_wps[mid - 1] + sorted_wps[mid]) / 2
+    median_sentence_words = (
+        sorted_wps[mid] if n % 2 else (sorted_wps[mid - 1] + sorted_wps[mid]) / 2
+    )
     p90_idx = int(n * 0.9)
     p90_sentence_words = sorted_wps[min(p90_idx, n - 1)]
 
@@ -115,6 +126,7 @@ def compute_metrics(doc: Document) -> dict:
     fk_ease = None
     try:
         from analysis.readability import analyze as readability_analyze
+
         ra = readability_analyze(text)
         fk_grade = ra.get("flesch_kincaid_grade")
         fk_ease = ra.get("flesch_reading_ease")
@@ -159,7 +171,13 @@ def deduplicate(docs: list[Document]) -> tuple[list[Document], int]:
 
 def corpus_summary(docs: list[Document]) -> dict:
     if not docs:
-        return {"total_words": 0, "doc_count": 0, "date_range": None, "sources": {}, "source_word_pct": {}}
+        return {
+            "total_words": 0,
+            "doc_count": 0,
+            "date_range": None,
+            "sources": {},
+            "source_word_pct": {},
+        }
 
     total_words = sum(d.word_count for d in docs)
     dates = [d.date for d in docs if d.date]

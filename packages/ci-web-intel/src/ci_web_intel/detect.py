@@ -9,12 +9,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ci_article_review.adapters.review.json_utils import extract_json
-from .callers import call_all, call_one
+from .callers import call_all
 from .collectors.base import Document
-from .voice_consolidation import DEFAULT_VOICE_WEIGHTS, consolidate_detection
+from .voice_consolidation import consolidate_detection
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +99,7 @@ def detect_voices(
     elif not detection_models:
         # Voice-style-weighted subset: claude + openai (weight ≥ 1.1)
         from ci_article_review.config_loader import _normalize_model_configs
+
         configured = set(_normalize_model_configs(user_config.get("models", {})).keys())
         model_subset = [m for m in ("claude", "openai") if m in configured]
         if not model_subset:
@@ -125,7 +125,9 @@ def detect_voices(
         f"Writing corpus (stratified sample):\n\n{sample}"
     )
 
-    log.info("Detection pass: calling %s", model_subset or "voice-style-weighted models")
+    log.info(
+        "Detection pass: calling %s", model_subset or "voice-style-weighted models"
+    )
     detection_results = call_all(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -145,7 +147,9 @@ def detect_voices(
     # Check if ALL models failed
     any_succeeded = any(not r.get("failed") for r in detection_results.values())
     if not any_succeeded:
-        log.error("detect_voices: all detection models failed; falling back to canonical mode")
+        log.error(
+            "detect_voices: all detection models failed; falling back to canonical mode"
+        )
         return []
 
     # If only one model, use its output directly; otherwise consolidate
@@ -166,7 +170,9 @@ def detect_voices(
         raw_voices, overall_confidence = result_pair
 
     if overall_confidence == "low":
-        log.warning("Detection confidence is 'low' — falling back to canonical synthesis mode")
+        log.warning(
+            "Detection confidence is 'low' — falling back to canonical synthesis mode"
+        )
         raise CanonicalFallbackWarning(
             "Detection pass returned overall_confidence='low'. "
             "Corpus may be too small or too homogeneous. Falling back to canonical mode."
@@ -190,7 +196,11 @@ def detect_voices(
         )
         clusters.append(cluster)
 
-    log.info("Detection: found %d voice cluster(s): %s", len(clusters), [c.label for c in clusters])
+    log.info(
+        "Detection: found %d voice cluster(s): %s",
+        len(clusters),
+        [c.label for c in clusters],
+    )
     return clusters
 
 
@@ -288,15 +298,23 @@ def classify_documents(
             others = [c for c in clusters if c.label != small_cluster.label]
             if not others:
                 break
-            nearest = min(others, key=lambda c: _feature_distance(small_cluster.features, c.features))
+            nearest = min(
+                others,
+                key=lambda c: _feature_distance(small_cluster.features, c.features),
+            )
             log.warning(
                 "Cluster %r has only %d words (< %d minimum); merging into %r",
-                small_cluster.label, small_cluster.word_count, per_voice_min_words, nearest.label,
+                small_cluster.label,
+                small_cluster.word_count,
+                per_voice_min_words,
+                nearest.label,
             )
             # Merge docs
             nearest.assigned_docs.extend(small_cluster.assigned_docs)
             nearest.word_count += small_cluster.word_count
-            cluster_docs[nearest.label].extend(cluster_docs.pop(small_cluster.label, []))
+            cluster_docs[nearest.label].extend(
+                cluster_docs.pop(small_cluster.label, [])
+            )
             clusters.remove(small_cluster)
             changed = True
             break
@@ -304,13 +322,21 @@ def classify_documents(
     # Log stats
     log.info("Document classification results:")
     for cluster in clusters:
-        src_summary = ", ".join(
-            f"primarily {s}"
-            for s, _ in sorted(cluster.source_distribution.items(), key=lambda x: -x[1])[:2]
-        ) or ""
+        src_summary = (
+            ", ".join(
+                f"primarily {s}"
+                for s, _ in sorted(
+                    cluster.source_distribution.items(), key=lambda x: -x[1]
+                )[:2]
+            )
+            or ""
+        )
         log.info(
             "  %-25s  %4d docs  (%6d words)  %s",
-            cluster.label + ":", len(cluster.assigned_docs), cluster.word_count, src_summary,
+            cluster.label + ":",
+            len(cluster.assigned_docs),
+            cluster.word_count,
+            src_summary,
         )
     log.info("  %-25s  %4d docs", "ambiguous / canonical:", len(ambiguous_docs))
 

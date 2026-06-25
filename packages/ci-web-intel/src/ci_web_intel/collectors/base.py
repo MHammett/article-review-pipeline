@@ -21,8 +21,15 @@ class Document:
     metrics: dict = field(default_factory=dict)
 
     @classmethod
-    def from_text(cls, text: str, source: str, register: str, date: str,
-                  url_or_id: str, metadata: dict | None = None) -> "Document":
+    def from_text(
+        cls,
+        text: str,
+        source: str,
+        register: str,
+        date: str,
+        url_or_id: str,
+        metadata: dict | None = None,
+    ) -> "Document":
         cleaned = text.strip()
         word_count = len(cleaned.split()) if cleaned else 0
         content_hash = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
@@ -45,7 +52,9 @@ class CollectorError(Exception):
 
 
 class ConfigError(Exception):
-    def __init__(self, source_name: str, missing_keys: list[str] | None = None, message: str = ""):
+    def __init__(
+        self, source_name: str, missing_keys: list[str] | None = None, message: str = ""
+    ):
         self.source_name = source_name
         self.missing_keys = missing_keys or []
         if missing_keys:
