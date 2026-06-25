@@ -30,9 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -49,6 +47,7 @@ _WATERMARKS_FILE = _DEFAULT_STAGING_DIR / ".watermarks.json"
 # Config helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_sources_yaml() -> dict:
     """Load sources.yaml from voice-profile-bootstrap directory."""
     path = Path(__file__).parent / "sources.yaml"
@@ -62,6 +61,7 @@ def _load_sources_yaml() -> dict:
         log.error("Failed to load sources.yaml: %s", e)
         return {}
     from ci_article_review.config_loader import _resolve_env_recursive
+
     return _resolve_env_recursive(data)
 
 
@@ -78,15 +78,52 @@ def _load_presets() -> dict:
 
 
 _HARDCODED_PRESETS = {
-    "economy":  {"voice_mode": "canonical", "max_input_chars": 40000,  "max_voices": 0,  "per_voice_min_words": 1000, "synthesis_models": ["claude"], "detection_models": []},
-    "standard": {"voice_mode": "detect",    "max_input_chars": 80000,  "max_voices": 3,  "per_voice_min_words": 1500, "synthesis_models": ["claude", "openai"], "detection_models": ["claude"]},
-    "balanced": {"voice_mode": "detect",    "max_input_chars": 120000, "max_voices": 5,  "per_voice_min_words": 2000, "synthesis_models": [], "detection_models": []},
-    "thorough": {"voice_mode": "detect",    "max_input_chars": 160000, "max_voices": 7,  "per_voice_min_words": 2000, "synthesis_models": [], "detection_models": []},
-    "maximum":  {"voice_mode": "detect",    "max_input_chars": 200000, "max_voices": 10, "per_voice_min_words": 2000, "synthesis_models": [], "detection_models": "*"},
+    "economy": {
+        "voice_mode": "canonical",
+        "max_input_chars": 40000,
+        "max_voices": 0,
+        "per_voice_min_words": 1000,
+        "synthesis_models": ["claude"],
+        "detection_models": [],
+    },
+    "standard": {
+        "voice_mode": "detect",
+        "max_input_chars": 80000,
+        "max_voices": 3,
+        "per_voice_min_words": 1500,
+        "synthesis_models": ["claude", "openai"],
+        "detection_models": ["claude"],
+    },
+    "balanced": {
+        "voice_mode": "detect",
+        "max_input_chars": 120000,
+        "max_voices": 5,
+        "per_voice_min_words": 2000,
+        "synthesis_models": [],
+        "detection_models": [],
+    },
+    "thorough": {
+        "voice_mode": "detect",
+        "max_input_chars": 160000,
+        "max_voices": 7,
+        "per_voice_min_words": 2000,
+        "synthesis_models": [],
+        "detection_models": [],
+    },
+    "maximum": {
+        "voice_mode": "detect",
+        "max_input_chars": 200000,
+        "max_voices": 10,
+        "per_voice_min_words": 2000,
+        "synthesis_models": [],
+        "detection_models": "*",
+    },
 }
 
 
-def _apply_preset(preset_name: str, presets: dict, sources_cfg: dict, cli_args: argparse.Namespace) -> dict:
+def _apply_preset(
+    preset_name: str, presets: dict, sources_cfg: dict, cli_args: argparse.Namespace
+) -> dict:
     """Merge preset → sources.yaml synthesis keys → CLI flags → return effective config."""
     preset = presets.get(preset_name, presets.get("balanced", {}))
     synth_cfg = sources_cfg.get("synthesis", {})
@@ -95,10 +132,19 @@ def _apply_preset(preset_name: str, presets: dict, sources_cfg: dict, cli_args: 
     effective = dict(preset)
 
     # Apply sources.yaml synthesis overrides on top
-    for key in ("voice_mode", "max_voices", "max_input_chars", "prompt_overhead_chars",
-                "per_voice_min_words", "ambiguity_threshold", "consensus_threshold",
-                "detection_models", "max_parallel_models", "per_source_group_by",
-                "synthesis_models"):
+    for key in (
+        "voice_mode",
+        "max_voices",
+        "max_input_chars",
+        "prompt_overhead_chars",
+        "per_voice_min_words",
+        "ambiguity_threshold",
+        "consensus_threshold",
+        "detection_models",
+        "max_parallel_models",
+        "per_source_group_by",
+        "synthesis_models",
+    ):
         if key in synth_cfg:
             effective[key] = synth_cfg[key]
 
@@ -114,6 +160,7 @@ def _apply_preset(preset_name: str, presets: dict, sources_cfg: dict, cli_args: 
 def _load_user_config_lenient() -> dict:
     """Load user.yaml without strict validation (voice profiler works with any model subset)."""
     from ci_article_review.config_loader import _load_yaml, _resolve_env_recursive
+
     path = Path("configs/user.yaml")
     if not path.exists():
         log.warning("configs/user.yaml not found; no API models available")
@@ -131,6 +178,7 @@ def _load_user_config_lenient() -> dict:
 # Staging helpers
 # ---------------------------------------------------------------------------
 
+
 def _staging_path(source: str) -> Path:
     return _DEFAULT_STAGING_DIR / f"{source}.ndjson"
 
@@ -147,26 +195,31 @@ def _load_staged(source: str) -> list | None:
             return None
         header = json.loads(lines[0])
         if header.get("schema_version") != _SCHEMA_VERSION:
-            log.warning("Staging schema version mismatch for %s; forcing refresh", source)
+            log.warning(
+                "Staging schema version mismatch for %s; forcing refresh", source
+            )
             return None
         from .collectors.base import Document
+
         docs = []
         for line in lines[1:]:
             line = line.strip()
             if line:
                 try:
                     d = json.loads(line)
-                    docs.append(Document(
-                        text=d["text"],
-                        source=d["source"],
-                        register=d["register"],
-                        date=d["date"],
-                        url_or_id=d["url_or_id"],
-                        word_count=d["word_count"],
-                        content_hash=d["content_hash"],
-                        metadata=d.get("metadata", {}),
-                        metrics={},  # Never read from staging; recomputed by normalize
-                    ))
+                    docs.append(
+                        Document(
+                            text=d["text"],
+                            source=d["source"],
+                            register=d["register"],
+                            date=d["date"],
+                            url_or_id=d["url_or_id"],
+                            word_count=d["word_count"],
+                            content_hash=d["content_hash"],
+                            metadata=d.get("metadata", {}),
+                            metrics={},  # Never read from staging; recomputed by normalize
+                        )
+                    )
                 except Exception:
                     pass
         return docs
@@ -179,14 +232,17 @@ def _write_staged(source: str, docs: list, no_stage: bool = False) -> None:
     if no_stage:
         return
     from datetime import datetime, timezone
+
     path = _staging_path(source)
     path.parent.mkdir(parents=True, exist_ok=True)
-    header = json.dumps({
-        "schema_version": _SCHEMA_VERSION,
-        "source": source,
-        "generated": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "watermark": _load_watermarks().get(source),
-    })
+    header = json.dumps(
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "source": source,
+            "generated": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "watermark": _load_watermarks().get(source),
+        }
+    )
     lines = [header]
     for doc in docs:
         # Never stage metrics; recompute on each run
@@ -224,6 +280,7 @@ def _save_watermarks(watermarks: dict) -> None:
 # Collection helpers
 # ---------------------------------------------------------------------------
 
+
 def _collect_source(
     source_name: str,
     collector_cls,
@@ -253,7 +310,7 @@ def _collect_source(
         for doc in collector.fetch(since=effective_since):
             docs.append(doc)
         log.info("[%s] Collected %d docs", source_name, len(docs))
-    except CollectorError as e:
+    except CollectorError:
         raise
     except Exception as e:
         raise CollectorError(source_name, f"Unexpected error: {e}") from e
@@ -266,7 +323,10 @@ def _collect_source(
 # Output path helpers
 # ---------------------------------------------------------------------------
 
-def _resolve_output_path(publication: str | None, output_yaml: str | None) -> Path | None:
+
+def _resolve_output_path(
+    publication: str | None, output_yaml: str | None
+) -> Path | None:
     """Resolve the output path from --publication or --output-yaml."""
     if publication:
         return Path("configs") / f"{publication}.yaml"
@@ -278,6 +338,7 @@ def _resolve_output_path(publication: str | None, output_yaml: str | None) -> Pa
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -295,39 +356,84 @@ Note: --dry-run with --voice detect runs one detection API call (not free).
     )
 
     output_group = parser.add_mutually_exclusive_group(required=False)
-    output_group.add_argument("--publication", metavar="NAME",
-        help="Publication name; resolves to configs/<name>.yaml")
-    output_group.add_argument("--output-yaml", metavar="PATH",
-        help="Explicit output path (mutually exclusive with --publication)")
+    output_group.add_argument(
+        "--publication",
+        metavar="NAME",
+        help="Publication name; resolves to configs/<name>.yaml",
+    )
+    output_group.add_argument(
+        "--output-yaml",
+        metavar="PATH",
+        help="Explicit output path (mutually exclusive with --publication)",
+    )
 
-    parser.add_argument("--sources", metavar="SOURCE[,SOURCE...]",
-        help="Comma-separated source names (default: all in sources.yaml)")
-    parser.add_argument("--since", metavar="DATE",
-        help="ISO date; applied at API level where supported")
-    parser.add_argument("--voice", choices=["canonical", "detect", "per-source"],
-        help="Synthesis mode (overrides preset and sources.yaml)")
-    parser.add_argument("--max-voices", type=int, metavar="N",
-        help="Max detected voice count (detect mode only; 0 = no limit)")
-    parser.add_argument("--preset", default="balanced",
+    parser.add_argument(
+        "--sources",
+        metavar="SOURCE[,SOURCE...]",
+        help="Comma-separated source names (default: all in sources.yaml)",
+    )
+    parser.add_argument(
+        "--since", metavar="DATE", help="ISO date; applied at API level where supported"
+    )
+    parser.add_argument(
+        "--voice",
+        choices=["canonical", "detect", "per-source"],
+        help="Synthesis mode (overrides preset and sources.yaml)",
+    )
+    parser.add_argument(
+        "--max-voices",
+        type=int,
+        metavar="N",
+        help="Max detected voice count (detect mode only; 0 = no limit)",
+    )
+    parser.add_argument(
+        "--preset",
+        default="balanced",
         choices=["economy", "standard", "balanced", "thorough", "maximum"],
-        help="Run intensity preset (default: balanced)")
-    parser.add_argument("--refresh", action="store_true",
-        help="Ignore staging cache; re-fetch all sources")
-    parser.add_argument("--dry-run", action="store_true",
-        help="Collect + normalize + stats only (detect mode: runs one detection pass — costs money)")
-    parser.add_argument("--no-stage", action="store_true",
-        help="Don't write staging files; process in memory only")
-    parser.add_argument("--continue-on-error", action="store_true",
-        help="Skip failed collectors and continue with remaining sources")
-    parser.add_argument("--format", choices=["yaml", "markdown", "json"], default="yaml",
+        help="Run intensity preset (default: balanced)",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ignore staging cache; re-fetch all sources",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Collect + normalize + stats only (detect mode: runs one detection pass — costs money)",
+    )
+    parser.add_argument(
+        "--no-stage",
+        action="store_true",
+        help="Don't write staging files; process in memory only",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Skip failed collectors and continue with remaining sources",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["yaml", "markdown", "json"],
+        default="yaml",
         dest="output_format",
-        help="Output format (default: yaml)")
-    parser.add_argument("--overwrite", action="store_true",
-        help="Skip confirmation prompt when merging into existing file")
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Override logging level from sources.yaml")
-    parser.add_argument("--check-draft", metavar="PATH",
-        help="[Not implemented] Voice consistency check on a draft file")
+        help="Output format (default: yaml)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Skip confirmation prompt when merging into existing file",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Override logging level from sources.yaml",
+    )
+    parser.add_argument(
+        "--check-draft",
+        metavar="PATH",
+        help="[Not implemented] Voice consistency check on a draft file",
+    )
 
     return parser
 
@@ -336,13 +442,17 @@ Note: --dry-run with --voice detect runs one detection API call (not free).
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     # --check-draft stub
     if args.check_draft:
-        print("--check-draft is planned for Phase 7 and not yet implemented.", file=sys.stderr)
+        print(
+            "--check-draft is planned for Phase 7 and not yet implemented.",
+            file=sys.stderr,
+        )
         raise NotImplementedError("--check-draft is not implemented")
 
     # 1. Load sources.yaml
@@ -350,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. Configure logging BEFORE any module logs
     from .logging_config import configure_logging
+
     configure_logging(sources_cfg.get("logging", {}), log_level_override=args.log_level)
 
     log.info("Voice Profile Bootstrap starting (preset=%s)", args.preset)
@@ -376,7 +487,9 @@ def main(argv: list[str] | None = None) -> int:
     preset_models = presets.get(args.preset, {}).get("models", {})
     if preset_models and user_config.get("models"):
         for model_name, preset_model_cfg in preset_models.items():
-            if model_name in user_config["models"] and isinstance(preset_model_cfg, dict):
+            if model_name in user_config["models"] and isinstance(
+                preset_model_cfg, dict
+            ):
                 existing = user_config["models"][model_name]
                 if isinstance(existing, str):
                     existing = {"model": existing}
@@ -389,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
     # Check model currency
     try:
         from ci_article_review.model_registry import check_model_currency
+
         warnings = check_model_currency(user_config.get("models", {}))
         for w in (warnings or {}).values():
             if w:
@@ -406,7 +520,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # All sources configured in sources.yaml
         requested_sources = [
-            name for name in REGISTRY
+            name
+            for name in REGISTRY
             if name in sources_cfg and name not in ("synthesis", "logging")
         ]
         if not requested_sources:
@@ -417,7 +532,9 @@ def main(argv: list[str] | None = None) -> int:
     for source_name in list(requested_sources):
         collector_cls = REGISTRY.get(source_name)
         if not collector_cls:
-            log.warning("Unknown source %r; available: %s", source_name, list(REGISTRY.keys()))
+            log.warning(
+                "Unknown source %r; available: %s", source_name, list(REGISTRY.keys())
+            )
             if not args.continue_on_error:
                 return 1
             failed_sources.append(source_name)
@@ -457,7 +574,9 @@ def main(argv: list[str] | None = None) -> int:
         collector_cls = REGISTRY[source_name]
         source_specific_cfg = sources_cfg.get(source_name, {})
         return source_name, _collect_source(
-            source_name, collector_cls, source_specific_cfg,
+            source_name,
+            collector_cls,
+            source_specific_cfg,
             since=args.since,
             watermarks=watermarks,
             refresh=args.refresh,
@@ -493,9 +612,18 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # 9. Deduplicate
-    from .normalize import deduplicate, corpus_summary, corpus_bias_warnings, compute_metrics, clean_text
+    from .normalize import (
+        deduplicate,
+        corpus_summary,
+        corpus_bias_warnings,
+        compute_metrics,
+        clean_text,
+    )
+
     all_docs, n_dropped = deduplicate(all_docs)
-    log.info("Corpus: %d unique documents (dropped %d duplicates)", len(all_docs), n_dropped)
+    log.info(
+        "Corpus: %d unique documents (dropped %d duplicates)", len(all_docs), n_dropped
+    )
 
     # 10. Normalize — clean text and compute metrics in place
     for doc in all_docs:
@@ -504,12 +632,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # 11. Corpus stats + bias warnings
     summary = corpus_summary(all_docs)
-    log.info("Corpus stats: %d docs, %d words, date range: %s",
-             summary["doc_count"], summary["total_words"], summary.get("date_range"))
+    log.info(
+        "Corpus stats: %d docs, %d words, date range: %s",
+        summary["doc_count"],
+        summary["total_words"],
+        summary.get("date_range"),
+    )
     for src, info in summary.get("sources", {}).items():
-        log.info("  %s: %d docs, %d words (%.1f%%)",
-                 src, info["doc_count"], info["word_count"],
-                 summary["source_word_pct"].get(src, 0))
+        log.info(
+            "  %s: %d docs, %d words (%.1f%%)",
+            src,
+            info["doc_count"],
+            info["word_count"],
+            summary["source_word_pct"].get(src, 0),
+        )
 
     bias_warnings = corpus_bias_warnings(summary)
     for w in bias_warnings:
@@ -526,10 +662,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Documents: {summary['doc_count']}")
         print(f"Total words: {summary['total_words']:,}")
         if summary.get("date_range"):
-            print(f"Date range: {summary['date_range'][0]} – {summary['date_range'][1]}")
+            print(
+                f"Date range: {summary['date_range'][0]} – {summary['date_range'][1]}"
+            )
         for src, pct in summary.get("source_word_pct", {}).items():
             info = summary["sources"][src]
-            print(f"  {src}: {info['doc_count']} docs, {info['word_count']:,} words ({pct}%)")
+            print(
+                f"  {src}: {info['doc_count']} docs, {info['word_count']:,} words ({pct}%)"
+            )
         for w in bias_warnings:
             print(w)
         print("\nNo API calls made (--dry-run).")
@@ -539,9 +679,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run and voice_mode == "detect":
         print("\n=== DRY RUN — DETECTION PASS (this costs money) ===")
         from .detect import detect_voices, CanonicalFallbackWarning
+
         try:
             clusters = detect_voices(
-                all_docs, user_config,
+                all_docs,
+                user_config,
                 max_voices=max_voices,
                 detection_models=detection_models if detection_models else None,
                 max_parallel=max_parallel,
@@ -555,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Would fall back to canonical mode for full run.")
 
         from .callers import log_cost_summary
+
         log_cost_summary()
         return 0
 
@@ -567,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     output_path = _resolve_output_path(args.publication, args.output_yaml)
 
     from .synthesize import synthesize, SynthesisError
+
     try:
         log.info("Starting synthesis (mode=%s)", voice_mode)
         profile = synthesize(
@@ -590,10 +734,15 @@ def main(argv: list[str] | None = None) -> int:
     # 15. Validate (already done inside synthesize, but belt-and-suspenders)
     # 16. Format and write output
     from .output import (
-        PublicationYamlFormatter, MarkdownReportFormatter, JsonFormatter,
-        write_atomic, save_versioned_snapshot,
+        Formatter,
+        PublicationYamlFormatter,
+        MarkdownReportFormatter,
+        JsonFormatter,
+        write_atomic,
+        save_versioned_snapshot,
     )
 
+    formatter: Formatter
     if args.output_format == "yaml":
         formatter = PublicationYamlFormatter()
     elif args.output_format == "markdown":
@@ -605,7 +754,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_format == "yaml" and isinstance(formatter, PublicationYamlFormatter):
         if output_path and output_path.exists():
             # Show diff
-            new_yaml = formatter.merge_into_existing(str(output_path), profile, mode=voice_mode)
+            new_yaml = formatter.merge_into_existing(
+                str(output_path), profile, mode=voice_mode
+            )
             diff = formatter.diff_voice_sections(str(output_path), new_yaml)
             if diff and not args.overwrite:
                 print("\n=== DIFF — voice section changes ===")
@@ -629,7 +780,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Add fallback reason header if detection fell back
     if profile.get("_fallback_reason") and args.output_format == "yaml":
-        content = f"# NOTE: Detection fell back to canonical mode: {profile['_fallback_reason']}\n\n" + content
+        content = (
+            f"# NOTE: Detection fell back to canonical mode: {profile['_fallback_reason']}\n\n"
+            + content
+        )
 
     if output_path:
         write_atomic(output_path, content)
@@ -655,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Log cost summary
     from .callers import log_cost_summary
+
     log_cost_summary()
 
     log.info("Done.")

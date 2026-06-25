@@ -24,6 +24,7 @@ def _strip_markdown(text: str) -> str:
 def _strip_docx(path: Path) -> str:
     try:
         import docx
+
         doc = docx.Document(str(path))
         return "\n".join(para.text for para in doc.paragraphs)
     except ImportError:
@@ -92,6 +93,7 @@ class TextFilesCollector(Collector):
 
             mtime = path.stat().st_mtime
             import datetime
+
             date_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
 
             doc = Document.from_text(

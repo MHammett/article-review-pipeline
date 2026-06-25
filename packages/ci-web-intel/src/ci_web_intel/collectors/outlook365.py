@@ -39,7 +39,12 @@ def _check_file_permissions(path: str) -> None:
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
         if mode & 0o077:
-            log.warning("Credentials file %s has loose permissions (%o). Recommend: chmod 600 %s", path, mode, path)
+            log.warning(
+                "Credentials file %s has loose permissions (%o). Recommend: chmod 600 %s",
+                path,
+                mode,
+                path,
+            )
     except FileNotFoundError:
         pass
 
@@ -54,19 +59,30 @@ class Outlook365Collector(Collector):
         missing = [k for k in cls.REQUIRED_KEYS if not config.get(k)]
         if missing:
             raise ConfigError(cls.SOURCE_NAME, missing_keys=missing)
-        if config.get("auth_method") == "client_credentials" and not config.get("client_secret"):
-            raise ConfigError(cls.SOURCE_NAME, message="client_secret required for client_credentials auth_method")
+        if config.get("auth_method") == "client_credentials" and not config.get(
+            "client_secret"
+        ):
+            raise ConfigError(
+                cls.SOURCE_NAME,
+                message="client_secret required for client_credentials auth_method",
+            )
 
     def _get_token(self) -> str:
         try:
             import msal
         except ImportError as e:
-            raise CollectorError(self.SOURCE_NAME, f"Missing dependency: {e}. Install msal.")
+            raise CollectorError(
+                self.SOURCE_NAME, f"Missing dependency: {e}. Install msal."
+            )
 
         tenant_id = self.config["tenant_id"]
         client_id = self.config["client_id"]
         auth_method = self.config.get("auth_method", "device_code")
-        creds_file = os.path.expanduser(self.config.get("credentials_file", "~/.config/voice-bootstrap/outlook_token.json"))
+        creds_file = os.path.expanduser(
+            self.config.get(
+                "credentials_file", "~/.config/voice-bootstrap/outlook_token.json"
+            )
+        )
         _check_file_permissions(creds_file)
 
         authority = f"https://login.microsoftonline.com/{tenant_id}"
@@ -83,9 +99,13 @@ class Outlook365Collector(Collector):
                 authority=authority,
                 token_cache=token_cache,
             )
-            result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+            result = app.acquire_token_for_client(
+                scopes=["https://graph.microsoft.com/.default"]
+            )
         else:
-            app = msal.PublicClientApplication(client_id=client_id, authority=authority, token_cache=token_cache)
+            app = msal.PublicClientApplication(
+                client_id=client_id, authority=authority, token_cache=token_cache
+            )
             accounts = app.get_accounts()
             result = None
             if accounts:
@@ -93,18 +113,25 @@ class Outlook365Collector(Collector):
                     result = app.acquire_token_silent(SCOPES, account=accounts[0])
                 except Exception as e:
                     if "InteractionRequired" in type(e).__name__:
-                        log.info("Outlook365 session expired — re-authentication required. Run again to get a new device code.")
+                        log.info(
+                            "Outlook365 session expired — re-authentication required. Run again to get a new device code."
+                        )
                     result = None
 
             if not result:
                 flow = app.initiate_device_flow(scopes=SCOPES)
                 if "user_code" not in flow:
-                    raise CollectorError(self.SOURCE_NAME, "Failed to initiate device flow")
+                    raise CollectorError(
+                        self.SOURCE_NAME, "Failed to initiate device flow"
+                    )
                 print(flow["message"])
                 result = app.acquire_token_by_device_flow(flow)
 
         if "access_token" not in result:
-            raise CollectorError(self.SOURCE_NAME, f"Auth failed: {result.get('error_description', result)}")
+            raise CollectorError(
+                self.SOURCE_NAME,
+                f"Auth failed: {result.get('error_description', result)}",
+            )
 
         if token_cache.has_state_changed:
             os.makedirs(os.path.dirname(creds_file) or ".", exist_ok=True)
@@ -126,7 +153,8 @@ class Outlook365Collector(Collector):
             "Prefer": 'outlook.body-content-type="text"',
         }
         try:
-            resp = requests.get(url, headers=headers, params={"$count": "true", "$top": 1}, timeout=(10, 30))
+            params: dict[str, str | int] = {"$count": "true", "$top": 1}
+            resp = requests.get(url, headers=headers, params=params, timeout=(10, 30))
             resp.raise_for_status()
             return resp.json().get("@odata.count")
         except Exception:
@@ -165,7 +193,9 @@ class Outlook365Collector(Collector):
             for attempt in range(3):
                 try:
                     if next_url == url:
-                        resp = requests.get(next_url, headers=headers, params=params, timeout=(10, 60))
+                        resp = requests.get(
+                            next_url, headers=headers, params=params, timeout=(10, 60)
+                        )
                     else:
                         resp = requests.get(next_url, headers=headers, timeout=(10, 60))
                     if resp.status_code == 429:
@@ -178,7 +208,7 @@ class Outlook365Collector(Collector):
                 except requests.HTTPError as e:
                     if attempt == 2:
                         raise CollectorError(self.SOURCE_NAME, f"HTTP error: {e}")
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
             else:
                 break
 

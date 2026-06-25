@@ -22,17 +22,36 @@ class _HumanFormatter(logging.Formatter):
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         base: dict[str, Any] = {
-            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
         }
         # Include structured extra fields at the top level
         skip = {
-            "name", "msg", "args", "created", "filename", "funcName", "levelname",
-            "levelno", "lineno", "module", "msecs", "pathname", "process",
-            "processName", "relativeCreated", "stack_info", "thread", "threadName",
-            "exc_info", "exc_text", "message",
+            "name",
+            "msg",
+            "args",
+            "created",
+            "filename",
+            "funcName",
+            "levelname",
+            "levelno",
+            "lineno",
+            "module",
+            "msecs",
+            "pathname",
+            "process",
+            "processName",
+            "relativeCreated",
+            "stack_info",
+            "thread",
+            "threadName",
+            "exc_info",
+            "exc_text",
+            "message",
         }
         for key, val in record.__dict__.items():
             if key not in skip and not key.startswith("_"):
@@ -43,7 +62,9 @@ class _JsonFormatter(logging.Formatter):
             return json.dumps(base, default=repr)
 
 
-def configure_logging(logging_cfg: dict | None = None, log_level_override: str | None = None) -> None:
+def configure_logging(
+    logging_cfg: dict | None = None, log_level_override: str | None = None
+) -> None:
     """Configure logging from the sources.yaml `logging:` block.
 
     Call once at startup before any module logs. A CLI --log-level override
@@ -57,7 +78,11 @@ def configure_logging(logging_cfg: dict | None = None, log_level_override: str |
     also_stdout = cfg.get("also_stdout", True)
     module_overrides: dict[str, str] = cfg.get("modules") or {}
 
-    formatter = _JsonFormatter() if fmt == "json" else _HumanFormatter(_HumanFormatter.FMT, _HumanFormatter.DATEFMT)
+    formatter = (
+        _JsonFormatter()
+        if fmt == "json"
+        else _HumanFormatter(_HumanFormatter.FMT, _HumanFormatter.DATEFMT)
+    )
 
     handlers: list[logging.Handler] = []
 

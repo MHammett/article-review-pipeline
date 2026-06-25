@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +19,11 @@ log = logging.getLogger(__name__)
 
 # Voice-style weights copied from consolidation.py (_DEFAULT_WEIGHTS, voice_style domain)
 DEFAULT_VOICE_WEIGHTS: dict[str, float] = {
-    "openai":     1.2,
-    "claude":     1.1,
-    "mistral":    1.0,
-    "gemini":     1.0,
-    "grok":       1.0,
+    "openai": 1.2,
+    "claude": 1.1,
+    "mistral": 1.0,
+    "gemini": 1.0,
+    "grok": 1.0,
     "perplexity": 1.0,
 }
 
@@ -59,7 +58,11 @@ def consolidate_lists(
             if isinstance(item, str) and item.strip():
                 item_weights[item.strip()] += model_weight
 
-    return [item for item, score in sorted(item_weights.items(), key=lambda x: -x[1]) if score >= threshold]
+    return [
+        item
+        for item, score in sorted(item_weights.items(), key=lambda x: -x[1])
+        if score >= threshold
+    ]
 
 
 def collect_prose(
@@ -80,7 +83,9 @@ def collect_prose(
         parsed = result.get("_parsed") or {}
         text = parsed.get(key)
         if text and isinstance(text, str):
-            entries.append({"model": model_name, "weight": w.get(model_name, 1.0), "text": text})
+            entries.append(
+                {"model": model_name, "weight": w.get(model_name, 1.0), "text": text}
+            )
     return sorted(entries, key=lambda x: -x["weight"])
 
 
@@ -88,13 +93,16 @@ def consolidate_detection(
     detection_results: dict[str, dict],
     user_config: dict,
     weights: dict[str, float] | None = None,
-) -> list[Any]:
+) -> tuple[list[Any], Any] | None:
     """Reconcile per-model detection outputs into a unified cluster list.
 
     Makes ONE Claude API call using prompts/consolidate_detection.txt.
-    Returns list of raw VoiceCluster-shaped dicts (caller converts to VoiceCluster objects).
+    On success returns ``(raw_voices, overall_confidence)`` where ``raw_voices``
+    is a list of VoiceCluster-shaped dicts (caller converts to VoiceCluster
+    objects). Returns ``None`` if consolidation could not be performed.
     """
     from ci_article_review.config_loader import _normalize_model_configs
+
     w = weights or DEFAULT_VOICE_WEIGHTS
 
     # Build input for the consolidation prompt
@@ -104,11 +112,15 @@ def consolidate_detection(
             continue
         content = result.get("content", "")
         model_weight = w.get(model_name, 1.0)
-        model_sections.append(f"--- {model_name} (weight: {model_weight}) ---\n{content}")
+        model_sections.append(
+            f"--- {model_name} (weight: {model_weight}) ---\n{content}"
+        )
 
     if not model_sections:
-        log.warning("consolidate_detection: all detection models failed; returning empty cluster list")
-        return []
+        log.warning(
+            "consolidate_detection: all detection models failed; returning empty cluster list"
+        )
+        return None
 
     user_prompt = "\n\n".join(model_sections)
 
@@ -117,14 +129,16 @@ def consolidate_detection(
         system_prompt = prompt_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         log.error("consolidate_detection.txt not found at %s", prompt_path)
-        return []
+        return None
 
     # Always use Claude for reconciliation
     models_cfg = _normalize_model_configs(user_config.get("models", {}))
     claude_cfg = models_cfg.get("claude")
     if not claude_cfg:
-        log.error("consolidate_detection: Claude not configured; cannot reconcile detection outputs")
-        return []
+        log.error(
+            "consolidate_detection: Claude not configured; cannot reconcile detection outputs"
+        )
+        return None
 
     api_keys = user_config.get("api_keys", {})
     result = call_one(
@@ -138,17 +152,17 @@ def consolidate_detection(
 
     if result.get("failed"):
         log.error("consolidate_detection: Claude call failed: %s", result.get("error"))
-        return []
+        return None
 
     parsed = extract_json(result.get("content", ""))
     if not parsed:
         log.error("consolidate_detection: could not parse Claude response as JSON")
-        return []
+        return None
 
     voices = parsed.get("detected_voices", [])
     if not isinstance(voices, list):
         log.error("consolidate_detection: response missing 'detected_voices' list")
-        return []
+        return None
 
     overall_confidence = parsed.get("overall_confidence", "medium")
     notes = parsed.get("consolidation_notes", "")

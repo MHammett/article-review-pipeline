@@ -41,7 +41,10 @@ def _check_file_permissions(path: str) -> None:
         if mode & 0o077:
             log.warning(
                 "Credentials file %s has loose permissions (mode %o). "
-                "Recommend: chmod 600 %s", path, mode, path
+                "Recommend: chmod 600 %s",
+                path,
+                mode,
+                path,
             )
     except FileNotFoundError:
         pass
@@ -78,7 +81,10 @@ class GmailCollector(Collector):
             from google.auth.transport.requests import Request as GoogleRequest
             from googleapiclient.discovery import build
         except ImportError as e:
-            raise CollectorError(self.SOURCE_NAME, f"Missing dependency: {e}. Install google-auth-oauthlib and google-api-python-client.")
+            raise CollectorError(
+                self.SOURCE_NAME,
+                f"Missing dependency: {e}. Install google-auth-oauthlib and google-api-python-client.",
+            )
 
         creds_file = os.path.expanduser(self.config["credentials_file"])
         _check_file_permissions(creds_file)
@@ -119,10 +125,14 @@ class GmailCollector(Collector):
         query = self.config.get("query", "from:me")
         max_messages = int(self.config.get("max_messages", 500))
 
-        message_ids = []
+        message_ids: list[str] = []
         page_token = None
         while len(message_ids) < max_messages:
-            params: dict = {"userId": "me", "q": query, "maxResults": min(100, max_messages - len(message_ids))}
+            params: dict = {
+                "userId": "me",
+                "q": query,
+                "maxResults": min(100, max_messages - len(message_ids)),
+            }
             if page_token:
                 params["pageToken"] = page_token
             try:
@@ -137,19 +147,28 @@ class GmailCollector(Collector):
                 break
 
         if len(message_ids) > max_messages:
-            log.warning("Gmail: %d messages found, capping at %d (most recent first)", len(message_ids), max_messages)
+            log.warning(
+                "Gmail: %d messages found, capping at %d (most recent first)",
+                len(message_ids),
+                max_messages,
+            )
             message_ids = message_ids[:max_messages]
 
         for msg_id in message_ids:
             for attempt in range(3):
                 try:
-                    msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+                    msg = (
+                        service.users()
+                        .messages()
+                        .get(userId="me", id=msg_id, format="full")
+                        .execute()
+                    )
                     break
                 except Exception as e:
                     if attempt == 2:
                         log.warning("Gmail: failed to fetch message %s: %s", msg_id, e)
                         msg = None
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
 
             if not msg:
                 continue

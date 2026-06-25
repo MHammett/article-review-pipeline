@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 
 def _make_result(model_name: str, items: list[str], key: str = "banned_words") -> dict:
@@ -21,6 +19,7 @@ class TestConsolidateLists:
     def test_claude_openai_pass_threshold(self):
         """Claude (1.1) + OpenAI (1.2) = 2.3 ≥ 2.0 → item included."""
         from ci_web_intel.voice_consolidation import consolidate_lists
+
         results = {
             "claude": _make_result("claude", ["leverage"]),
             "openai": _make_result("openai", ["leverage"]),
@@ -31,6 +30,7 @@ class TestConsolidateLists:
     def test_mistral_only_below_threshold(self):
         """Mistral only (weight 1.0) < 2.0 → item excluded."""
         from ci_web_intel.voice_consolidation import consolidate_lists
+
         results = {
             "mistral": _make_result("mistral", ["synergy"]),
         }
@@ -40,11 +40,12 @@ class TestConsolidateLists:
     def test_four_models_agree(self):
         """All 4 models agree → item included regardless."""
         from ci_web_intel.voice_consolidation import consolidate_lists
+
         results = {
-            "claude":  _make_result("claude",  ["utilize"]),
-            "openai":  _make_result("openai",  ["utilize"]),
+            "claude": _make_result("claude", ["utilize"]),
+            "openai": _make_result("openai", ["utilize"]),
             "mistral": _make_result("mistral", ["utilize"]),
-            "gemini":  _make_result("gemini",  ["utilize"]),
+            "gemini": _make_result("gemini", ["utilize"]),
         }
         output = consolidate_lists(results, "banned_words")
         assert "utilize" in output
@@ -52,6 +53,7 @@ class TestConsolidateLists:
     def test_failed_model_not_counted(self):
         """Failed model results don't contribute to vote counts."""
         from ci_web_intel.voice_consolidation import consolidate_lists
+
         results = {
             "claude": {"failed": True, "error": "timeout", "_parsed": {}},
             "openai": _make_result("openai", ["basically"]),
@@ -62,6 +64,7 @@ class TestConsolidateLists:
     def test_custom_threshold(self):
         """Custom threshold works."""
         from ci_web_intel.voice_consolidation import consolidate_lists
+
         results = {
             "openai": _make_result("openai", ["arguably"]),
         }
@@ -73,10 +76,23 @@ class TestCollectProse:
     def test_sorted_by_weight_descending(self):
         """collect_prose returns entries sorted by weight descending (Claude and OpenAI first)."""
         from ci_web_intel.voice_consolidation import collect_prose
+
         results = {
-            "mistral": {"failed": False, "_parsed": {"voice_profile": "mistral prose"}, "tokens": {}},
-            "claude":  {"failed": False, "_parsed": {"voice_profile": "claude prose"}, "tokens": {}},
-            "openai":  {"failed": False, "_parsed": {"voice_profile": "openai prose"}, "tokens": {}},
+            "mistral": {
+                "failed": False,
+                "_parsed": {"voice_profile": "mistral prose"},
+                "tokens": {},
+            },
+            "claude": {
+                "failed": False,
+                "_parsed": {"voice_profile": "claude prose"},
+                "tokens": {},
+            },
+            "openai": {
+                "failed": False,
+                "_parsed": {"voice_profile": "openai prose"},
+                "tokens": {},
+            },
         }
         entries = collect_prose(results, "voice_profile")
         assert entries[0]["model"] in ("openai", "claude")  # highest weight first
@@ -85,9 +101,14 @@ class TestCollectProse:
     def test_failed_excluded(self):
         """Failed model results are excluded from prose collection."""
         from ci_web_intel.voice_consolidation import collect_prose
+
         results = {
             "claude": {"failed": True, "_parsed": {}, "tokens": {}},
-            "openai": {"failed": False, "_parsed": {"voice_profile": "openai result"}, "tokens": {}},
+            "openai": {
+                "failed": False,
+                "_parsed": {"voice_profile": "openai result"},
+                "tokens": {},
+            },
         }
         entries = collect_prose(results, "voice_profile")
         assert len(entries) == 1
@@ -96,6 +117,7 @@ class TestCollectProse:
     def test_empty_key_excluded(self):
         """Models with missing key are excluded."""
         from ci_web_intel.voice_consolidation import collect_prose
+
         results = {
             "claude": {"failed": False, "_parsed": {}, "tokens": {}},
         }
@@ -109,8 +131,14 @@ class TestConsolidateDetection:
         from ci_web_intel.voice_consolidation import consolidate_detection
 
         detection_results = {
-            "claude": {"content": '{"detected_voices": [{"label": "technical", "description": "Long form", "features": {}, "source_distribution": {}, "sample_ids": [], "confidence": "high"}], "overall_confidence": "high", "consolidation_notes": ""}', "failed": False},
-            "openai": {"content": '{"detected_voices": [{"label": "technical analysis", "description": "Analytical", "features": {}, "source_distribution": {}, "sample_ids": [], "confidence": "high"}], "overall_confidence": "high", "consolidation_notes": ""}', "failed": False},
+            "claude": {
+                "content": '{"detected_voices": [{"label": "technical", "description": "Long form", "features": {}, "source_distribution": {}, "sample_ids": [], "confidence": "high"}], "overall_confidence": "high", "consolidation_notes": ""}',
+                "failed": False,
+            },
+            "openai": {
+                "content": '{"detected_voices": [{"label": "technical analysis", "description": "Analytical", "features": {}, "source_distribution": {}, "sample_ids": [], "confidence": "high"}], "overall_confidence": "high", "consolidation_notes": ""}',
+                "failed": False,
+            },
         }
 
         mock_response = {
@@ -120,11 +148,15 @@ class TestConsolidateDetection:
             "elapsed": 1.0,
         }
         user_config = {
-            "models": {"claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}},
+            "models": {
+                "claude": {"provider": "anthropic", "model": "claude-sonnet-4-6"}
+            },
             "api_keys": {"claude": {"api_key": "test-key"}},
         }
 
-        with patch("ci_web_intel.voice_consolidation.call_one", return_value=mock_response):
+        with patch(
+            "ci_web_intel.voice_consolidation.call_one", return_value=mock_response
+        ):
             result = consolidate_detection(detection_results, user_config)
 
         assert result is not None

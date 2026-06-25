@@ -9,14 +9,14 @@ from pathlib import Path
 
 from .base import Collector, ConfigError
 
-log = logging.getLogger(__name__)
-
 # Built-in collectors (imported explicitly)
 from .wordpress import WordPressCollector
 from .twitter import TwitterCollector
 from .gmail import GmailCollector
 from .outlook365 import Outlook365Collector
 from .textfiles import TextFilesCollector
+
+log = logging.getLogger(__name__)
 
 _BUILTINS: list[type[Collector]] = [
     WordPressCollector,
@@ -48,6 +48,8 @@ def _build_registry() -> dict[str, type[Collector]]:
                 spec = importlib.util.spec_from_file_location(
                     f"ci_web_intel.collectors.custom.{py_file.stem}", py_file
                 )
+                if spec is None or spec.loader is None:
+                    continue
                 mod = importlib.util.module_from_spec(spec)
                 sys.modules[f"ci_web_intel.collectors.custom.{py_file.stem}"] = mod
                 spec.loader.exec_module(mod)
@@ -67,7 +69,9 @@ def _build_registry() -> dict[str, type[Collector]]:
                                     message=f"Duplicate SOURCE_NAME {name!r}: {registry[name].__name__} vs {attr.__name__} (in {py_file})",
                                 )
                             registry[name] = attr
-                            log.debug("Loaded custom collector %r from %s", name, py_file)
+                            log.debug(
+                                "Loaded custom collector %r from %s", name, py_file
+                            )
                     except ConfigError:
                         raise
                     except Exception:
