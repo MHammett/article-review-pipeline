@@ -1,4 +1,23 @@
-# Article Review Pipeline
+# Content Intelligence
+
+Content Intelligence is a [uv](https://docs.astral.sh/uv/) workspace of tools for
+producing and reviewing written content. Code lives under `packages/`, one package
+per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
+
+- **ci-core** (`ci_core`) — shared library: LLM adapters, config, persistence, and
+  cross-package utilities the other packages build on.
+- **ci-article-review** (`ci_article_review`) — the article-review pipeline: runs a
+  drafted or already-published article through grammar correction and ensemble
+  multi-model AI review, then publishes to WordPress on approval. The mature package.
+- **ci-web-intel** (`ci_web_intel`) — voice-profile bootstrapping: analyzes a writing
+  corpus and synthesizes a structured voice/style profile. Early-stage. *(The dist
+  name is under review — see the open item in [docs/NAMING.md](docs/NAMING.md).)*
+
+The rest of this README covers **ci-article-review**, the primary tool today.
+
+---
+
+## Article Review
 
 A multi-pass automated review pipeline for published web content. Takes a drafted article through deterministic grammar correction and ensemble multi-model AI review, consolidates weighted feedback into a single prioritized report, and publishes to WordPress when you approve.
 

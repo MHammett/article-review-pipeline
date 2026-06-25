@@ -17,11 +17,13 @@ from html.parser import HTMLParser
 
 import requests
 
+from ci_core.http import USER_AGENT
+
 from .links import _is_public_host
 
 log = logging.getLogger(__name__)
 
-_USER_AGENT = "ArticleReviewPipeline/1.0"
+_USER_AGENT = USER_AGENT
 _FETCH_TIMEOUT = 20
 # Below this, the page almost certainly didn't extract cleanly (paywall, JS-only
 # render, or bot-block). We still run on what we got, but warn loudly.

@@ -10,6 +10,8 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from ci_core.http import USER_AGENT
+
 from ci_article_review.analysis import webpage
 
 
@@ -123,7 +125,7 @@ class TestFetchSsrfGuard:
         assert html == SAMPLE_HTML
         # Real User-Agent and redirects enabled.
         kwargs = mock_get.call_args.kwargs
-        assert kwargs["headers"]["User-Agent"] == "ArticleReviewPipeline/1.0"
+        assert kwargs["headers"]["User-Agent"] == USER_AGENT
         assert kwargs["allow_redirects"] is True
 
 
