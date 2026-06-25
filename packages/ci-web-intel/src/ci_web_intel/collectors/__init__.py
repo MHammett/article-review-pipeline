@@ -7,16 +7,16 @@ import logging
 import sys
 from pathlib import Path
 
-from collectors.base import Collector, ConfigError
+from .base import Collector, ConfigError
 
 log = logging.getLogger(__name__)
 
 # Built-in collectors (imported explicitly)
-from collectors.wordpress import WordPressCollector
-from collectors.twitter import TwitterCollector
-from collectors.gmail import GmailCollector
-from collectors.outlook365 import Outlook365Collector
-from collectors.textfiles import TextFilesCollector
+from .wordpress import WordPressCollector
+from .twitter import TwitterCollector
+from .gmail import GmailCollector
+from .outlook365 import Outlook365Collector
+from .textfiles import TextFilesCollector
 
 _BUILTINS: list[type[Collector]] = [
     WordPressCollector,
@@ -46,10 +46,10 @@ def _build_registry() -> dict[str, type[Collector]]:
                 continue
             try:
                 spec = importlib.util.spec_from_file_location(
-                    f"collectors.custom.{py_file.stem}", py_file
+                    f"ci_web_intel.collectors.custom.{py_file.stem}", py_file
                 )
                 mod = importlib.util.module_from_spec(spec)
-                sys.modules[f"collectors.custom.{py_file.stem}"] = mod
+                sys.modules[f"ci_web_intel.collectors.custom.{py_file.stem}"] = mod
                 spec.loader.exec_module(mod)
                 for attr_name in dir(mod):
                     attr = getattr(mod, attr_name)

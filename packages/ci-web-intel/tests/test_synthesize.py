@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 
 def _make_doc(text: str, source: str = "wordpress", date: str = "2024-01-15"):
-    from collectors.base import Document
+    from ci_web_intel.collectors.base import Document
     doc = Document.from_text(text=text, source=source, register="long_form", date=date, url_or_id="http://ex.com/1")
     doc.metrics = {"avg_sentence_words": 15.0, "hedging_ratio": 0.05, "first_person_ratio": 0.2}
     return doc
@@ -107,7 +102,7 @@ _USER_CONFIG = {
 class TestCanonicalMode:
     def test_canonical_makes_correct_calls(self):
         """canonical mode: M synthesis + 1 reconciliation = M+1 total calls."""
-        from synthesize import synthesize
+        from ci_web_intel.synthesize import synthesize
 
         docs = [_make_doc("Long article text " * 100) for _ in range(5)]
         call_count = []
@@ -123,8 +118,8 @@ class TestCanonicalMode:
             call_count.append(("call_one", model_name, pass_name))
             return {"content": _RECONCILE_CANONICAL, "failed": False, "tokens": {}, "elapsed": 1.0}
 
-        with patch("synthesize.call_all", side_effect=_fake_call_all), \
-             patch("synthesize.call_one", side_effect=_fake_call_one):
+        with patch("ci_web_intel.synthesize.call_all", side_effect=_fake_call_all), \
+             patch("ci_web_intel.synthesize.call_one", side_effect=_fake_call_one):
             result = synthesize(docs, _USER_CONFIG, mode="canonical")
 
         call_all_calls = [c for c in call_count if c[0] == "call_all"]
@@ -136,11 +131,11 @@ class TestCanonicalMode:
 
     def test_canonical_all_models_fail_raises(self):
         """All models fail → SynthesisError raised."""
-        from synthesize import synthesize, SynthesisError
+        from ci_web_intel.synthesize import synthesize, SynthesisError
 
         docs = [_make_doc("Test " * 100)]
 
-        with patch("synthesize.call_all", return_value={
+        with patch("ci_web_intel.synthesize.call_all", return_value={
             "claude": {"failed": True, "error": "timeout", "tokens": {}},
             "openai": {"failed": True, "error": "timeout", "tokens": {}},
         }):
@@ -151,13 +146,13 @@ class TestCanonicalMode:
 class TestDetectMode:
     def test_detect_mode_call_graph(self):
         """detect mode: detection + consolidation + N per-voice × M models + reconciliation."""
-        from synthesize import synthesize
+        from ci_web_intel.synthesize import synthesize
 
         docs = [_make_doc(f"Article {i} " * 100) for i in range(10)]
         calls = []
 
         def _fake_detect(docs, user_config, **kw):
-            from detect import VoiceCluster
+            from ci_web_intel.detect import VoiceCluster
             c = VoiceCluster(
                 label="technical analysis",
                 description="analytical",
@@ -195,10 +190,10 @@ class TestDetectMode:
             calls.append(f"call_one:{pass_name}")
             return {"content": _RECONCILE_DETECT, "failed": False, "tokens": {}, "elapsed": 1.0}
 
-        with patch("synthesize.detect_voices", side_effect=_fake_detect), \
-             patch("synthesize.classify_documents", side_effect=_fake_classify), \
-             patch("synthesize.call_all", side_effect=_fake_call_all), \
-             patch("synthesize.call_one", side_effect=_fake_call_one):
+        with patch("ci_web_intel.synthesize.detect_voices", side_effect=_fake_detect), \
+             patch("ci_web_intel.synthesize.classify_documents", side_effect=_fake_classify), \
+             patch("ci_web_intel.synthesize.call_all", side_effect=_fake_call_all), \
+             patch("ci_web_intel.synthesize.call_one", side_effect=_fake_call_one):
             result = synthesize(docs, _USER_CONFIG, mode="detect")
 
         assert "canonical" in result
@@ -208,19 +203,19 @@ class TestDetectMode:
 
     def test_detect_low_confidence_fallback(self):
         """CanonicalFallbackWarning during detection → falls back to canonical."""
-        from synthesize import synthesize
-        from detect import CanonicalFallbackWarning
+        from ci_web_intel.synthesize import synthesize
+        from ci_web_intel.detect import CanonicalFallbackWarning
 
         docs = [_make_doc("Text " * 100)]
 
-        with patch("synthesize.detect_voices", side_effect=CanonicalFallbackWarning("low confidence")), \
-             patch("synthesize.call_all", return_value={
+        with patch("ci_web_intel.synthesize.detect_voices", side_effect=CanonicalFallbackWarning("low confidence")), \
+             patch("ci_web_intel.synthesize.call_all", return_value={
                  "claude": {"content": _CANONICAL_SYNTHESIS, "failed": False, "tokens": {}, "elapsed": 1.0, "_parsed": {
                      "voice_profile": "test", "audience_primary": "test",
                      "banned_words": [], "banned_phrases": [], "positive_rules": [],
                  }},
              }), \
-             patch("synthesize.call_one", return_value={"content": _RECONCILE_CANONICAL, "failed": False, "tokens": {}, "elapsed": 1.0}):
+             patch("ci_web_intel.synthesize.call_one", return_value={"content": _RECONCILE_CANONICAL, "failed": False, "tokens": {}, "elapsed": 1.0}):
             result = synthesize(docs, _USER_CONFIG, mode="detect")
 
         assert "voice_profile" in result
@@ -230,21 +225,21 @@ class TestDetectMode:
 class TestValidateSynthesisOutput:
     def test_canonical_missing_key_raises(self):
         """SynthesisError raised when canonical profile missing required keys."""
-        from synthesize import validate_synthesis_output, SynthesisError
+        from ci_web_intel.synthesize import validate_synthesis_output, SynthesisError
 
         with pytest.raises(SynthesisError, match="missing required keys"):
             validate_synthesis_output({"voice_profile": "test"}, "canonical")
 
     def test_detect_missing_canonical_raises(self):
         """SynthesisError raised when detect result missing canonical section."""
-        from synthesize import validate_synthesis_output, SynthesisError
+        from ci_web_intel.synthesize import validate_synthesis_output, SynthesisError
 
         with pytest.raises(SynthesisError):
             validate_synthesis_output({"detected_voices": {}}, "detect")
 
     def test_valid_canonical_passes(self):
         """Valid canonical profile passes validation."""
-        from synthesize import validate_synthesis_output
+        from ci_web_intel.synthesize import validate_synthesis_output
 
         profile = {
             "voice_profile": "text",

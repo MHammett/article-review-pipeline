@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 
 import json as _json
 
@@ -66,7 +60,7 @@ _MOCK_USER_CONFIG = {
 class TestCallOneAnthropic:
     def test_anthropic_success(self):
         """call_one Anthropic: mock SSE → content and tokens returned."""
-        from callers import call_one, clear_api_call_log
+        from ci_web_intel.callers import call_one, clear_api_call_log
         clear_api_call_log()
 
         resp = _mock_sse_response(_anthropic_sse('{"voice_profile": "test"}'))
@@ -92,7 +86,7 @@ class TestCallOneAnthropic:
 
     def test_anthropic_http_error(self):
         """call_one returns failed=True on HTTP error; does not raise."""
-        from callers import call_one, clear_api_call_log
+        from ci_web_intel.callers import call_one, clear_api_call_log
         clear_api_call_log()
 
         with patch("requests.Session") as mock_session_cls:
@@ -115,7 +109,7 @@ class TestCallOneAnthropic:
 class TestCallOneOpenAI:
     def test_openai_success(self):
         """call_one OpenAI: mock chat completions SSE → correct content."""
-        from callers import call_one, clear_api_call_log
+        from ci_web_intel.callers import call_one, clear_api_call_log
         clear_api_call_log()
 
         resp = _mock_sse_response(_openai_sse('{"voice_profile": "openai result"}'))
@@ -137,7 +131,7 @@ class TestCallOneOpenAI:
 
     def test_openai_server_error_returns_failed(self):
         """call_one returns failed=True on 5xx; does not raise."""
-        from callers import call_one, clear_api_call_log
+        from ci_web_intel.callers import call_one, clear_api_call_log
         clear_api_call_log()
 
         with patch("requests.Session") as mock_session_cls:
@@ -159,7 +153,7 @@ class TestCallOneOpenAI:
 class TestCallOneGemini:
     def test_gemini_success(self):
         """call_one Gemini: mock SSE → usageMetadata mapped to tokens."""
-        from callers import call_one, clear_api_call_log
+        from ci_web_intel.callers import call_one, clear_api_call_log
         clear_api_call_log()
 
         resp = _mock_sse_response(_gemini_sse('{"voice_profile": "gemini result"}'))
@@ -184,13 +178,13 @@ class TestCallOneGemini:
 class TestCallAll:
     def test_call_all_three_models(self):
         """call_all with 3 models: all 3 called in parallel; results keyed by model name."""
-        from callers import call_all, clear_api_call_log
+        from ci_web_intel.callers import call_all, clear_api_call_log
         clear_api_call_log()
 
         def _fake_call_one(model_name, model_cfg, api_keys, system, user, pass_name=""):
             return {"content": f"{model_name}_result", "failed": False, "tokens": {}, "elapsed": 0.1, "model": model_name}
 
-        with patch("callers.call_one", side_effect=_fake_call_one):
+        with patch("ci_web_intel.callers.call_one", side_effect=_fake_call_one):
             results = call_all(
                 system_prompt="system",
                 user_prompt="user",
@@ -205,7 +199,7 @@ class TestCallAll:
 
     def test_call_all_subset(self):
         """call_all with models=["claude"]: only Claude called."""
-        from callers import call_all, clear_api_call_log
+        from ci_web_intel.callers import call_all, clear_api_call_log
         clear_api_call_log()
 
         called = []
@@ -214,7 +208,7 @@ class TestCallAll:
             called.append(model_name)
             return {"content": f"{model_name}_result", "failed": False, "tokens": {}, "elapsed": 0.1, "model": model_name}
 
-        with patch("callers.call_one", side_effect=_fake_call_one):
+        with patch("ci_web_intel.callers.call_one", side_effect=_fake_call_one):
             results = call_all(
                 system_prompt="system",
                 user_prompt="user",
@@ -229,7 +223,7 @@ class TestCallAll:
 
     def test_call_all_excludes_perplexity(self):
         """Perplexity is excluded by default."""
-        from callers import call_all, clear_api_call_log
+        from ci_web_intel.callers import call_all, clear_api_call_log
         clear_api_call_log()
 
         config_with_perplexity = {
@@ -250,7 +244,7 @@ class TestCallAll:
             called.append(model_name)
             return {"content": "", "failed": False, "tokens": {}, "elapsed": 0.1, "model": model_name}
 
-        with patch("callers.call_one", side_effect=_fake_call_one):
+        with patch("ci_web_intel.callers.call_one", side_effect=_fake_call_one):
             call_all(system_prompt="s", user_prompt="u", user_config=config_with_perplexity)
 
         assert "perplexity" not in called

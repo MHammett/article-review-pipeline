@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from adapters.review.json_utils import extract_json
-from callers import call_all, call_one
-from collectors.base import Document
-from voice_consolidation import DEFAULT_VOICE_WEIGHTS, consolidate_detection
+from ci_article_review.adapters.review.json_utils import extract_json
+from .callers import call_all, call_one
+from .collectors.base import Document
+from .voice_consolidation import DEFAULT_VOICE_WEIGHTS, consolidate_detection
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def detect_voices(
         model_subset = None  # all configured
     elif not detection_models:
         # Voice-style-weighted subset: claude + openai (weight ≥ 1.1)
-        from config_loader import _normalize_model_configs
+        from ci_article_review.config_loader import _normalize_model_configs
         configured = set(_normalize_model_configs(user_config.get("models", {})).keys())
         model_subset = [m for m in ("claude", "openai") if m in configured]
         if not model_subset:

@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 _CANONICAL_PROFILE = {
@@ -72,7 +68,7 @@ style_rules:
 class TestPublicationYamlFormatterCanonical:
     def test_canonical_format_has_required_keys(self):
         """Canonical format produces valid YAML with required keys; no voice_profiles block."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
         result = fmt.format(_CANONICAL_PROFILE, mode="canonical")
 
@@ -85,7 +81,7 @@ class TestPublicationYamlFormatterCanonical:
 class TestPublicationYamlFormatterDetect:
     def test_detect_format_has_voice_profiles_block(self):
         """detect mode: canonical at top level AND voice_profiles: block keyed by model-generated labels."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
         result = fmt.format(_DETECT_PROFILE, mode="detect")
 
@@ -100,7 +96,7 @@ class TestPublicationYamlFormatterDetect:
 class TestMergeIntoExisting:
     def test_preserves_non_voice_sections(self):
         """merge_into_existing preserves wordpress, rank_math, citation_sources sections."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
@@ -119,7 +115,7 @@ class TestMergeIntoExisting:
 
     def test_replaces_voice_sections(self):
         """merge_into_existing replaces old voice_profile and style_rules."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
@@ -135,7 +131,7 @@ class TestMergeIntoExisting:
 
     def test_detect_mode_adds_voice_profiles_block(self):
         """detect mode: adds voice_profiles: block; does not touch other sections."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
@@ -154,7 +150,7 @@ class TestMergeIntoExisting:
 class TestDiffVoiceSections:
     def test_diff_empty_when_identical(self):
         """diff_voice_sections returns empty string when profiles are identical."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
 
         new_yaml = fmt.format(_CANONICAL_PROFILE, mode="canonical")
@@ -171,7 +167,7 @@ class TestDiffVoiceSections:
 
     def test_diff_shows_changes(self):
         """diff_voice_sections shows changes between old and new voice sections."""
-        from output import PublicationYamlFormatter
+        from ci_web_intel.output import PublicationYamlFormatter
         fmt = PublicationYamlFormatter()
 
         old_yaml = "voice_profile: |\n  Old profile text\nstyle_rules:\n  banned_words: []\n"
@@ -191,7 +187,7 @@ class TestDiffVoiceSections:
 class TestAtomicWrite:
     def test_atomic_write_success(self):
         """Atomic write creates file; .tmp cleaned up on success."""
-        from output import write_atomic
+        from ci_web_intel.output import write_atomic
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "profile.yaml"
             write_atomic(output_path, "content: test\n")
@@ -202,7 +198,7 @@ class TestAtomicWrite:
 class TestMarkdownFormatter:
     def test_markdown_has_voice_sections(self):
         """MarkdownReportFormatter produces sections per detected voice."""
-        from output import MarkdownReportFormatter
+        from ci_web_intel.output import MarkdownReportFormatter
         fmt = MarkdownReportFormatter()
         result = fmt.format(_DETECT_PROFILE, mode="detect")
 
@@ -213,7 +209,7 @@ class TestMarkdownFormatter:
 
     def test_markdown_canonical_mode(self):
         """Canonical mode has no detected voices section."""
-        from output import MarkdownReportFormatter
+        from ci_web_intel.output import MarkdownReportFormatter
         fmt = MarkdownReportFormatter()
         result = fmt.format(_CANONICAL_PROFILE, mode="canonical")
 
@@ -224,10 +220,10 @@ class TestMarkdownFormatter:
 class TestProfileVersioning:
     def test_snapshot_saved_to_profiles_dir(self):
         """Snapshot written to profiles/<name>/<ISO8601>.yaml."""
-        from output import save_versioned_snapshot
+        from ci_web_intel.output import save_versioned_snapshot
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("output.Path") as mock_path_cls:
+            with patch("ci_web_intel.output.Path") as mock_path_cls:
                 # We'll test via actual filesystem since patching Path is complex
                 pass
 
@@ -236,12 +232,12 @@ class TestProfileVersioning:
         profiles_dir = Path(__file__).parent.parent / "profiles"
         profiles_dir.mkdir(exist_ok=True)
 
-        with patch("output.Path.__truediv__", return_value=Path(tempfile.mkdtemp())):
+        with patch("ci_web_intel.output.Path.__truediv__", return_value=Path(tempfile.mkdtemp())):
             pass  # Skip complex path patch
 
         # Direct test
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("output.Path", lambda *a: Path(*a)):
+            with patch("ci_web_intel.output.Path", lambda *a: Path(*a)):
                 # Just verify the function signature works
                 snap = save_versioned_snapshot("content: test\n", publication="test_pub", output_yaml=None)
                 assert snap.exists()

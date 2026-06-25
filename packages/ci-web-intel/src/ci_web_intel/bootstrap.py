@@ -36,11 +36,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# All imports assume invocation from repo root (article-review-pipeline/)
-sys.path.insert(0, str(Path(__file__).parent))
-# Also ensure repo root is on path for pipeline imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import yaml as _yaml
 
 log = logging.getLogger(__name__)
@@ -66,7 +61,7 @@ def _load_sources_yaml() -> dict:
     except Exception as e:
         log.error("Failed to load sources.yaml: %s", e)
         return {}
-    from config_loader import _resolve_env_recursive
+    from ci_article_review.config_loader import _resolve_env_recursive
     return _resolve_env_recursive(data)
 
 
@@ -118,7 +113,7 @@ def _apply_preset(preset_name: str, presets: dict, sources_cfg: dict, cli_args: 
 
 def _load_user_config_lenient() -> dict:
     """Load user.yaml without strict validation (voice profiler works with any model subset)."""
-    from config_loader import _load_yaml, _resolve_env_recursive
+    from ci_article_review.config_loader import _load_yaml, _resolve_env_recursive
     path = Path("configs/user.yaml")
     if not path.exists():
         log.warning("configs/user.yaml not found; no API models available")
@@ -154,7 +149,7 @@ def _load_staged(source: str) -> list | None:
         if header.get("schema_version") != _SCHEMA_VERSION:
             log.warning("Staging schema version mismatch for %s; forcing refresh", source)
             return None
-        from collectors.base import Document
+        from .collectors.base import Document
         docs = []
         for line in lines[1:]:
             line = line.strip()
@@ -239,7 +234,7 @@ def _collect_source(
     no_stage: bool,
 ) -> list:
     """Collect or load from staging for one source."""
-    from collectors.base import CollectorError
+    from .collectors.base import CollectorError
 
     watermark = watermarks.get(source_name) if not refresh else None
     effective_since = watermark or since
@@ -354,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     sources_cfg = _load_sources_yaml()
 
     # 2. Configure logging BEFORE any module logs
-    from logging_config import configure_logging
+    from .logging_config import configure_logging
     configure_logging(sources_cfg.get("logging", {}), log_level_override=args.log_level)
 
     log.info("Voice Profile Bootstrap starting (preset=%s)", args.preset)
@@ -393,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Check model currency
     try:
-        from model_registry import check_model_currency
+        from ci_article_review.model_registry import check_model_currency
         warnings = check_model_currency(user_config.get("models", {}))
         for w in (warnings or {}).values():
             if w:
@@ -402,8 +397,8 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     # 4. Build collector registry
-    from collectors import REGISTRY
-    from collectors.base import CollectorError, ConfigError
+    from .collectors import REGISTRY
+    from .collectors.base import CollectorError, ConfigError
 
     # 5. Determine which sources to use
     if args.sources:
@@ -498,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # 9. Deduplicate
-    from normalize import deduplicate, corpus_summary, corpus_bias_warnings, compute_metrics, clean_text
+    from .normalize import deduplicate, corpus_summary, corpus_bias_warnings, compute_metrics, clean_text
     all_docs, n_dropped = deduplicate(all_docs)
     log.info("Corpus: %d unique documents (dropped %d duplicates)", len(all_docs), n_dropped)
 
@@ -543,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     # 12. Detection dry-run (runs detection API call)
     if args.dry_run and voice_mode == "detect":
         print("\n=== DRY RUN — DETECTION PASS (this costs money) ===")
-        from detect import detect_voices, CanonicalFallbackWarning
+        from .detect import detect_voices, CanonicalFallbackWarning
         try:
             clusters = detect_voices(
                 all_docs, user_config,
@@ -559,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nDetection low confidence: {w}")
             print("Would fall back to canonical mode for full run.")
 
-        from callers import log_cost_summary
+        from .callers import log_cost_summary
         log_cost_summary()
         return 0
 
@@ -571,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
 
     output_path = _resolve_output_path(args.publication, args.output_yaml)
 
-    from synthesize import synthesize, SynthesisError
+    from .synthesize import synthesize, SynthesisError
     try:
         log.info("Starting synthesis (mode=%s)", voice_mode)
         profile = synthesize(
@@ -594,7 +589,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 15. Validate (already done inside synthesize, but belt-and-suspenders)
     # 16. Format and write output
-    from output import (
+    from .output import (
         PublicationYamlFormatter, MarkdownReportFormatter, JsonFormatter,
         write_atomic, save_versioned_snapshot,
     )
@@ -659,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
         _save_watermarks(new_watermarks)
 
     # Log cost summary
-    from callers import log_cost_summary
+    from .callers import log_cost_summary
     log_cost_summary()
 
     log.info("Done.")

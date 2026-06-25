@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from collectors.base import Collector, CollectorError, ConfigError, Document
+from .base import Collector, CollectorError, ConfigError, Document
 
 log = logging.getLogger(__name__)
 

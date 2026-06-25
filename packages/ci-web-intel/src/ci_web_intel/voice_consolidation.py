@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from adapters.review.json_utils import extract_json
-from callers import call_one
+from ci_article_review.adapters.review.json_utils import extract_json
+from .callers import call_one
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def consolidate_detection(
     Makes ONE Claude API call using prompts/consolidate_detection.txt.
     Returns list of raw VoiceCluster-shaped dicts (caller converts to VoiceCluster objects).
     """
-    from config_loader import _normalize_model_configs
+    from ci_article_review.config_loader import _normalize_model_configs
     w = weights or DEFAULT_VOICE_WEIGHTS
 
     # Build input for the consolidation prompt

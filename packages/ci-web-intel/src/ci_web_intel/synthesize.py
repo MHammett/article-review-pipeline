@@ -12,11 +12,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from adapters.review.json_utils import extract_json
-from callers import call_all, call_one
-from collectors.base import Document
-from detect import VoiceCluster, CanonicalFallbackWarning, classify_documents, detect_voices
-from voice_consolidation import collect_prose, consolidate_lists, DEFAULT_VOICE_WEIGHTS
+from ci_article_review.adapters.review.json_utils import extract_json
+from .callers import call_all, call_one
+from .collectors.base import Document
+from .detect import VoiceCluster, CanonicalFallbackWarning, classify_documents, detect_voices
+from .voice_consolidation import collect_prose, consolidate_lists, DEFAULT_VOICE_WEIGHTS
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ def _reconcile(
     voice_label: str = "",
 ) -> dict:
     """Run Claude reconciliation pass. Returns parsed result dict."""
-    from config_loader import _normalize_model_configs
+    from ci_article_review.config_loader import _normalize_model_configs
     system_prompt = _load_prompt("synthesize_reconcile.txt")
     user_prompt = _build_reconcile_input(results, consolidated_lists, voice_label)
 

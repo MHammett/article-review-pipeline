@@ -8,7 +8,7 @@ from typing import Iterator
 
 import requests
 
-from collectors.base import Collector, CollectorError, ConfigError, Document
+from .base import Collector, CollectorError, ConfigError, Document
 
 log = logging.getLogger(__name__)
 

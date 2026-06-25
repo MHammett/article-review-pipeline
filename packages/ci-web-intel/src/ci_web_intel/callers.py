@@ -18,15 +18,15 @@ from typing import Any
 
 import requests
 
-from adapters.review.streaming import (
+from ci_article_review.adapters.review.streaming import (
     accumulate_anthropic,
     accumulate_chat_completions,
     accumulate_gemini,
     accumulate_openai_responses,
     stream_timeout,
 )
-from adapters.review.json_utils import extract_json
-from analysis.cost import calculate as cost_calculate
+from ci_article_review.adapters.review.json_utils import extract_json
+from ci_article_review.analysis.cost import calculate as cost_calculate
 
 log = logging.getLogger(__name__)
 
@@ -330,7 +330,7 @@ def call_all(
     api_keys: dict = user_config.get("api_keys", {})
 
     # Normalize model configs (handle simple string form)
-    from config_loader import _normalize_model_configs
+    from ci_article_review.config_loader import _normalize_model_configs
     models_cfg = _normalize_model_configs(models_cfg)
 
     # Filter to requested subset

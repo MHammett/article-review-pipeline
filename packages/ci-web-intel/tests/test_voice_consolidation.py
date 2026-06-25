@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def _make_result(model_name: str, items: list[str], key: str = "banned_words") -> dict:
@@ -25,7 +20,7 @@ def _make_result(model_name: str, items: list[str], key: str = "banned_words") -
 class TestConsolidateLists:
     def test_claude_openai_pass_threshold(self):
         """Claude (1.1) + OpenAI (1.2) = 2.3 ≥ 2.0 → item included."""
-        from voice_consolidation import consolidate_lists
+        from ci_web_intel.voice_consolidation import consolidate_lists
         results = {
             "claude": _make_result("claude", ["leverage"]),
             "openai": _make_result("openai", ["leverage"]),
@@ -35,7 +30,7 @@ class TestConsolidateLists:
 
     def test_mistral_only_below_threshold(self):
         """Mistral only (weight 1.0) < 2.0 → item excluded."""
-        from voice_consolidation import consolidate_lists
+        from ci_web_intel.voice_consolidation import consolidate_lists
         results = {
             "mistral": _make_result("mistral", ["synergy"]),
         }
@@ -44,7 +39,7 @@ class TestConsolidateLists:
 
     def test_four_models_agree(self):
         """All 4 models agree → item included regardless."""
-        from voice_consolidation import consolidate_lists
+        from ci_web_intel.voice_consolidation import consolidate_lists
         results = {
             "claude":  _make_result("claude",  ["utilize"]),
             "openai":  _make_result("openai",  ["utilize"]),
@@ -56,7 +51,7 @@ class TestConsolidateLists:
 
     def test_failed_model_not_counted(self):
         """Failed model results don't contribute to vote counts."""
-        from voice_consolidation import consolidate_lists
+        from ci_web_intel.voice_consolidation import consolidate_lists
         results = {
             "claude": {"failed": True, "error": "timeout", "_parsed": {}},
             "openai": _make_result("openai", ["basically"]),
@@ -66,7 +61,7 @@ class TestConsolidateLists:
 
     def test_custom_threshold(self):
         """Custom threshold works."""
-        from voice_consolidation import consolidate_lists
+        from ci_web_intel.voice_consolidation import consolidate_lists
         results = {
             "openai": _make_result("openai", ["arguably"]),
         }
@@ -77,7 +72,7 @@ class TestConsolidateLists:
 class TestCollectProse:
     def test_sorted_by_weight_descending(self):
         """collect_prose returns entries sorted by weight descending (Claude and OpenAI first)."""
-        from voice_consolidation import collect_prose
+        from ci_web_intel.voice_consolidation import collect_prose
         results = {
             "mistral": {"failed": False, "_parsed": {"voice_profile": "mistral prose"}, "tokens": {}},
             "claude":  {"failed": False, "_parsed": {"voice_profile": "claude prose"}, "tokens": {}},
@@ -89,7 +84,7 @@ class TestCollectProse:
 
     def test_failed_excluded(self):
         """Failed model results are excluded from prose collection."""
-        from voice_consolidation import collect_prose
+        from ci_web_intel.voice_consolidation import collect_prose
         results = {
             "claude": {"failed": True, "_parsed": {}, "tokens": {}},
             "openai": {"failed": False, "_parsed": {"voice_profile": "openai result"}, "tokens": {}},
@@ -100,7 +95,7 @@ class TestCollectProse:
 
     def test_empty_key_excluded(self):
         """Models with missing key are excluded."""
-        from voice_consolidation import collect_prose
+        from ci_web_intel.voice_consolidation import collect_prose
         results = {
             "claude": {"failed": False, "_parsed": {}, "tokens": {}},
         }
@@ -111,7 +106,7 @@ class TestCollectProse:
 class TestConsolidateDetection:
     def test_consolidate_calls_claude(self):
         """consolidate_detection makes one Claude API call with consolidate_detection.txt prompt."""
-        from voice_consolidation import consolidate_detection
+        from ci_web_intel.voice_consolidation import consolidate_detection
 
         detection_results = {
             "claude": {"content": '{"detected_voices": [{"label": "technical", "description": "Long form", "features": {}, "source_distribution": {}, "sample_ids": [], "confidence": "high"}], "overall_confidence": "high", "consolidation_notes": ""}', "failed": False},
@@ -129,7 +124,7 @@ class TestConsolidateDetection:
             "api_keys": {"claude": {"api_key": "test-key"}},
         }
 
-        with patch("voice_consolidation.call_one", return_value=mock_response):
+        with patch("ci_web_intel.voice_consolidation.call_one", return_value=mock_response):
             result = consolidate_detection(detection_results, user_config)
 
         assert result is not None

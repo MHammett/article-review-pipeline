@@ -6,7 +6,7 @@ import logging
 import re
 from collections import defaultdict
 
-from collectors.base import Document
+from .collectors.base import Document
 
 log = logging.getLogger(__name__)
 
