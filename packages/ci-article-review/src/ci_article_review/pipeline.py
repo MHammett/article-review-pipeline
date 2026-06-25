@@ -337,7 +337,10 @@ def _run_domain(
         template,
         publication_description=pub_config.get("publication_description", ""),
         audience=str(pub_config.get("audience", {})),
-        voice_profile=pub_config.get("voice_profile", ""),
+        # ci-style-profile emits `style_profile`; fall back to the legacy
+        # `voice_profile` key so existing publication.yaml files keep working.
+        voice_profile=pub_config.get("style_profile")
+        or pub_config.get("voice_profile", ""),
         banned_words=", ".join(style.get("banned_words", [])),
         banned_phrases=", ".join(style.get("banned_phrases", [])),
         positive_rules="\n".join(f"- {r}" for r in style.get("positive_rules", [])),

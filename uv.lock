@@ -12,7 +12,7 @@ resolution-markers = [
 members = [
     "ci-article-review",
     "ci-core",
-    "ci-web-intel",
+    "ci-style-profile",
 ]
 
 [manifest.dependency-groups]
@@ -481,9 +481,9 @@ requires-dist = [
 provides-extras = ["anthropic", "openai", "gemini", "mistral", "all-llm"]
 
 [[package]]
-name = "ci-web-intel"
+name = "ci-style-profile"
 version = "0.1.0"
-source = { editable = "packages/ci-web-intel" }
+source = { editable = "packages/ci-style-profile" }
 dependencies = [
     { name = "ci-article-review" },
     { name = "ci-core" },

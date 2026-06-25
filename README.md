@@ -9,9 +9,9 @@ per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
 - **ci-article-review** (`ci_article_review`) — the article-review pipeline: runs a
   drafted or already-published article through grammar correction and ensemble
   multi-model AI review, then publishes to WordPress on approval. The mature package.
-- **ci-web-intel** (`ci_web_intel`) — voice-profile bootstrapping: analyzes a writing
-  corpus and synthesizes a structured voice/style profile. Early-stage. *(The dist
-  name is under review — see the open item in [docs/NAMING.md](docs/NAMING.md).)*
+- **ci-style-profile** (`ci_style_profile`) — style-profile bootstrapping: analyzes a writing
+  corpus across multiple sources and synthesizes a structured style profile for `publication.yaml`.
+  Early-stage.
 
 The rest of this README covers **ci-article-review**, the primary tool today.
 
@@ -63,7 +63,7 @@ uv run python -m ci_article_review.setup --publication dnacom
 
 **2. Fill in `configs/user.yaml`** with your API keys and model selection. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for account setup instructions per provider. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full config reference.
 
-**3. Fill in `configs/your_publication_name.yaml`** with your voice profile, audience description, and WordPress credentials.
+**3. Fill in `configs/your_publication_name.yaml`** with your style profile, audience description, and WordPress credentials.
 
 **4. Verify your setup:**
 
@@ -235,12 +235,11 @@ content-intelligence/
 │   │   ├── src/ci_core/
 │   │   └── tests/
 │   │
-│   └── ci-web-intel/             web intelligence gathering tools (stub)
+│   └── ci-style-profile/             style-profile bootstrapping (see PLAN.md)
 │       ├── pyproject.toml
-│       ├── src/ci_web_intel/
+│       ├── src/ci_style_profile/
 │       └── tests/
 │
-├── voice-profile-bootstrap/      voice-profile bootstrapping (see PLAN.md)
 ├── pipeline_history/             run reports saved here (gitignored, local only)
 └── docs/                         extended documentation
     ├── PROVIDERS.md              account setup for every service

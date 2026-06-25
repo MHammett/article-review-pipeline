@@ -15,10 +15,10 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-# ci-web-intel (formerly voice-profile-bootstrap) runtime output + local config
-packages/ci-web-intel/src/ci_web_intel/sources.yaml
-packages/ci-web-intel/src/ci_web_intel/staging/
-packages/ci-web-intel/src/ci_web_intel/profiles/
+# ci-style-profile (formerly voice-profile-bootstrap) runtime output + local config
+packages/ci-style-profile/src/ci_style_profile/sources.yaml
+packages/ci-style-profile/src/ci_style_profile/staging/
+packages/ci-style-profile/src/ci_style_profile/profiles/
 
 # uv
 .uv/

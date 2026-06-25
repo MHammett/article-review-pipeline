@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [ci-core, ci-article-review, ci-web-intel]
+        package: [ci-core, ci-article-review, ci-style-profile]
 
     steps:
       - uses: actions/checkout@v4

@@ -145,10 +145,10 @@ def test_bind_task_id_appears_in_log(capsys):
 
 def test_bind_package_name_appears_in_log(capsys):
     _production_configure()
-    bind_package_name("ci-web-intel")
+    bind_package_name("ci-style-profile")
     get_logger().info("with package")
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload["package_name"] == "ci-web-intel"
+    assert payload["package_name"] == "ci-style-profile"
 
 
 def test_all_three_context_vars(capsys):

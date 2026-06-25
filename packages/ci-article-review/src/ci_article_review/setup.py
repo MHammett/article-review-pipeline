@@ -176,7 +176,7 @@ def main() -> None:
             f"\n{step}. Fill in your publication profile in configs/{publication_name}.yaml"
         )
         print(
-            "   Required: publication_description, audience, voice_profile, wordpress.*"
+            "   Required: publication_description, audience, style_profile, wordpress.*"
         )
         print("   See docs/CONFIGURATION.md for field reference.")
         step += 1

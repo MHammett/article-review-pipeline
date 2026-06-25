@@ -18,4 +18,4 @@ test:
 build:
 	uv build --package ci-core
 	uv build --package ci-article-review
-	uv build --package ci-web-intel
+	uv build --package ci-style-profile

@@ -1,0 +1,38 @@
+[project]
+name = "ci-style-profile"
+version = "0.1.0"
+description = "Synthesize a writing-style profile from a multi-source corpus"
+requires-python = ">=3.10"
+dependencies = [
+    "ci-core",
+    "ci-article-review",
+    "requests>=2.31",
+    "ruamel.yaml>=0.18",
+    "google-auth>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "google-api-python-client>=2.0",
+    "msal>=1.20",
+    "python-docx>=1.1",
+]
+
+[project.scripts]
+style-profile-bootstrap = "ci_style_profile.bootstrap:main"
+
+[tool.uv.sources]
+ci-core = { workspace = true }
+ci-article-review = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ci_style_profile"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
