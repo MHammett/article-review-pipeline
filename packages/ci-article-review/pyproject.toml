@@ -10,6 +10,16 @@ dependencies = [
     "python-dotenv>=1.0.0,<2.0",
 ]
 
+[project.optional-dependencies]
+# Vertex AI provider for the Gemini adapter (google.auth token flow).
+# Not needed when using Gemini via AI Studio (API-key auth).
+vertex = ["google-auth>=2.0"]
+# Best-quality main-content extraction for --url mode; falls back to a built-in
+# HTMLParser extractor when absent.
+url = ["trafilatura>=1.6"]
+# Convenience: all optional extras at once.
+all = ["google-auth>=2.0", "trafilatura>=1.6"]
+
 [project.scripts]
 ci-setup = "ci_article_review.setup:main"
 ci-check = "ci_article_review.check:main"
