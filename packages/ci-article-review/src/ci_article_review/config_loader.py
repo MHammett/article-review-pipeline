@@ -207,9 +207,17 @@ _COST_PRESETS = {
     "thorough": {
         "thoroughness": "thorough",
         "models": {
-            "openai": {"model": "gpt-5.4", "reasoning_effort": "high"},
+            "openai": {
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "stream_read_timeout": 200,
+            },
             "gemini": {"model": "gemini-2.5-pro"},
-            "mistral": {"model": "mistral-medium-3-5", "reasoning_effort": "high"},
+            "mistral": {
+                "model": "mistral-medium-3-5",
+                "reasoning_effort": "high",
+                "stream_read_timeout": 200,
+            },
             "perplexity": {"model": "sonar-reasoning-pro"},
             "grok": {"model": "grok-4.20-0309-reasoning"},
             "claude": {"model": "claude-opus-4-8", "effort": "high"},
@@ -222,9 +230,17 @@ _COST_PRESETS = {
     "maximum": {
         "thoroughness": "maximum",
         "models": {
-            "openai": {"model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            "openai": {
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
+                "stream_read_timeout": 300,
+            },
             "gemini": {"model": "gemini-2.5-pro", "thinking_budget": 16000},
-            "mistral": {"model": "mistral-medium-3-5", "reasoning_effort": "high"},
+            "mistral": {
+                "model": "mistral-medium-3-5",
+                "reasoning_effort": "high",
+                "stream_read_timeout": 200,
+            },
             "perplexity": {"model": "sonar-reasoning-pro"},
             "grok": {"model": "grok-4.20-0309-reasoning"},
             "claude": {"model": "claude-opus-4-8", "effort": "high"},

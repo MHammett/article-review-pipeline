@@ -26,9 +26,14 @@ class TestComputeTimeout:
 
     def test_effort_is_steep(self):
         # Same model: high should be several times none (calibration showed ~5x).
+        # Threshold is 2.5x rather than the tighter historical 3x because
+        # floor_seconds was raised 60->90 (for Grok's thin timeout headroom),
+        # which also lifts the floor-clamped "none" baseline for gpt-5.4 — the
+        # ratio compresses even though the underlying "high" value (unfloored,
+        # effort-driven) hasn't changed.
         none = tm.compute_timeout(ANCHOR, "gpt-5.4", "none", CEILING)
         high = tm.compute_timeout(ANCHOR, "gpt-5.4", "high", CEILING)
-        assert high >= 3 * none, (none, high)
+        assert high >= 2.5 * none, (none, high)
 
     def test_floor_enforced(self):
         # Grok is fast; its computed value falls below the floor and is clamped up.

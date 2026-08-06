@@ -27,7 +27,10 @@
 #   voice_style 357s (21k) · fact_check 456s (30k)
 
 base_seconds: 60
-floor_seconds: 60
+# Grok's computed value clamps to this floor and ran with <10s headroom repeatedly
+# in a maximum-preset run (4/5 calls 51-55s against the old 60s floor; one timed
+# out outright). Raised 60 -> 90 for real margin.
+floor_seconds: 90
 
 # Global safety buffer applied to every computed timeout, on top of the multipliers.
 # The multipliers target TYPICAL (central) completion time; this margin covers the

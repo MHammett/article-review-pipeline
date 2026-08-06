@@ -692,6 +692,10 @@ def run_draft_pipeline(
             m = runner_name.split(":")[0]
             return model_configs.get(m, {}).get("timeout_seconds", task_timeout)
 
+        def _configured_model_id(runner_name):
+            m = runner_name.split(":")[0]
+            return model_configs.get(m, {}).get("model", m)
+
         runner_timeouts = [(name, fn, _per_model_timeout(name)) for name, fn in runners]
         global_ceiling = _global_ceiling(
             [t for _, _, t in runner_timeouts],
@@ -728,8 +732,12 @@ def run_draft_pipeline(
                 raw_results[name] = {
                     "failed": True,
                     "error": f"Exceeded global timeout of {global_ceiling}s",
-                    "model": "unknown",
+                    "model": _configured_model_id(name),
                     "tokens": {},
+                    # The call was cancelled at the global ceiling, so we don't know
+                    # the true elapsed time — record the ceiling as a lower bound
+                    # rather than leaving it None (breaks [CALIBRATION] log parsing).
+                    "elapsed_seconds": global_ceiling,
                     "_model": name.split(":")[0],
                     "_domain": name.split(":", 1)[1] if ":" in name else name,
                 }
@@ -746,8 +754,12 @@ def run_draft_pipeline(
                     raw_results[name] = {
                         "failed": True,
                         "error": str(e),
-                        "model": "unknown",
+                        "model": _configured_model_id(name),
                         "tokens": {},
+                        # Best available lower bound on elapsed time — the task ran
+                        # at least this long before being cancelled. Avoids "elapsed=Nones"
+                        # in the [CALIBRATION] log line for timed-out passes.
+                        "elapsed_seconds": per_timeout if timed_out else None,
                         "_model": name.split(":")[0],
                         "_domain": name.split(":", 1)[1] if ":" in name else name,
                     }
