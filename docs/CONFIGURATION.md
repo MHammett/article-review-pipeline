@@ -155,13 +155,15 @@ The review adapters stream responses (Server-Sent Events). That splits "the time
 
 | Layer | What it bounds | Typical size | Set by |
 |---|---|---|---|
-| **Inter-token read gap** | Max stall *between* streamed tokens (the socket read timeout) | small constant (~120s; 160s for grounded Gemini/Perplexity) | `stream_read_timeout` per model, else adapter default |
+| **Inter-token read gap** | Max stall *between* streamed tokens (the socket read timeout) | small constant — 120s default; 160s for grounded Gemini/Perplexity (search delays first token); 200s for `high` reasoning effort and 300s for `xhigh` (see below) | `stream_read_timeout` per model, else adapter default, else the `thorough`/`maximum` preset's reasoning-tier override |
 | **Per-task wall-clock backstop** | Total time one model+domain call may run before the pipeline thread kills it | the sliding-scale computed value (below) | `timeout_seconds` per model, else computed |
 | **Global batch ceiling** | Outer bound on the whole parallel batch | slowest backstop + retry + slack | derived (`_global_ceiling()`) |
 
 **Why streaming matters:** before streaming, a model that buffered its entire 16–30k-token reasoning+output and sent nothing until done forced the *socket* read timeout to cover the full compute time (gpt-5.5 xhigh needed an ~819s per-call timeout). With streaming, tokens arrive incrementally, so the socket timeout becomes the **gap between tokens** — small and constant regardless of total length, and a hang/stall is caught in ~120s instead of after the whole giant budget elapses.
 
 Streaming does **not** make a long generation finish faster — that gpt-5.5 xhigh call still emits tokens for ~800s. So the **wall-clock backstop still must cover the genuine total generation time**; it just no longer has to absorb "model sent nothing for 800s, is it hung?" — the read-gap layer answers that.
+
+**Caveat found in production:** the 120s default read gap assumed only *grounded* (search) calls have a long silent period before the first token. In practice, `high`/`xhigh` reasoning effort also produces a long silent stretch — the model "thinks" with zero bytes on the wire, not even a keep-alive — before it starts streaming visible output. Observed directly: `gpt-5.5` at `xhigh` failed 5/5 calls at ~121s with 0 output tokens against the 120s default. The `thorough` and `maximum` presets now ship `stream_read_timeout` overrides for their `high`/`xhigh` entries (200s / 300s) to cover this. If you define a custom preset or override `reasoning_effort` to `high`/`xhigh` on a provider the built-in presets don't cover, set `stream_read_timeout` yourself — don't rely on the 120s default.
 
 #### Wall-clock backstop is automatic (sliding scale)
 

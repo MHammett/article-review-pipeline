@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # Hardcoded fallback — kept in parity with configs/timeouts.yaml (see tests).
 _FALLBACK = {
     "base_seconds": 60,
-    "floor_seconds": 60,
+    "floor_seconds": 90,
     "variance_margin": 1.25,
     "size_multipliers": [
         {"max_chars": 5000, "mult": 0.4},

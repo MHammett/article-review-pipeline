@@ -23,6 +23,24 @@
 #   "low" and "medium" return 400. Standard models do not support reasoning_effort at all.
 # Grok note: reasoning is model-selection based. Use grok-4.20-0309-reasoning for CoT;
 #   reasoning_effort is not a supported Grok API parameter.
+#
+# stream_read_timeout note: the review adapters stream (SSE); the socket read
+# timeout is normally a small constant "max gap between chunks" (see
+# adapters/review/streaming.py), NOT the total generation budget. But high/xhigh
+# reasoning effort can produce a long SILENT period — zero bytes on the wire,
+# not even a keep-alive — while the model reasons before it starts emitting
+# visible output. Observed directly: gpt-5.5 at xhigh failed 5/5 calls at ~121s
+# with 0 output tokens against the default 120s read-gap. Community reports for
+# OpenAI reasoning models corroborate 120s being too tight and recommend 300s+
+# (some report the SDK's 900s default is still marginal for xhigh). `high`-effort
+# configs (gpt-5.4, mistral-medium-3-5) run closer to the 120s default but still
+# saw a marginal timeout in the wild (mistral high at 124s), so they get a smaller
+# bump. This is a stopgap: the real fix is switching the OpenAI adapter's primary
+# path to the Responses API with reasoning-summary streaming enabled
+# (response.reasoning_summary_text.delta events), which puts real bytes on the
+# wire during the "silent" reasoning phase and would let the read-gap timeout
+# shrink back down instead of just being raised further. Not done here — bigger
+# change, tracked separately.
 
 economy:
   thoroughness: standard
@@ -81,11 +99,13 @@ thorough:
     openai:
       model: gpt-5.4
       reasoning_effort: high
+      stream_read_timeout: 200   # high effort observed at 107-120s; default 120 is too tight
     gemini:
       model: gemini-2.5-pro
     mistral:
       model: mistral-medium-3-5
       reasoning_effort: high
+      stream_read_timeout: 200   # same effort tier as openai high, same risk
     perplexity:
       model: sonar-reasoning-pro
     grok:
@@ -100,6 +120,8 @@ maximum:
     openai:
       model: gpt-5.5
       reasoning_effort: xhigh
+      stream_read_timeout: 300   # xhigh's silent reasoning phase exceeds the 120s default
+                                  # (observed 5/5 failures at ~121s, 0 output tokens)
     gemini:
       model: gemini-2.5-pro
       thinking_budget: 16000
@@ -107,6 +129,7 @@ maximum:
     mistral:
       model: mistral-medium-3-5
       reasoning_effort: high
+      stream_read_timeout: 200   # same effort tier as thorough's mistral entry
     perplexity:
       model: sonar-reasoning-pro
     grok:
