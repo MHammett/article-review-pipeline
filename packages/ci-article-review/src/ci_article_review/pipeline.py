@@ -265,12 +265,12 @@ def _build_custom_assignments(pub_config, model_configs, api_keys):
 
 def _load_prompt(name: str) -> str:
     if name not in _PROMPT_CACHE:
-        path = Path("prompts") / name
+        # Prompts are packaged alongside this module, so resolve relative to the
+        # package — not the current working directory (which broke when the code
+        # moved into packages/ci-article-review and is invoked as a module).
+        path = Path(__file__).parent / "prompts" / name
         if not path.exists():
-            raise FileNotFoundError(
-                f"Prompt file not found: {path}\n"
-                "Ensure you are running pipeline.py from the project root directory."
-            )
+            raise FileNotFoundError(f"Prompt file not found: {path}")
         _PROMPT_CACHE[name] = path.read_text(encoding="utf-8")
     return _PROMPT_CACHE[name]
 

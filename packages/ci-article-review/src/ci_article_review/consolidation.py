@@ -494,6 +494,12 @@ def _collect_low_confidence(results):
         if r.get("failed") or not r.get("data"):
             continue
         for lc in r["data"].get("low_confidence", []):
+            # Looser models sometimes emit bare strings instead of the
+            # {passage, observation} schema — coerce so consolidation doesn't crash.
+            if isinstance(lc, str):
+                lc = {"passage": lc}
+            elif not isinstance(lc, dict):
+                continue
             out.append({**lc, "source_model": model_name, "domain": domain})
     return out
 
@@ -517,6 +523,11 @@ def _collect_additional_observations(results):
             continue
         primary_category = _domain_label.get(domain, domain)
         for obs in r["data"].get("additional_observations", []):
+            # Tolerate bare strings / non-dict entries from looser models.
+            if isinstance(obs, str):
+                obs = {"observation": obs}
+            elif not isinstance(obs, dict):
+                continue
             obs_category = obs.get("category", "")
             out.append(
                 {
