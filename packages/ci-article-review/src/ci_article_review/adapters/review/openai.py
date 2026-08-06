@@ -529,7 +529,10 @@ def _execute_openai_responses(
     elapsed = round(time.monotonic() - t0, 2)
     content = assembled["content"]
     usage = assembled["usage"]
-    tokens = {"prompt": usage.get("input_tokens"), "completion": usage.get("output_tokens")}
+    tokens = {
+        "prompt": usage.get("input_tokens"),
+        "completion": usage.get("output_tokens"),
+    }
 
     parsed, raw_on_fail = _parse_json_maybe_fenced(content)
     if parsed is None:
