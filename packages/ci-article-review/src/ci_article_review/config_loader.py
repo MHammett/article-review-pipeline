@@ -210,7 +210,7 @@ _COST_PRESETS = {
             "openai": {
                 "model": "gpt-5.4",
                 "reasoning_effort": "high",
-                "stream_read_timeout": 200,
+                # No stream_read_timeout override — see configs/presets.yaml.
             },
             "gemini": {"model": "gemini-2.5-pro"},
             "mistral": {
@@ -233,7 +233,7 @@ _COST_PRESETS = {
             "openai": {
                 "model": "gpt-5.5",
                 "reasoning_effort": "xhigh",
-                "stream_read_timeout": 300,
+                # No stream_read_timeout override — see configs/presets.yaml.
             },
             "gemini": {"model": "gemini-2.5-pro", "thinking_budget": 16000},
             "mistral": {

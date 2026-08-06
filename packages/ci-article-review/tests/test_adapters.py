@@ -56,6 +56,46 @@ def _sse_chat_lines(content, usage=None, finish_reason="stop", extras=None, n=3)
     return lines
 
 
+def _sse_responses_lines(content, usage=None, reasoning_deltas=None, n=3):
+    """OpenAI Responses API stream (openai.com default + web_search paths).
+
+    ``reasoning_deltas``, if given, emits ``response.reasoning_summary_text.delta``
+    events before the answer deltas — reasoning models stream these during the
+    silent "thinking" phase, ahead of any output text.
+    """
+    text = content if isinstance(content, str) else json.dumps(content)
+    lines = []
+    for piece in reasoning_deltas or []:
+        lines.append(
+            "data: "
+            + json.dumps(
+                {"type": "response.reasoning_summary_text.delta", "delta": piece}
+            )
+        )
+        lines.append("")
+    for piece in _split(text, n):
+        lines.append(
+            "data: "
+            + json.dumps({"type": "response.output_text.delta", "delta": piece})
+        )
+        lines.append("")
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "usage": usage
+                    if usage is not None
+                    else {"input_tokens": 100, "output_tokens": 50}
+                },
+            }
+        )
+    )
+    lines.append("data: [DONE]")
+    return lines
+
+
 def _sse_anthropic_lines(content, input_tokens=100, output_tokens=50, n=3):
     """Anthropic /v1/messages stream."""
     text = content if isinstance(content, str) else json.dumps(content)
@@ -242,7 +282,7 @@ class TestLanguageTool:
 
 class TestOpenAI:
     def _mock_response(self, content_dict, status=200, usage=None):
-        return _sse_mock(_sse_chat_lines(content_dict, usage=usage), status=status)
+        return _sse_mock(_sse_responses_lines(content_dict, usage=usage), status=status)
 
     def test_successful_call(self):
         from ci_article_review.adapters.review import openai as oai
@@ -264,6 +304,13 @@ class TestOpenAI:
         assert result["data"]["flags"][0]["passage"] == "test"
         assert result["tokens"]["prompt"] == 100
         assert "elapsed_seconds" in result
+        # Primary path is the Responses API — not Chat Completions.
+        assert "responses" in mock_session.post.call_args.args[
+            0
+        ] or "responses" in mock_session.post.call_args.kwargs.get("url", "")
+        body = mock_session.post.call_args.kwargs["json"]
+        assert "instructions" in body and "input" in body
+        assert "messages" not in body
 
     def test_streamed_response_accumulated_and_parsed(self):
         # The JSON arrives split across many small deltas; the accumulator must
@@ -274,7 +321,7 @@ class TestOpenAI:
             "flags": [{"passage": "p", "problem": "x", "suggested_rewrite": "y"}],
             "low_confidence": ["a", "b"],
         }
-        lines = _sse_chat_lines(content, n=12)  # many tiny chunks
+        lines = _sse_responses_lines(content, n=12)  # many tiny chunks
         with patch(
             "ci_article_review.adapters.review.openai.requests.Session"
         ) as mock_session_cls:
@@ -288,11 +335,36 @@ class TestOpenAI:
         assert mock_session.post.call_args.kwargs["stream"] is True
         assert mock_session.post.call_args.kwargs["json"]["stream"] is True
 
+    def test_reasoning_summary_deltas_precede_answer_without_corrupting_output(self):
+        # Reasoning-summary text deltas stream ahead of the answer deltas during
+        # the model's silent "thinking" phase; they must be consumed (so they
+        # reset the read-gap timer) without leaking into the assembled JSON.
+        from ci_article_review.adapters.review import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        lines = _sse_responses_lines(
+            content, reasoning_deltas=["Weigh", "ing the ", "claims..."]
+        )
+        with patch(
+            "ci_article_review.adapters.review.openai.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            )
+        assert result["failed"] is False
+        assert result["data"] == content
+
     def test_usage_tokens_captured_from_final_chunk(self):
         from ci_article_review.adapters.review import openai as oai
 
         content = {"flags": [], "low_confidence": []}
-        usage = {"prompt_tokens": 4321, "completion_tokens": 876, "total_tokens": 5197}
+        usage = {"input_tokens": 4321, "output_tokens": 876}
         with patch(
             "ci_article_review.adapters.review.openai.requests.Session"
         ) as mock_session_cls:
@@ -302,10 +374,6 @@ class TestOpenAI:
             result = oai.call("system", "user", "key")
         assert result["tokens"]["prompt"] == 4321
         assert result["tokens"]["completion"] == 876
-        # include_usage must be requested or the stream omits usage entirely.
-        assert mock_session.post.call_args.kwargs["json"]["stream_options"] == {
-            "include_usage": True
-        }
 
     def test_inter_token_stall_triggers_read_timeout(self):
         # A stall between tokens surfaces as a requests read timeout while iterating
@@ -313,7 +381,9 @@ class TestOpenAI:
         from ci_article_review.adapters.review import openai as oai
 
         def stalling_lines(*a, **k):
-            yield "data: " + json.dumps({"choices": [{"delta": {"content": "{"}}]})
+            yield "data: " + json.dumps(
+                {"type": "response.reasoning_summary_text.delta", "delta": "..."}
+            )
             raise requests.exceptions.ReadTimeout("Read timed out. (read timeout=120)")
 
         mock = MagicMock()
@@ -356,7 +426,7 @@ class TestOpenAI:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
             mock_session.post.return_value = _sse_mock(
-                _sse_chat_lines("not json at all")
+                _sse_responses_lines("not json at all")
             )
             result = oai.call("system", "user", "key")
         assert result["failed"] is True
@@ -374,6 +444,45 @@ class TestOpenAI:
             mock_session.post.return_value = self._mock_response(content)
             result = oai.call("system", "user", "key", model="gpt-4-turbo")
         assert result["model"] == "gpt-4-turbo"
+
+    def test_reasoning_payload_uses_reasoning_object(self):
+        # Responses API nests effort/summary under "reasoning" — must not send
+        # Chat Completions' old top-level "reasoning_effort" field, and
+        # temperature (incompatible with reasoning mode) must be omitted.
+        from ci_article_review.adapters.review import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch(
+            "ci_article_review.adapters.review.openai.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            )
+        body = mock_session.post.call_args.kwargs["json"]
+        assert body["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+        assert "reasoning_effort" not in body
+        assert "temperature" not in body
+
+    def test_no_reasoning_effort_omits_reasoning_key(self):
+        from ci_article_review.adapters.review import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch(
+            "ci_article_review.adapters.review.openai.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call("system", "user", "key", provider_config={"model": "gpt-5.4"})
+        body = mock_session.post.call_args.kwargs["json"]
+        assert "reasoning" not in body
+        assert body["temperature"] == 0.2
 
     def test_read_gap_timeout_constant_not_derived_from_timeout_seconds(self):
         # Under streaming, the socket read timeout is the inter-token gap — a small
