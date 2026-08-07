@@ -857,6 +857,50 @@ class TestGemini:
         result = _redact_key("Some generic error message", "mykey")
         assert result == "Some generic error message"
 
+    def test_timeout_error_message_is_domain_agnostic(self, caplog):
+        # gemini.call() is invoked once per (model, domain) pair but is never told
+        # which domain it's running (see pipeline.py's _run_domain — no domain arg
+        # is passed to adapter.call()). The read-gap timeout log line must not name
+        # a specific domain (e.g. "fact-check") since it would be wrong whenever
+        # Gemini runs any other domain, such as completeness.
+        from ci_article_review.adapters.review import gemini
+
+        with patch(
+            "ci_article_review.adapters.review.gemini.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = requests.exceptions.Timeout(
+                "Read timed out."
+            )
+            with caplog.at_level("ERROR"):
+                result = gemini.call("system", "user", "key")
+
+        assert result["failed"] is True
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "fact-check" not in error_text.lower(), (
+            f"log message names a specific domain the adapter doesn't know: {error_text!r}"
+        )
+        assert "stream_read_timeout" in error_text, (
+            f"log message should point at stream_read_timeout (the actual read-gap "
+            f"control), not timeout_seconds: {error_text!r}"
+        )
+
+    def test_maximum_preset_gemini_has_stream_read_timeout_override(self):
+        # The maximum preset stacks grounding (search) with thinking_budget: 16000
+        # (extended reasoning) — two independent silent-period sources. A live
+        # Vertex AI run timed out at 205.78s against the bare grounded default of
+        # 160s. Guard against that config regressing back to the bare default.
+        from ci_article_review.config_loader import _COST_PRESETS
+
+        gemini_cfg = _COST_PRESETS["maximum"]["models"]["gemini"]
+        assert gemini_cfg.get("thinking_budget") == 16000
+        assert gemini_cfg.get("stream_read_timeout", 0) > 160, (
+            "maximum preset's gemini entry combines grounding with thinking_budget "
+            "and needs a stream_read_timeout override above the bare 160s grounded "
+            "default — see the 205.78s live timeout this regresses against."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Grok adapter
