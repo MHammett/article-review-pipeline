@@ -220,7 +220,7 @@ _COST_PRESETS = {
             },
             "perplexity": {
                 "model": "sonar-reasoning-pro",
-                "stream_read_timeout": 280,
+                "stream_read_timeout": 350,
             },
             "grok": {"model": "grok-4.20-0309-reasoning"},
             "claude": {"model": "claude-opus-4-8", "effort": "high"},
@@ -250,7 +250,7 @@ _COST_PRESETS = {
             },
             "perplexity": {
                 "model": "sonar-reasoning-pro",
-                "stream_read_timeout": 280,
+                "stream_read_timeout": 350,
             },
             "grok": {"model": "grok-4.20-0309-reasoning"},
             "claude": {"model": "claude-opus-4-8", "effort": "high"},
