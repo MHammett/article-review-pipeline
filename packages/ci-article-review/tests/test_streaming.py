@@ -65,19 +65,18 @@ class TestIterSseDataUtf8Decoding:
         # stream so the E2 lands in one chunk and 80 99 land in the next --
         # exactly the failure mode observed in the captured raw_excerpt
         # ("utility\x80\x99s knowledge" instead of "utility's knowledge").
-        line = (
-            "data: "
-            + json.dumps(
-                {"choices": [{"delta": {"content": "utility’s knowledge"}}]},
-                ensure_ascii=False,
-            )
+        line = "data: " + json.dumps(
+            {"choices": [{"delta": {"content": "utility’s knowledge"}}]},
+            ensure_ascii=False,
         )
         raw = line.encode("utf-8")
         split_at = raw.index(b"\xe2\x80\x99") + 1  # split right after the E2 byte
         chunks = _split_utf8_line_across_chunks(line, split_at)
         resp = _sse_response_with_split_multibyte_char(chunks)
 
-        assert resp.encoding == "ISO-8859-1"  # confirms the bug is reproduced, not assumed
+        assert (
+            resp.encoding == "ISO-8859-1"
+        )  # confirms the bug is reproduced, not assumed
 
         events = list(streaming.iter_sse_data(resp))
 
@@ -92,7 +91,9 @@ class TestIterSseDataUtf8Decoding:
         # their own 3-byte UTF-8 sequences, to make sure the fix isn't tied to one
         # specific split point.
         text = "Uptime’s 2025 report shows the utility’s growth"
-        line = "data: " + json.dumps({"choices": [{"delta": {"content": text}}]}, ensure_ascii=False)
+        line = "data: " + json.dumps(
+            {"choices": [{"delta": {"content": text}}]}, ensure_ascii=False
+        )
         raw = line.encode("utf-8")
         first_seq = raw.index(b"\xe2\x80\x99")
         second_seq = raw.index(b"\xe2\x80\x99", first_seq + 3)
@@ -111,7 +112,9 @@ class TestIterSseDataUtf8Decoding:
     def test_intact_multibyte_char_in_a_single_chunk_still_decodes_correctly(self):
         # Sanity check: the fix must not regress the non-split case.
         text = "the utility’s knowledge base"
-        line = "data: " + json.dumps({"choices": [{"delta": {"content": text}}]}, ensure_ascii=False)
+        line = "data: " + json.dumps(
+            {"choices": [{"delta": {"content": text}}]}, ensure_ascii=False
+        )
         resp = _sse_response_with_split_multibyte_char([line.encode("utf-8")])
 
         events = list(streaming.iter_sse_data(resp))
@@ -123,7 +126,9 @@ class TestIterSseDataUtf8Decoding:
         # decoded as UTF-8 -- SSE is UTF-8 by spec regardless of what a
         # misconfigured Content-Type claims.
         text = "the utility’s knowledge base"
-        line = "data: " + json.dumps({"choices": [{"delta": {"content": text}}]}, ensure_ascii=False)
+        line = "data: " + json.dumps(
+            {"choices": [{"delta": {"content": text}}]}, ensure_ascii=False
+        )
         resp = _sse_response_with_split_multibyte_char(
             [line.encode("utf-8")], content_type="text/event-stream; charset=iso-8859-1"
         )
@@ -162,7 +167,11 @@ class TestPerplexityAdapterEndToEndDecoding:
 
         chunks = [
             raw[:split_at],
-            raw[split_at:] + b"\n" + final_line.encode("utf-8") + b"\n" + done_line.encode("utf-8"),
+            raw[split_at:]
+            + b"\n"
+            + final_line.encode("utf-8")
+            + b"\n"
+            + done_line.encode("utf-8"),
         ]
         resp = _sse_response_with_split_multibyte_char(chunks)
         resp.raise_for_status = MagicMock()
