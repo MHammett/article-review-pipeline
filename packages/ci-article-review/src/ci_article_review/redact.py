@@ -32,3 +32,17 @@ def redact_value(text, secret):
     if secret and secret in str(text):
         return str(text).replace(secret, "[REDACTED]")
     return str(text)
+
+
+def truncate_excerpt(text, head=2000, tail=500):
+    """Truncate long text to a head/tail excerpt with an omitted-chars marker.
+
+    Used to persist a diagnosable slice of a raw provider response (e.g. a
+    malformed-JSON failure) without bloating the report with the full payload.
+    Text at or under ``head + tail`` chars is returned unchanged.
+    """
+    text = str(text)
+    if len(text) <= head + tail:
+        return text
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n...[{omitted} chars omitted]...\n{text[-tail:]}"

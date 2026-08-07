@@ -202,6 +202,44 @@ def _call_perplexity(
     # Both arrive on the final SSE chunk (alongside usage) for sonar streams.
     citations = assembled["citations"]
     search_results = assembled["search_results"]
+    stream_error = assembled.get("stream_error")
+
+    # An in-band {"error": {...}} SSE event (rate limit, content rejection, etc.)
+    # means no usable content was ever produced — surface that distinctly instead
+    # of treating an empty/near-empty body as a JSON parse failure.
+    if stream_error:
+        log.warning(
+            f"Perplexity {model} stream returned an error event: {stream_error}"
+        )
+        return {
+            "failed": True,
+            "error": f"Perplexity stream error: {stream_error}",
+            "raw": content or None,
+            "model": model,
+            "tokens": usage,
+            "elapsed_seconds": elapsed,
+            "grounding_available": False,
+        }
+
+    if not content:
+        # No usage captured either (this is the "malformed JSON with zero tokens"
+        # shape) means nothing usable ever reached the accumulator — a dropped
+        # or empty stream, not a parseable-but-invalid response. Distinguishing
+        # this from a genuine parse failure is the whole diagnostic point: it
+        # tells you to look at the connection/stream layer, not the JSON.
+        log.warning(
+            f"Perplexity {model} produced no content after {elapsed}s "
+            f"(usage_captured={bool(usage)})"
+        )
+        return {
+            "failed": True,
+            "error": "Empty response (no content received from Perplexity stream)",
+            "raw": None,
+            "model": model,
+            "tokens": usage,
+            "elapsed_seconds": elapsed,
+            "grounding_available": False,
+        }
 
     # Parse JSON — sonar models may prepend a <think> reasoning block or wrap
     # output in markdown code fences. _extract_json handles both plus a raw {...} span.

@@ -100,12 +100,21 @@ def accumulate_chat_completions(resp):
     Mistral reasoning models stream ``delta.content`` as a list of typed chunks
     (``{"type": "thinking"...}``/``{"type": "text"...}``); text chunks only are
     kept, matching the buffered-path behavior.
+
+    Some providers emit an in-band ``{"error": {...}}`` SSE event instead of
+    (or in addition to) ``choices`` — e.g. a rate limit or content-policy
+    rejection surfaced mid-stream rather than as an HTTP error status. That
+    event carries no ``choices``, so it would otherwise silently produce an
+    empty ``content`` with no usage, indistinguishable from a plain dropped
+    connection. It's captured here as ``stream_error`` so callers can report
+    the real cause instead of a generic "malformed JSON" message.
     """
     parts = []
     usage = {}
     finish_reason = None
     citations = []
     search_results = []
+    stream_error = None
 
     for obj in iter_sse_data(resp):
         if obj.get("usage"):
@@ -114,6 +123,8 @@ def accumulate_chat_completions(resp):
             citations = obj["citations"]
         if obj.get("search_results"):
             search_results = obj["search_results"]
+        if obj.get("error"):
+            stream_error = obj["error"]
         for choice in obj.get("choices") or []:
             delta = choice.get("delta") or {}
             piece = delta.get("content")
@@ -132,6 +143,7 @@ def accumulate_chat_completions(resp):
         "finish_reason": finish_reason,
         "citations": citations,
         "search_results": search_results,
+        "stream_error": stream_error,
     }
 
 
@@ -180,21 +192,28 @@ def accumulate_gemini(resp):
     Each ``data:`` chunk is a partial ``GenerateContentResponse``. Text parts are
     concatenated in order; parts flagged ``thought: true`` (internal reasoning) are
     skipped, matching the buffered path. ``usageMetadata`` is cumulative across
-    chunks, so the last one seen wins. Returns the assembled text and the final
-    ``usageMetadata`` dict.
+    chunks, so the last one seen wins. Also tracks the last non-empty
+    ``finishReason`` seen across candidates — a ``MAX_TOKENS`` finish reason means
+    generation was cut off before a complete JSON payload could be emitted, which
+    is a distinct (and diagnosable) failure mode from the model genuinely
+    returning malformed content. Returns the assembled text, the final
+    ``usageMetadata`` dict, and ``finish_reason``.
     """
     parts = []
     usage = {}
+    finish_reason = None
 
     for obj in iter_sse_data(resp):
         if obj.get("usageMetadata"):
             usage = obj["usageMetadata"]
         for cand in obj.get("candidates") or []:
+            if cand.get("finishReason"):
+                finish_reason = cand["finishReason"]
             for part in cand.get("content", {}).get("parts", []):
                 if not part.get("thought") and "text" in part:
                     parts.append(part["text"])
 
-    return {"content": "".join(parts), "usage": usage}
+    return {"content": "".join(parts), "usage": usage, "finish_reason": finish_reason}
 
 
 def accumulate_openai_responses(resp):
