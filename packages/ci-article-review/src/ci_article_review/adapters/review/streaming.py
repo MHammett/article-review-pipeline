@@ -28,7 +28,8 @@ per-provider accumulators sit on top of it:
     (OpenAI-compatible ``choices[].delta`` deltas).
   * :func:`accumulate_anthropic`        — Anthropic ``content_block_delta`` events.
   * :func:`accumulate_gemini`           — Gemini ``streamGenerateContent?alt=sse``.
-  * :func:`accumulate_openai_responses` — OpenAI Responses API typed events.
+  * :func:`accumulate_openai_responses` — OpenAI Responses API typed events,
+    including reasoning-summary deltas.
 
 Each returns the fully assembled text plus the usage/grounding metadata the
 adapters need, so the existing JSON parsing/validation runs unchanged on the
@@ -203,15 +204,33 @@ def accumulate_openai_responses(resp):
     answer text in ``delta``; ``response.completed`` carries the final ``response``
     object including ``usage``. Returns the assembled text and the usage dict
     (``input_tokens`` / ``output_tokens`` shape).
+
+    Reasoning models (``reasoning.summary`` requested in the payload) also emit
+    ``response.reasoning_summary_text.added`` / ``.delta`` / ``.done`` while the
+    model is still "thinking" — before this, reasoning models sent zero bytes
+    during that phase, which is what forced the inter-token read-gap timeout up
+    to 200-300s for high/xhigh effort (see adapters/review/openai.py). These
+    events carry no answer content, but reading them off the socket is what
+    resets the read-gap timer, so the summary text is captured (for
+    debug/logging) rather than discarded outright. Any other typed event
+    (``response.created``, ``response.in_progress``, ...) is ignored — not
+    crashing on it is enough for it to reset the timer.
     """
     parts = []
+    reasoning_parts = []
     usage = {}
 
     for obj in iter_sse_data(resp):
         etype = obj.get("type")
         if etype == "response.output_text.delta":
             parts.append(obj.get("delta", "") or "")
+        elif etype == "response.reasoning_summary_text.delta":
+            reasoning_parts.append(obj.get("delta", "") or "")
         elif etype in ("response.completed", "response.incomplete"):
             usage = obj.get("response", {}).get("usage", {}) or usage
 
-    return {"content": "".join(parts), "usage": usage}
+    return {
+        "content": "".join(parts),
+        "usage": usage,
+        "reasoning_summary": "".join(reasoning_parts),
+    }

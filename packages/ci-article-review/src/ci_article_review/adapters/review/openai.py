@@ -1,15 +1,24 @@
 """OpenAI voice/completeness adapter.
 
 Supports three providers:
-  - openai       (default) — api.openai.com, Bearer-token auth.
+  - openai       (default) — api.openai.com Responses API, Bearer-token auth.
   - openai_search          — api.openai.com Responses API with web_search_preview tool.
                              Set ``web_search: true`` in the model config to enable.
-                             Falls back to standard chat completions on error.
-  - azure                  — Azure OpenAI Service, api-key header auth.
+                             Falls back to the standard (non-search) path on error.
+  - azure                  — Azure OpenAI Service, api-key header auth, Chat Completions.
 
 Provider is selected via the ``provider_config`` dict passed by the pipeline.
 Existing user.yaml files that specify a plain model string continue to work
 unchanged.
+
+The openai.com path (default and web_search) both use the Responses API
+(``/v1/responses``), not Chat Completions. Reasoning models (reasoning_effort
+set) request ``reasoning.summary`` so the stream carries
+``response.reasoning_summary_text.*`` events during the silent "thinking"
+phase — see streaming.py and the read-gap timeout discussion in
+adapters/review/streaming.py and configs/presets.yaml. Azure still uses Chat
+Completions (``_execute_request`` / ``OPENAI_API_URL``) since only the
+openai.com path was migrated.
 
 Web search config example (configs/user.yaml)::
 
@@ -66,6 +75,27 @@ def _is_capacity_error(exc):
 
 def _resolve_model(model_arg, cfg):
     return model_arg or cfg.get("model") or DEFAULT_MODEL
+
+
+def _parse_json_maybe_fenced(content):
+    """Parse ``content`` as JSON, stripping a leading/trailing code fence if present.
+
+    The Responses API has no ``response_format: json_object``, so JSON is
+    requested via the system prompt / instructions and occasionally comes back
+    wrapped in a ```` ```json ... ``` ```` fence. Returns ``(parsed, None)`` on
+    success or ``(None, content)`` on failure (the original text, for the
+    caller's ``raw`` field).
+    """
+    try:
+        return json.loads(content), None
+    except json.JSONDecodeError:
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            return json.loads(cleaned), None
+        except json.JSONDecodeError:
+            return None, content
 
 
 # ---------------------------------------------------------------------------
@@ -247,27 +277,20 @@ def _call_with_web_search(
     content = assembled["content"]
 
     # Parse JSON — Responses API output may be wrapped in code fences
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError:
-            log.warning(
-                f"OpenAI (web search) {model} returned non-JSON content after {elapsed}s"
-            )
-            return {
-                "failed": True,
-                "error": "Malformed JSON response",
-                "raw": content,
-                "model": model,
-                "tokens": usage,
-                "elapsed_seconds": elapsed,
-                "grounding_available": True,
-            }
+    parsed, raw_on_fail = _parse_json_maybe_fenced(content)
+    if parsed is None:
+        log.warning(
+            f"OpenAI (web search) {model} returned non-JSON content after {elapsed}s"
+        )
+        return {
+            "failed": True,
+            "error": "Malformed JSON response",
+            "raw": raw_on_fail,
+            "model": model,
+            "tokens": usage,
+            "elapsed_seconds": elapsed,
+            "grounding_available": True,
+        }
 
     log.debug(f"OpenAI (web search) {model} call succeeded in {elapsed}s")
     return {
@@ -284,7 +307,7 @@ def _call_with_web_search(
 
 
 # ---------------------------------------------------------------------------
-# openai.com backend
+# openai.com backend (Responses API)
 # ---------------------------------------------------------------------------
 
 
@@ -298,6 +321,15 @@ def _call_openai(
     reasoning_effort=None,
     timeout=None,
 ):
+    """Call the openai.com Responses API — the primary (non-search) path.
+
+    Migrated from Chat Completions: reasoning models sent zero bytes over the
+    wire during their "thinking" phase there, forcing the read-gap timeout up
+    to 200-300s for high/xhigh effort (see configs/presets.yaml). Requesting
+    ``reasoning.summary`` on the Responses API streams
+    ``response.reasoning_summary_text.*`` events during that same phase,
+    keeping the socket active.
+    """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -306,38 +338,34 @@ def _call_openai(
     def _build_payload(with_reasoning):
         p = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            # Stream tokens incrementally; ask for usage in the final chunk so cost
-            # estimation still works (usage is omitted from streamed responses
-            # unless include_usage is requested).
+            "instructions": system_prompt,
+            "input": user_prompt,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
         if with_reasoning and reasoning_effort:
-            # reasoning_effort: "none" | "low" | "medium" | "high" | "max"
-            # Supported on o-series and reasoning-capable models.
-            # response_format and temperature are incompatible with reasoning mode.
-            p["reasoning_effort"] = reasoning_effort
+            # effort: "none" | "low" | "medium" | "high" | "max"; supported on
+            # o-series and reasoning-capable models. summary: "auto" streams
+            # reasoning_summary_text events. temperature is incompatible with
+            # reasoning mode, same as it was under Chat Completions.
+            p["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
         else:
-            p["response_format"] = {"type": "json_object"}
+            # No response_format: json_object on the Responses API — JSON is
+            # requested via the system prompt / instructions instead (same
+            # constraint _call_with_web_search already handles).
             p["temperature"] = 0.2
         return p
 
-    result = _execute_request(
+    result = _execute_openai_responses(
         headers,
         _build_payload(True),
         model,
-        api_key=api_key,
-        url=OPENAI_API_URL,
+        url=OPENAI_RESPONSES_URL,
         retry=retry,
         retry_delay=retry_delay,
         timeout=timeout,
     )
 
-    # If the model rejected reasoning_effort, retry without it so the pass still runs.
+    # If the model rejected reasoning, retry without it so the pass still runs.
     # This is a MISCONFIGURATION: the preset specifies a reasoning model (o4-mini, o3)
     # but user.yaml overrides it with a non-reasoning model. Fix by not overriding the
     # model in user.yaml for balanced+ presets, or switching to a standard/economy preset.
@@ -353,12 +381,11 @@ def _call_openai(
             f"with a non-reasoning variant. Retrying without reasoning — output may be degraded."
         )
         log.error(msg)
-        retry_result = _execute_request(
+        retry_result = _execute_openai_responses(
             headers,
             _build_payload(False),
             model,
-            api_key=api_key,
-            url=OPENAI_API_URL,
+            url=OPENAI_RESPONSES_URL,
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
@@ -435,7 +462,102 @@ def _call_azure(
 
 
 # ---------------------------------------------------------------------------
-# Shared HTTP execution
+# openai.com Responses API execution (primary + fallback-without-reasoning)
+# ---------------------------------------------------------------------------
+
+
+def _execute_openai_responses(
+    headers, payload, model, url, retry, retry_delay, timeout=None
+):
+    """POST to the Responses API, stream via ``accumulate_openai_responses``,
+    and parse the assembled text as JSON. Mirrors ``_execute_request``'s
+    retry/error shape so ``_call_openai``'s misconfiguration-retry logic
+    (``error_body`` + ``_is_reasoning_param_error``) works unchanged.
+    """
+    if timeout is None:
+        timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    session = requests.Session()
+    t0 = time.monotonic()
+
+    def _post():
+        resp = session.post(
+            url, headers=headers, json=payload, stream=True, timeout=timeout
+        )
+        if resp.status_code in (429, 500, 502, 503, 504) and retry:
+            log.warning(
+                f"OpenAI {model} HTTP {resp.status_code}. Waiting {retry_delay}s before retry."
+            )
+            resp.close()
+            time.sleep(retry_delay)
+            resp = session.post(
+                url, headers=headers, json=payload, stream=True, timeout=timeout
+            )
+        resp.raise_for_status()
+        return resp
+
+    try:
+        resp = _post()
+        assembled = streaming.accumulate_openai_responses(resp)
+    except requests.HTTPError as e:
+        elapsed = round(time.monotonic() - t0, 2)
+        body = e.response.text[:400] if e.response is not None else ""
+        log.error(f"OpenAI {model} call failed after {elapsed}s: {e} | {body}")
+        return {
+            "failed": True,
+            "error": str(e),
+            "error_body": body,
+            "raw": None,
+            "model": model,
+            "tokens": {},
+            "elapsed_seconds": elapsed,
+        }
+    except Exception as e:
+        elapsed = round(time.monotonic() - t0, 2)
+        log.error(f"OpenAI {model} call failed after {elapsed}s: {e}")
+        return {
+            "failed": True,
+            "error": str(e),
+            "error_body": "",
+            "raw": None,
+            "model": model,
+            "tokens": {},
+            "elapsed_seconds": elapsed,
+        }
+    finally:
+        session.close()
+
+    elapsed = round(time.monotonic() - t0, 2)
+    content = assembled["content"]
+    usage = assembled["usage"]
+    tokens = {
+        "prompt": usage.get("input_tokens"),
+        "completion": usage.get("output_tokens"),
+    }
+
+    parsed, raw_on_fail = _parse_json_maybe_fenced(content)
+    if parsed is None:
+        log.warning(f"OpenAI {model} returned non-JSON content after {elapsed}s")
+        return {
+            "failed": True,
+            "error": "Malformed JSON response",
+            "raw": raw_on_fail,
+            "model": model,
+            "tokens": tokens,
+            "elapsed_seconds": elapsed,
+        }
+
+    log.debug(f"OpenAI {model} call succeeded in {elapsed}s")
+    return {
+        "failed": False,
+        "data": parsed,
+        "model": model,
+        "tokens": tokens,
+        "elapsed_seconds": elapsed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shared HTTP execution (Azure — Chat Completions)
 # ---------------------------------------------------------------------------
 
 

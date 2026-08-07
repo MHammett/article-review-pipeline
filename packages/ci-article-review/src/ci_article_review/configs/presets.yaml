@@ -26,21 +26,25 @@
 #
 # stream_read_timeout note: the review adapters stream (SSE); the socket read
 # timeout is normally a small constant "max gap between chunks" (see
-# adapters/review/streaming.py), NOT the total generation budget. But high/xhigh
+# adapters/review/streaming.py), NOT the total generation budget. High/xhigh
 # reasoning effort can produce a long SILENT period — zero bytes on the wire,
 # not even a keep-alive — while the model reasons before it starts emitting
-# visible output. Observed directly: gpt-5.5 at xhigh failed 5/5 calls at ~121s
-# with 0 output tokens against the default 120s read-gap. Community reports for
-# OpenAI reasoning models corroborate 120s being too tight and recommend 300s+
-# (some report the SDK's 900s default is still marginal for xhigh). `high`-effort
-# configs (gpt-5.4, mistral-medium-3-5) run closer to the 120s default but still
-# saw a marginal timeout in the wild (mistral high at 124s), so they get a smaller
-# bump. This is a stopgap: the real fix is switching the OpenAI adapter's primary
-# path to the Responses API with reasoning-summary streaming enabled
-# (response.reasoning_summary_text.delta events), which puts real bytes on the
-# wire during the "silent" reasoning phase and would let the read-gap timeout
-# shrink back down instead of just being raised further. Not done here — bigger
-# change, tracked separately.
+# visible output.
+#
+# OpenAI: originally hit this hard — gpt-5.5 at xhigh failed 5/5 calls at ~121s
+# with 0 output tokens against the default 120s read-gap under Chat Completions,
+# which carries no signal at all during the reasoning phase. Fixed by migrating
+# the adapter's primary path to the Responses API with reasoning.summary
+# enabled (adapters/review/openai.py): response.reasoning_summary_text.delta
+# events stream real bytes DURING the silent phase. Live-verified (2 xhigh
+# calls, no override, default 120s read-gap): reasoning-summary deltas start
+# ~2-6s in and recur throughout, with a worst observed gap of ~8s — no longer
+# anywhere near the 120s default, so no per-model override is needed for
+# openai here anymore.
+#
+# Mistral was NOT migrated (still Chat Completions, no reasoning-summary
+# equivalent available) and keeps its stopgap bump: mistral-medium-3-5 high
+# effort saw a marginal timeout in the wild (124s vs the 120s default).
 
 economy:
   thoroughness: standard
@@ -99,13 +103,14 @@ thorough:
     openai:
       model: gpt-5.4
       reasoning_effort: high
-      stream_read_timeout: 200   # high effort observed at 107-120s; default 120 is too tight
+      # No stream_read_timeout override — Responses API + reasoning.summary
+      # keeps the default 120s read-gap safe (see the note above).
     gemini:
       model: gemini-2.5-pro
     mistral:
       model: mistral-medium-3-5
       reasoning_effort: high
-      stream_read_timeout: 200   # same effort tier as openai high, same risk
+      stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
     grok:
@@ -120,8 +125,9 @@ maximum:
     openai:
       model: gpt-5.5
       reasoning_effort: xhigh
-      stream_read_timeout: 300   # xhigh's silent reasoning phase exceeds the 120s default
-                                  # (observed 5/5 failures at ~121s, 0 output tokens)
+      # No stream_read_timeout override — live-verified against xhigh (see the
+      # note above); Responses API reasoning.summary deltas keep the socket
+      # active well inside the 120s default.
     gemini:
       model: gemini-2.5-pro
       thinking_budget: 16000
@@ -129,7 +135,7 @@ maximum:
     mistral:
       model: mistral-medium-3-5
       reasoning_effort: high
-      stream_read_timeout: 200   # same effort tier as thorough's mistral entry
+      stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
     grok:
