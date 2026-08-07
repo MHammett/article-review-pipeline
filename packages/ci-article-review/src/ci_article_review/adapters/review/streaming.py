@@ -71,7 +71,23 @@ def iter_sse_data(resp):
     ``id:``, comments, blank keep-alives) and unparseable payloads are skipped.
     A read-gap timeout while iterating propagates out of ``iter_lines`` as a
     ``requests`` exception, which the calling adapter treats as a failed call.
+
+    ``resp.encoding`` is forced to UTF-8 before any iteration starts. SSE
+    (``text/event-stream``) is UTF-8 by spec, but none of the six providers'
+    streaming responses send an explicit ``charset`` in their Content-Type
+    header, so ``requests`` (``get_encoding_from_headers``) falls back to
+    ISO-8859-1 for any ``text/*`` content type. ``iter_lines(decode_unicode=True)``
+    then decodes every chunk through that wrong 1-byte-per-character encoding via
+    ``stream_decode_response_unicode``, silently mangling every non-ASCII
+    multi-byte character (e.g. a curly apostrophe, U+2019 / ``E2 80 99``) instead
+    of raising — the classic mojibake failure mode. Setting the encoding here,
+    before ``iter_lines`` touches the body, makes ``stream_decode_response_unicode``
+    use a proper incremental UTF-8 decoder (``codecs.getincrementaldecoder``) that
+    already buffers partial multi-byte sequences across chunk boundaries, so this
+    one-line fix covers arbitrary chunk splits for all providers that route
+    through this function.
     """
+    resp.encoding = "utf-8"
     for raw_line in resp.iter_lines(decode_unicode=True):
         if not raw_line:
             continue
