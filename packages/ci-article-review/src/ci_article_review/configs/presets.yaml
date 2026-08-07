@@ -113,6 +113,10 @@ thorough:
       stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
+      stream_read_timeout: 280   # search+CoT combo hit the 160s default outright
+                                  # (2 calls failed at ~162s in the wild); see the
+                                  # grounded-model note above (same class as gemini,
+                                  # but gemini's 160s default has held so far).
     grok:
       model: grok-4.20-0309-reasoning
     claude:
@@ -138,6 +142,7 @@ maximum:
       stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
+      stream_read_timeout: 280   # see the thorough tier's identical note above
     grok:
       model: grok-4.20-0309-reasoning
     claude:
