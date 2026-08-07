@@ -45,7 +45,7 @@ _FALLBACK = {
         "mistral-large": 1.0,
         "mistral-medium-3-5": 1.7,
         "gemini": 4.0,
-        "sonar": 5.0,
+        "sonar": 7.0,
         "default": 1.0,
     },
     "effort_multipliers": {

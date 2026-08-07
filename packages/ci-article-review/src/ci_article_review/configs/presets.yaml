@@ -113,10 +113,18 @@ thorough:
       stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
-      stream_read_timeout: 350   # 280 was still marginal — a later run hit 282.01s
-                                  # outright (originally bumped from the 160s default
-                                  # after 2 calls failed at ~162s). Raised again for
-                                  # real headroom instead of chasing the edge.
+      stream_read_timeout: 500   # Third incremental bump in a row was still marginal:
+                                  # 160→280→350, each exceeded within days (350 was hit
+                                  # at 352.29s and 354.18s on two domains in the same
+                                  # run, plus the wall-clock budget got hit directly on
+                                  # a third — see timeouts.yaml's sonar model_multiplier).
+                                  # sonar's near-exact matches to whatever the read-gap
+                                  # value is suggest one long silent stretch dominates
+                                  # the call, not a genuine inter-chunk stall — i.e. this
+                                  # is closer to a total-time bound than a real read-gap
+                                  # for this provider. Jumped decisively (350->500) rather
+                                  # than nudging again; root cause (why sonar got this
+                                  # much slower) is being investigated separately.
     grok:
       model: grok-4.20-0309-reasoning
     claude:
@@ -149,7 +157,7 @@ maximum:
       stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
-      stream_read_timeout: 350   # see the thorough tier's note above
+      stream_read_timeout: 500   # see the thorough tier's note above
     grok:
       model: grok-4.20-0309-reasoning
     claude:
