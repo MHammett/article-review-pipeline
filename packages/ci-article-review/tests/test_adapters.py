@@ -1236,6 +1236,99 @@ class TestPerplexityStreamFailures:
         assert "rate limit exceeded" in result["error"]
         assert result["error"] != "Malformed JSON response"
 
+    def test_inband_400_invalid_request_logs_payload_diagnostics(self, caplog):
+        # Live occurrence (2026-08-06): perplexity:voice_style at the maximum
+        # preset got a 400 invalid_request in-band SSE error with no field-level
+        # detail. On that shape specifically, the adapter should log a redacted
+        # excerpt of the outgoing payload so a recurrence is diagnosable without
+        # another investigation.
+        from ci_article_review.adapters.review import perplexity
+
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "error": {
+                        "message": "invalid request",
+                        "type": "invalid_request",
+                        "code": 400,
+                    }
+                }
+            ),
+            "data: [DONE]",
+        ]
+        with patch(
+            "ci_article_review.adapters.review.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            with caplog.at_level("ERROR"):
+                result = perplexity.call(
+                    "voice/style system prompt",
+                    "user draft content",
+                    "sk-secret-key",
+                    retry=False,
+                )
+        assert result["failed"] is True
+        assert "invalid request" in result["error"]
+        diagnostic_logs = "\n".join(
+            r.message for r in caplog.records if "invalid_request payload" in r.message
+        )
+        assert "voice/style system prompt" in diagnostic_logs
+        assert "user draft content" in diagnostic_logs
+        assert "sk-secret-key" not in diagnostic_logs
+
+    def test_payload_has_no_extraneous_keys_for_voice_style_config(self):
+        # Guards against pipeline-internal config keys (timeout_seconds, prompts,
+        # enabled, etc.) leaking into the actual request body — the request must
+        # only ever carry parameters Perplexity's API accepts.
+        from ci_article_review.adapters.review import perplexity
+
+        captured = {}
+
+        def _capture_post(url, headers, json, stream, timeout):
+            captured["payload"] = json
+            lines = _sse_chat_lines('{"flags": []}')
+            return _sse_mock(lines)
+
+        with patch(
+            "ci_article_review.adapters.review.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = _capture_post
+            perplexity.call(
+                "system prompt for voice_style" * 50,
+                "user draft" * 500,
+                "key",
+                retry=False,
+                provider_config={
+                    "model": "sonar-reasoning-pro",
+                    "prompts": ["voice_style"],
+                    "timeout_seconds": 375,
+                    "enabled": True,
+                    "reasoning_effort": "medium",
+                },
+            )
+
+        payload = captured["payload"]
+        assert set(payload.keys()) <= {
+            "model",
+            "messages",
+            "temperature",
+            "stream",
+            "stream_options",
+            "reasoning_effort",
+        }
+        assert payload["model"] == "sonar-reasoning-pro"
+        assert payload["reasoning_effort"] == "medium"
+        assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+        assert payload["messages"][0]["content"].startswith(
+            "system prompt for voice_style"
+        )
+        assert "response_format" not in payload
+
     def test_genuine_malformed_json_still_reported_as_such(self):
         # Content was received (and usage captured) but doesn't parse as JSON
         # even after the extraction fallbacks -- this remains "Malformed JSON

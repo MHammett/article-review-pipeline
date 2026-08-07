@@ -23,6 +23,7 @@ import logging
 import requests
 
 from . import streaming
+from ... import redact
 from .json_utils import extract_json as _extract_json
 
 DEFAULT_MODEL = "sonar-reasoning-pro"
@@ -100,6 +101,29 @@ def call(
 # ---------------------------------------------------------------------------
 # HTTP execution
 # ---------------------------------------------------------------------------
+
+
+def _log_payload_diagnostics(model, payload):
+    """Log a redacted, truncated excerpt of the outgoing payload.
+
+    Perplexity's 400 "invalid_request" errors don't say which field is
+    invalid, which made a live occurrence on the voice_style domain
+    (2026-08-06) unnecessarily hard to diagnose after the fact. Called only
+    on a 400/invalid_request rejection — not on every call — so this stays
+    silent in the common case.
+    """
+    other_params = {k: v for k, v in payload.items() if k not in ("model", "messages")}
+    for msg in payload.get("messages", []):
+        excerpt = redact.truncate_excerpt(
+            redact.redact_url_keys(msg.get("content", ""))
+        )
+        log.error(
+            f"Perplexity {model} invalid_request payload — role={msg.get('role')} "
+            f"chars={len(msg.get('content', ''))}: {excerpt}"
+        )
+    log.error(
+        f"Perplexity {model} invalid_request payload — other params: {other_params}"
+    )
 
 
 def _call_perplexity(
@@ -183,6 +207,9 @@ def _call_perplexity(
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         log.error(f"Perplexity {model} call failed after {elapsed}s: {e}")
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 400:
+            _log_payload_diagnostics(model, payload)
         return {
             "failed": True,
             "error": str(e),
@@ -211,6 +238,8 @@ def _call_perplexity(
         log.warning(
             f"Perplexity {model} stream returned an error event: {stream_error}"
         )
+        if isinstance(stream_error, dict) and stream_error.get("code") == 400:
+            _log_payload_diagnostics(model, payload)
         return {
             "failed": True,
             "error": f"Perplexity stream error: {stream_error}",
