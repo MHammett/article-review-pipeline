@@ -65,8 +65,12 @@ model_multipliers:
   mistral-medium-3-5: 1.7   # high effort is heavy-tailed & provider-latency-variable:
                             # voice_style timed out >326s at the old 1.3 (budget 341). 1.7 → ~446s.
   gemini:             4.0   # grounded fact_check observed up to 220s
-  sonar:              5.0   # grounded fact_check observed 233.93s then hit the old
-                             # 240s ceiling outright; raised for real margin (-> 375s)
+  sonar:              7.0   # 5.0 (-> 375s) was hit directly by completeness in a later
+                             # run ("Timed out after 375s"), on top of the read-gap
+                             # (stream_read_timeout in presets.yaml) failing 3 bumps in
+                             # a row on the same run's other domains. Raised decisively
+                             # (5.0 -> 7.0, -> 525s) to sit above the new 500s read-gap
+                             # rather than nudge again; see presets.yaml's note.
   default:            1.0
 
 # From reasoning_effort / effort in the model config. Calibration showed effort is
