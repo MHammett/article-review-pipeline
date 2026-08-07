@@ -1,6 +1,6 @@
 """Tests for redact — secret scrubbing before error output."""
 
-from ci_article_review.redact import redact_url_keys, redact_value
+from ci_article_review.redact import redact_url_keys, redact_value, truncate_excerpt
 
 
 class TestRedactUrlKeys:
@@ -46,3 +46,20 @@ class TestRedactValue:
 
     def test_empty_secret_is_noop(self):
         assert redact_value("anything", "") == "anything"
+
+
+class TestTruncateExcerpt:
+    def test_short_text_unchanged(self):
+        assert truncate_excerpt("short raw response") == "short raw response"
+
+    def test_long_text_truncated_with_head_and_tail(self):
+        text = "A" * 3000 + "B" * 3000
+        out = truncate_excerpt(text, head=2000, tail=500)
+        assert out.startswith("A" * 2000)
+        assert out.endswith("B" * 500)
+        assert "chars omitted" in out
+        assert len(out) < len(text)
+
+    def test_exactly_at_boundary_unchanged(self):
+        text = "X" * 2500
+        assert truncate_excerpt(text, head=2000, tail=500) == text

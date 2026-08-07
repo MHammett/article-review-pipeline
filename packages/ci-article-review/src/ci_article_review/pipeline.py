@@ -58,6 +58,7 @@ from .config_loader import (
 from .handoff_parser import parse_draft_submission, parse_publication_handoff
 from . import history as hist
 from . import consolidation
+from . import redact
 from .model_registry import check_model_currency
 from . import timeout_model
 from .analysis import readability as readability_analysis
@@ -789,6 +790,14 @@ def run_draft_pipeline(
     # the timeout budget that was actually applied, and the draft size) so the
     # report is a self-contained record for retuning configs/timeouts.yaml — no
     # cross-referencing other files needed.
+    #
+    # On a failed call whose adapter captured the raw response text (e.g.
+    # "Malformed JSON response"), a redacted/truncated excerpt is kept in the
+    # report so the failure is diagnosable after the fact. The full `raw` field
+    # is never persisted — only a bounded excerpt, and only on failure.
+    def _raw_excerpt(raw):
+        return redact.truncate_excerpt(redact.redact_url_keys(raw))
+
     api_call_log = []
     for (model_name, domain), result in results.items():
         status_ok = not result.get("failed")
@@ -814,22 +823,23 @@ def run_draft_pipeline(
             if (budget is not None and elapsed is not None)
             else None
         )
-        api_call_log.append(
-            {
-                "pass": f"{model_name}:{domain}",
-                "model": f"{model_tag}{grounding}",
-                "failed": not status_ok,
-                "tokens": result.get("tokens", {}),
-                "elapsed_seconds": elapsed,
-                "error": result.get("error") if not status_ok else None,
-                # calibration fields
-                "effort": effort,
-                "timeout_budget_seconds": budget,
-                "headroom_seconds": headroom,
-                "char_count": char_count,
-                "status": status,
-            }
-        )
+        log_entry = {
+            "pass": f"{model_name}:{domain}",
+            "model": f"{model_tag}{grounding}",
+            "failed": not status_ok,
+            "tokens": result.get("tokens", {}),
+            "elapsed_seconds": elapsed,
+            "error": result.get("error") if not status_ok else None,
+            # calibration fields
+            "effort": effort,
+            "timeout_budget_seconds": budget,
+            "headroom_seconds": headroom,
+            "char_count": char_count,
+            "status": status,
+        }
+        if not status_ok and result.get("raw"):
+            log_entry["raw_excerpt"] = _raw_excerpt(result["raw"])
+        api_call_log.append(log_entry)
         # Machine-facing structured record — one grep-able line per call, persisted
         # to pipeline_history/pipeline_<date>.log for cross-run calibration analysis.
         log.info(
@@ -854,6 +864,11 @@ def run_draft_pipeline(
             log.warning(
                 f"  {model_name}:{domain}: FAILED — {result.get('error', 'unknown error')}"
             )
+            if "raw_excerpt" in log_entry:
+                log.debug(
+                    f"  {model_name}:{domain}: raw response excerpt:\n"
+                    f"{log_entry['raw_excerpt']}"
+                )
 
     all_failed = all(r.get("failed") for r in results.values())
     if all_failed and pipeline_cfg.get("abort_if_all_provider_calls_fail", False):

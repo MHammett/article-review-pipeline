@@ -766,6 +766,82 @@ class TestGemini:
             result = gemini.call("system", "user", "key")
         assert result["failed"] is True
 
+    def test_multiple_interleaved_thought_parts_excluded(self):
+        # Thought and non-thought parts can arrive interleaved across several
+        # chunks rather than as one contiguous thought block up front — the
+        # accumulator must skip every thought-flagged part regardless of order.
+        from ci_article_review.adapters.review import gemini
+
+        text = json.dumps({"confirmed": ["x"], "outdated": []})
+        half = len(text) // 2
+        lines = []
+
+        def _chunk(piece, thought=False, usage=None):
+            cand = {"content": {"parts": [{"text": piece, "thought": thought}]}}
+            if not thought:
+                cand["content"]["parts"][0].pop("thought")
+            obj = {"candidates": [cand]}
+            if usage:
+                obj["usageMetadata"] = usage
+            return "data: " + json.dumps(obj)
+
+        lines.append(_chunk("first reasoning step...", thought=True))
+        lines.append("")
+        lines.append(_chunk(text[:half]))
+        lines.append("")
+        lines.append(_chunk("second reasoning step...", thought=True))
+        lines.append("")
+        lines.append(
+            _chunk(
+                text[half:],
+                usage={"promptTokenCount": 1, "candidatesTokenCount": 1},
+            )
+        )
+        with patch(
+            "ci_article_review.adapters.review.gemini.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"] == {"confirmed": ["x"], "outdated": []}
+
+    def test_max_tokens_truncation_reported_distinctly(self):
+        # A finishReason=MAX_TOKENS on genuinely truncated (unparseable) JSON
+        # should be reported as a distinct, diagnosable failure instead of the
+        # generic "Malformed JSON response" message.
+        from ci_article_review.adapters.review import gemini
+
+        truncated = '{"confirmed": ["x", "y", "z'  # cut off mid-string, invalid JSON
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": [{"text": truncated}]},
+                            "finishReason": "MAX_TOKENS",
+                        }
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": 100,
+                        "candidatesTokenCount": 50,
+                    },
+                }
+            )
+        ]
+        with patch(
+            "ci_article_review.adapters.review.gemini.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is True
+        assert "MAX_TOKENS" in result["error"]
+        assert result["raw"] == truncated
+
     def test_api_key_redacted_in_errors(self):
         from ci_article_review.adapters.review.gemini import _redact_key
 
@@ -1025,6 +1101,120 @@ class TestPerplexityExtractJson:
 
         assert _extract_json("no json here at all") is None
         assert _extract_json("") is None
+
+    def test_multiple_think_blocks(self):
+        # sonar-reasoning-pro can emit more than one <think> block.
+        from ci_article_review.adapters.review.perplexity import _extract_json
+
+        raw = (
+            "<think>first pass</think>\n"
+            "<think>second pass, reconsidering</think>\n"
+            '{"verdict": "confirmed"}'
+        )
+        assert _extract_json(raw) == {"verdict": "confirmed"}
+
+    def test_think_block_containing_braces_does_not_corrupt_span_match(self):
+        # A reasoning block that itself mentions braces (e.g. discussing the
+        # target JSON schema) must not widen the outermost-{...} span past the
+        # real payload.
+        from ci_article_review.adapters.review.perplexity import _extract_json
+
+        raw = (
+            '<think>The schema should look like {"verdict": ...} '
+            "so I need to produce that.</think>\n"
+            '{"verdict": "confirmed"}'
+        )
+        assert _extract_json(raw) == {"verdict": "confirmed"}
+
+    def test_worst_case_think_fence_and_leading_prose(self):
+        # The documented worst case: leading prose, a <think> block, AND a
+        # markdown fence, all in the same response.
+        from ci_article_review.adapters.review.perplexity import _extract_json
+
+        raw = (
+            "Sure, here is my analysis.\n"
+            "<think>\nLet me think about the claim: {this is not json}\n</think>\n"
+            "```json\n"
+            '{"verdict": "confirmed", "citations": [1, 2]}\n'
+            "```\n"
+            "Let me know if you need anything else!"
+        )
+        assert _extract_json(raw) == {
+            "verdict": "confirmed",
+            "citations": [1, 2],
+        }
+
+
+class TestPerplexityStreamFailures:
+    """Full call() coverage for failure shapes upstream of JSON parsing.
+
+    Perplexity's observed live failure had zero captured token usage — unlike
+    Gemini's, which had full usage. That points to a failure earlier in the
+    response pipeline than "got text, couldn't parse it as JSON". These tests
+    cover the two upstream shapes: an SSE stream that produces no usable
+    content at all, and an in-band {"error": ...} event instead of choices.
+    """
+
+    def test_empty_stream_reports_distinct_error_not_malformed_json(self):
+        from ci_article_review.adapters.review import perplexity
+
+        # A stream that produces no choices/content and no usage at all —
+        # e.g. a dropped connection after headers but before any data.
+        lines = ["data: " + json.dumps({}), "data: [DONE]"]
+        with patch(
+            "ci_article_review.adapters.review.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert result["error"] != "Malformed JSON response"
+        assert "empty" in result["error"].lower()
+        assert result["tokens"] == {}
+
+    def test_inband_stream_error_event_reported_distinctly(self):
+        from ci_article_review.adapters.review import perplexity
+
+        lines = [
+            "data: "
+            + json.dumps({"error": {"message": "rate limit exceeded", "code": 429}}),
+            "data: [DONE]",
+        ]
+        with patch(
+            "ci_article_review.adapters.review.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "rate limit exceeded" in result["error"]
+        assert result["error"] != "Malformed JSON response"
+
+    def test_genuine_malformed_json_still_reported_as_such(self):
+        # Content was received (and usage captured) but doesn't parse as JSON
+        # even after the extraction fallbacks -- this remains "Malformed JSON
+        # response" and still carries the raw text for diagnostics.
+        from ci_article_review.adapters.review import perplexity
+
+        lines = _sse_chat_lines(
+            "This is prose with no JSON payload anywhere in it at all.",
+            usage={"prompt_tokens": 50, "completion_tokens": 20},
+        )
+        with patch(
+            "ci_article_review.adapters.review.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert result["error"] == "Malformed JSON response"
+        assert (
+            result["raw"] == "This is prose with no JSON payload anywhere in it at all."
+        )
+        assert result["tokens"] == {"prompt_tokens": 50, "completion_tokens": 20}
 
 
 # ---------------------------------------------------------------------------

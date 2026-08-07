@@ -487,6 +487,7 @@ def _execute_request(
     # otherwise produce malformed JSON), and kept the final cumulative usageMetadata.
     text = assembled["content"]
     usage = assembled["usage"]
+    finish_reason = assembled.get("finish_reason")
     if not text:
         return {
             "failed": True,
@@ -502,15 +503,34 @@ def _execute_request(
     # thought-part filtering above. Shared with the other review adapters.
     parsed = _extract_json(text)
     if parsed is None:
-        log.warning(f"Gemini {model} returned non-JSON content after {elapsed}s")
+        # finishReason=MAX_TOKENS means generation was cut off mid-output (often
+        # because the thinking budget consumed most of the token budget before
+        # any answer text was produced) — a genuinely truncated payload, not the
+        # model returning malformed content. Surface that distinction so it's
+        # diagnosable without needing the raw text.
+        if finish_reason == "MAX_TOKENS":
+            error_msg = (
+                "Malformed JSON response (truncated: finishReason=MAX_TOKENS — "
+                "output was cut off before valid JSON completed; raise "
+                "max_output_tokens or lower thinking_budget)"
+            )
+        elif finish_reason and finish_reason != "STOP":
+            error_msg = f"Malformed JSON response (finishReason={finish_reason})"
+        else:
+            error_msg = "Malformed JSON response"
+        log.warning(
+            f"Gemini {model} returned non-JSON content after {elapsed}s "
+            f"(finishReason={finish_reason})"
+        )
         return {
             "failed": True,
-            "error": "Malformed JSON response",
+            "error": error_msg,
             "raw": text,
             "model": model,
             "tokens": usage,
             "grounding_available": grounding_available,
             "elapsed_seconds": elapsed,
+            "finish_reason": finish_reason,
         }
 
     log.debug(
