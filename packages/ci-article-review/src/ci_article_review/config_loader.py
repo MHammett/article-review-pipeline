@@ -238,7 +238,11 @@ _COST_PRESETS = {
                 "reasoning_effort": "xhigh",
                 # No stream_read_timeout override — see configs/presets.yaml.
             },
-            "gemini": {"model": "gemini-2.5-pro", "thinking_budget": 16000},
+            "gemini": {
+                "model": "gemini-2.5-pro",
+                "thinking_budget": 16000,
+                "stream_read_timeout": 260,
+            },
             "mistral": {
                 "model": "mistral-medium-3-5",
                 "reasoning_effort": "high",

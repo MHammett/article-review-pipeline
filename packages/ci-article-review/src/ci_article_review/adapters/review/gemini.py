@@ -391,10 +391,16 @@ def _execute_request(
         # discards any result). Fail fast and cleanly instead.
         elapsed = round(time.monotonic() - t0, 2)
         safe_err = _redact_key(e, api_key)
+        # This adapter is called once per (model, domain) pair but is never told
+        # which domain it's running — it must not name one here. pipeline.py's
+        # [CALIBRATION] log line reports the real domain from its own (model,
+        # domain) bookkeeping.
         log.error(
-            f"Gemini {model} timed out after {elapsed}s on the grounded fact-check. "
-            f"Not retrying without grounding. For long articles, raise the gemini "
-            f"timeout_seconds in user.yaml (and task_timeout_seconds to match)."
+            f"Gemini {model} timed out after {elapsed}s on the grounded call. "
+            f"Not retrying without grounding. This is the inter-token read-gap "
+            f"timeout (default {_READ_TIMEOUT}s, covers time-to-first-byte while "
+            f"the model searches/thinks) — raise stream_read_timeout for gemini "
+            f"in user.yaml if this repeats, not timeout_seconds."
         )
         session.close()
         return {

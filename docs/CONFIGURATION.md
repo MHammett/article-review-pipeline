@@ -165,6 +165,8 @@ Streaming does **not** make a long generation finish faster — that gpt-5.5 xhi
 
 **Caveat found in production:** the 120s default read gap assumed only *grounded* (search) calls have a long silent period before the first token. In practice, `high`/`xhigh` reasoning effort also produces a long silent stretch — the model "thinks" with zero bytes on the wire, not even a keep-alive — before it starts streaming visible output. Observed directly: `gpt-5.5` at `xhigh` failed 5/5 calls at ~121s with 0 output tokens against the 120s default. The `thorough` and `maximum` presets now ship `stream_read_timeout` overrides for their `high`/`xhigh` entries (200s / 300s) to cover this. If you define a custom preset or override `reasoning_effort` to `high`/`xhigh` on a provider the built-in presets don't cover, set `stream_read_timeout` yourself — don't rely on the 120s default.
 
+The two silent-period causes **stack** when a model does both at once. The `maximum` preset's Gemini entry sets `thinking_budget: 16000` on top of the model's default 160s grounded read gap; a live Vertex AI run timed out at 205.78s (search + extended thinking, both silent, ahead of the 160s default). Gemini's `maximum` entry now carries its own `stream_read_timeout: 260` for this reason — grounding and reasoning-effort overrides aren't mutually exclusive, so check whether both apply when tuning a custom config.
+
 #### Wall-clock backstop is automatic (sliding scale)
 
 You normally don't set timeouts at all. After pre-analysis, the pipeline sizes each model's **wall-clock backstop** from the draft's **character count**, the **model**, and the **reasoning effort**, using the multiplier tables in [`configs/timeouts.yaml`](../configs/timeouts.yaml):
