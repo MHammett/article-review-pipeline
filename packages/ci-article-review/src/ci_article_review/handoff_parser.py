@@ -11,6 +11,14 @@ log = logging.getLogger(__name__)
 def _extract_section(text, header, next_headers=None):
     """Extract content between a header and the next known header.
 
+    `next_headers` should include every OTHER header in the document's
+    section set, not just the ones that come after `header` in canonical
+    order. The regex below is non-greedy, so it already stops at whichever
+    candidate header appears first in the actual text — passing only
+    canonically-later headers as candidates is what let an out-of-order
+    header (e.g. a chat model emitting two optional sections swapped) get
+    swallowed into the preceding section instead of bounding it.
+
     Falls back to end-of-string if none of next_headers actually appear in
     the text (e.g. a boundary-only marker header, like DRAFT in
     METADATA_HEADERS, that isn't present in a metadata-only file) — otherwise
@@ -64,6 +72,30 @@ METADATA_HEADERS = [
 ]
 
 
+_OPTIONAL_FIELD_IMPACT = {
+    "sources_cited": "fact_check and red_team",
+    "uncertain_sections": "fact_check and red_team",
+    "known_gaps": "completeness",
+    "target_audience": "voice_style and completeness",
+}
+
+
+def _note_empty_optional_fields(results):
+    """Debug-log which optional handoff fields came back empty.
+
+    These are legitimately blank often enough that a warning would be noisy,
+    but a rename or malformed header from a chat model produces the exact
+    same empty string as a deliberate omission — so at least leave a debug
+    trail of which review domains lose context as a result.
+    """
+    for field, domains in _OPTIONAL_FIELD_IMPACT.items():
+        if not results.get(field):
+            log.debug(
+                f"No '{field}' section found (or it was empty). "
+                f"{domains} review will have less context as a result."
+            )
+
+
 def build_handoff_from_raw_text(text, source_name="Untitled"):
     """Synthesize a minimal handoff dict from a plain draft with no handoff headers.
 
@@ -111,8 +143,7 @@ def parse_metadata_only(text):
     """
 
     def section(header):
-        idx = METADATA_HEADERS.index(header)
-        next_h = METADATA_HEADERS[idx + 1 :] if idx + 1 < len(METADATA_HEADERS) else []
+        next_h = [h for h in METADATA_HEADERS if h != header]
         return _extract_section(text, header, next_h or None)
 
     title = _extract_field(text, "Article:")
@@ -144,6 +175,7 @@ def parse_metadata_only(text):
             "No PRE-DRAFT ANALYSIS SUMMARY found. "
             "Argument and completeness models will have less context — consider adding one."
         )
+    _note_empty_optional_fields(results)
 
     return results
 
@@ -170,8 +202,7 @@ def build_handoff_from_raw_draft_and_metadata(
 
 def parse_draft_submission(text):
     def section(header):
-        idx = DRAFT_HEADERS.index(header)
-        next_h = DRAFT_HEADERS[idx + 1 :] if idx + 1 < len(DRAFT_HEADERS) else []
+        next_h = [h for h in DRAFT_HEADERS if h != header]
         return _extract_section(text, header, next_h or None)
 
     title = _extract_field(text, "Article:")
@@ -219,14 +250,14 @@ def parse_draft_submission(text):
             "No PRE-DRAFT ANALYSIS SUMMARY found. "
             "Argument and completeness models will have less context — consider adding one."
         )
+    _note_empty_optional_fields(results)
 
     return results
 
 
 def parse_publication_handoff(text):
     def section(header):
-        idx = PUB_HEADERS.index(header)
-        next_h = PUB_HEADERS[idx + 1 :] if idx + 1 < len(PUB_HEADERS) else []
+        next_h = [h for h in PUB_HEADERS if h != header]
         return _extract_section(text, header, next_h or None)
 
     title = _extract_field(text, "Article:")
