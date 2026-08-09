@@ -985,11 +985,18 @@ def run_draft_pipeline(
                 claims.append({"claim": claim, "known_url": known_url})
         if claims:
             citation_results = resolve_citations(claims, citation_sources, api_keys)
-            resolved_count = sum(1 for r in citation_results if r.get("resolved"))
+            verified_count = sum(
+                1 for r in citation_results if r.get("verification") == "checksum"
+            )
+            pointer_count = sum(
+                1 for r in citation_results if r.get("verification") == "pointer"
+            )
             log.info(
-                "Citations: %d claim(s), %d resolved to primary sources",
+                "Citations: %d claim(s), %d verified, %d pointer-only, %d unresolved",
                 len(claims),
-                resolved_count,
+                verified_count,
+                pointer_count,
+                len(claims) - verified_count - pointer_count,
             )
         else:
             citation_results = []
@@ -1341,6 +1348,8 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     citations = report.get("section_9_citations", [])
     if citations:
         resolved = [c for c in citations if c.get("resolved")]
+        verified = [c for c in resolved if c.get("verification") == "checksum"]
+        pointer = [c for c in resolved if c.get("verification") == "pointer"]
         not_archived = [
             c for c in resolved if c.get("wayback", {}).get("archived") is False
         ]
@@ -1352,7 +1361,11 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             and c.get("wayback", {}).get("submission_error")
         ]
         stale = [c for c in resolved if c.get("wayback", {}).get("snapshot_stale")]
-        print(f"\nSection 9 — Citations: {len(resolved)}/{len(citations)} resolved")
+        print(
+            f"\nSection 9 — Citations: {len(citations)} claim(s) — "
+            f"{len(verified)} verified, {len(pointer)} pointer-only "
+            f"(not independently verified), {len(citations) - len(resolved)} unresolved"
+        )
         if submitted:
             print(
                 f"  {len(submitted)} resolved URL(s) submitted for archiving "
