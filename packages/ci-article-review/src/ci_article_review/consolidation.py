@@ -607,6 +607,16 @@ def build_report(
         if r.get("failed") and not r.get("skipped")
     ]
 
+    # Calls that succeeded but had to be salvaged from a truncated response —
+    # some findings were recovered, but some were genuinely lost. Not a failure
+    # (its findings are already merged into the sections above), but distinct
+    # enough from a clean call that it needs to stay visible in the report.
+    truncated_results = [
+        f"{model}:{domain}"
+        for (model, domain), r in results.items()
+        if r.get("truncated")
+    ]
+
     # Delta from prior run
     delta = (
         _compute_delta(corrected_draft, prior_report, consensus_flags, primary_claim)
@@ -639,6 +649,7 @@ def build_report(
         "section_8_additional": section_8_additional,
         "contradictions": contradictions,
         "model_failures": model_failures,
+        "truncated_results": truncated_results,
         "ensemble": {
             "thoroughness": ensemble_cfg.get("thoroughness", "standard"),
             "consensus_threshold": float(

@@ -745,6 +745,153 @@ class TestMistral:
         error_text = " ".join(r.message for r in caplog.records)
         assert "Unauthorized" in error_text
 
+    def test_truncated_response_salvages_complete_flags(self):
+        # Live failure mode: the model hits an output-token ceiling mid-array,
+        # not a stall (elapsed nowhere near the timeout budget) and not genuinely
+        # malformed content — the response is well-formed JSON up to the cut
+        # point. The adapter should recover the complete flags and mark the
+        # result as truncated rather than discarding everything as "failed".
+        from ci_article_review.adapters.review import mistral
+
+        truncated_json = (
+            '{"flags": ['
+            '{"passage": "first passage", "problem": "p1", '
+            '"suggested_rewrite": "r1", "steelman_considered": "s1"}, '
+            '{"passage": "second passage", "problem": "p2", '
+            '"suggested_rewrite": "r2", "steelman_considered": "s2"}, '
+            '{"passage": "The Cambridge preprint\'s central claim may be real'
+        )
+        with patch(
+            "ci_article_review.adapters.review.mistral.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(truncated_json)
+            result = mistral.call("system", "user", "key")
+
+        assert result["failed"] is False
+        assert result["truncated"] is True
+        assert result["data"] == {
+            "flags": [
+                {
+                    "passage": "first passage",
+                    "problem": "p1",
+                    "suggested_rewrite": "r1",
+                    "steelman_considered": "s1",
+                },
+                {
+                    "passage": "second passage",
+                    "problem": "p2",
+                    "suggested_rewrite": "r2",
+                    "steelman_considered": "s2",
+                },
+            ]
+        }
+        assert result["raw"] == truncated_json
+
+    def test_sends_explicit_max_tokens(self):
+        # No explicit max_tokens was being sent at all, relying on whatever
+        # Mistral's API defaults to — which is what let a response get cut off
+        # well short of the model's real context window.
+        from ci_article_review.adapters.review import mistral
+
+        with patch(
+            "ci_article_review.adapters.review.mistral.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(
+                {"flags": [], "low_confidence": []}
+            )
+            mistral.call("system", "user", "key")
+
+        _, kwargs = mock_session.post.call_args
+        assert kwargs["json"]["max_tokens"] == mistral.DEFAULT_MAX_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# json_utils — shared truncation salvage
+# ---------------------------------------------------------------------------
+
+
+class TestJsonUtilsSalvage:
+    def test_clean_response_not_marked_truncated(self):
+        from ci_article_review.adapters.review.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        data, truncated = extract_json_with_salvage('{"flags": [{"passage": "a"}]}')
+        assert data == {"flags": [{"passage": "a"}]}
+        assert truncated is False
+
+    def test_truncated_mid_array_between_elements(self):
+        from ci_article_review.adapters.review.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        # Cut off cleanly after the second element's comma, mid-way through the
+        # third element's key — never even opened the third object's value.
+        raw = (
+            '{"flags": ['
+            '{"passage": "a", "problem": "p1"}, '
+            '{"passage": "b", "problem": "p2"}, '
+            '{"passage": "c", "prob'
+        )
+        data, truncated = extract_json_with_salvage(raw)
+        assert truncated is True
+        assert data == {
+            "flags": [
+                {"passage": "a", "problem": "p1"},
+                {"passage": "b", "problem": "p2"},
+            ]
+        }
+
+    def test_truncated_mid_string_inside_value(self):
+        # Truncation lands inside an unterminated string value, not between
+        # elements — the escape/string-depth tracking must not let that produce
+        # invalid JSON, and the incomplete element must be dropped entirely.
+        from ci_article_review.adapters.review.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        raw = (
+            '{"flags": ['
+            '{"passage": "a", "problem": "p1"}, '
+            '{"passage": "The Cambridge preprint\'s central claim may be real'
+        )
+        data, truncated = extract_json_with_salvage(raw)
+        assert truncated is True
+        assert data == {"flags": [{"passage": "a", "problem": "p1"}]}
+
+    def test_truncated_with_trailing_backslash_before_cut(self):
+        # A backslash right at the cut point must not desynchronize the
+        # escape-state tracking for whatever came before it.
+        from ci_article_review.adapters.review.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        raw = '{"flags": [{"passage": "a", "problem": "p1"}, {"passage": "b\\'
+        data, truncated = extract_json_with_salvage(raw)
+        assert truncated is True
+        assert data == {"flags": [{"passage": "a", "problem": "p1"}]}
+
+    def test_nothing_recoverable_returns_none(self):
+        from ci_article_review.adapters.review.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        data, truncated = extract_json_with_salvage('{"flags": [{"passage"')
+        assert data is None
+        assert truncated is False
+
+    def test_empty_content_returns_none(self):
+        from ci_article_review.adapters.review.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        assert extract_json_with_salvage("") == (None, False)
+        assert extract_json_with_salvage(None) == (None, False)
+
 
 # ---------------------------------------------------------------------------
 # Gemini adapter
