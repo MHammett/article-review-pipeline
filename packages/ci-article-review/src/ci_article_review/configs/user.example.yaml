@@ -25,6 +25,15 @@ api_keys:
     username: your_email@example.com
     api_key: your_key_here
 
+  # Optional — authenticates Wayback Machine "Save Page Now" submissions for
+  # resolved citations that aren't archived yet (get a key pair at
+  # https://archive.org/account/s3.php). Without it, submission still works
+  # via archive.org's unauthenticated trigger endpoint, just with tighter
+  # rate limits.
+  archive_org:
+    access_key: your_access_key_here
+    secret_key: your_secret_key_here
+
 
 # Model configuration — two forms are accepted:
 #
