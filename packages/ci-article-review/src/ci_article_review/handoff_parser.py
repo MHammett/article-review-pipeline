@@ -9,10 +9,16 @@ log = logging.getLogger(__name__)
 
 
 def _extract_section(text, header, next_headers=None):
-    """Extract content between a header and the next known header."""
+    """Extract content between a header and the next known header.
+
+    Falls back to end-of-string if none of next_headers actually appear in
+    the text (e.g. a boundary-only marker header, like DRAFT in
+    METADATA_HEADERS, that isn't present in a metadata-only file) — otherwise
+    the lookahead never matches and the section is silently dropped.
+    """
     if next_headers:
         boundary = (
-            r"(?=\n(?:" + "|".join(re.escape(h) for h in next_headers) + r")\s*\n)"
+            r"(?=\n(?:" + "|".join(re.escape(h) for h in next_headers) + r")\s*\n|\Z)"
         )
     else:
         boundary = r"\Z"
@@ -41,6 +47,123 @@ PUB_HEADERS = [
     "DISPOSITION LOG",
     "FINAL DRAFT",
 ]
+
+# Same section set as DRAFT_HEADERS minus the leading banner and the DRAFT
+# section itself — "DRAFT" stays in the list as a boundary marker only (not
+# extracted) so a full handoff document can be pointed at --metadata without
+# its article text leaking into ADDITIONAL CONTEXT.
+METADATA_HEADERS = [
+    "PRIMARY CLAIM",
+    "TARGET AUDIENCE",
+    "PRE-DRAFT ANALYSIS SUMMARY",
+    "SOURCES ALREADY CITED",
+    "UNCERTAIN SECTIONS",
+    "KNOWN GAPS",
+    "ADDITIONAL CONTEXT FOR REVIEW MODELS",
+    "DRAFT",
+]
+
+
+def build_handoff_from_raw_text(text, source_name="Untitled"):
+    """Synthesize a minimal handoff dict from a plain draft with no handoff headers.
+
+    Mirrors build_handoff_from_url: the pipeline only strictly needs title and
+    draft, so a file that is just the article body (e.g. pasted straight out of
+    a chat session) can be run directly instead of requiring the full
+    DRAFT SUBMISSION HANDOFF template. Optional fields (primary_claim,
+    pre_draft_analysis, etc.) are left unset — review models get less context
+    than a full handoff provides.
+    """
+    draft = text.strip()
+
+    title_match = re.search(r"^#\s+(.+)$", draft, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else source_name
+
+    if draft.lstrip().startswith("DRAFT SUBMISSION HANDOFF") or re.search(
+        r"^PRIMARY CLAIM\s*$", draft, re.MULTILINE
+    ):
+        log.warning(
+            "This file looks like it may already be a handoff document (found "
+            "handoff-style headers) but is being read as a raw draft — its "
+            "PRIMARY CLAIM, TARGET AUDIENCE, etc. sections will be ignored and "
+            "the whole file will be sent as the draft text. Use --draft instead "
+            "of --raw-draft if this file is already a full handoff document."
+        )
+
+    log.warning(
+        "Running in raw-draft mode: only title and draft text were extracted. "
+        "PRIMARY CLAIM, TARGET AUDIENCE, PRE-DRAFT ANALYSIS SUMMARY, and other "
+        "handoff fields are empty, so review models will have less context than "
+        "a full handoff document provides."
+    )
+
+    return {"title": title, "draft": draft, "run_number": 1}
+
+
+def parse_metadata_only(text):
+    """Parse a metadata-only file: PRIMARY CLAIM, TARGET AUDIENCE, etc. with no DRAFT.
+
+    Same section format as parse_draft_submission, minus the draft text —
+    for use with --raw-draft --metadata, where the article body lives in a
+    separate file. If the metadata file happens to be a full handoff document
+    (DRAFT section included), that section is used only as a boundary marker
+    and its content is discarded here.
+    """
+
+    def section(header):
+        idx = METADATA_HEADERS.index(header)
+        next_h = METADATA_HEADERS[idx + 1 :] if idx + 1 < len(METADATA_HEADERS) else []
+        return _extract_section(text, header, next_h or None)
+
+    title = _extract_field(text, "Article:")
+    publication = _extract_field(text, "Publication:")
+    run_number = _extract_field(text, "Pipeline run:")
+    primary_claim = section("PRIMARY CLAIM")
+
+    if not primary_claim:
+        log.warning(
+            "Metadata file is missing 'PRIMARY CLAIM'. "
+            "The review models will receive an empty primary_claim — results may be generic or misdirected."
+        )
+
+    results = {
+        "title": title,
+        "publication": publication,
+        "run_number": int(run_number) if run_number and run_number.isdigit() else 1,
+        "primary_claim": primary_claim,
+        "target_audience": section("TARGET AUDIENCE"),
+        "pre_draft_analysis": section("PRE-DRAFT ANALYSIS SUMMARY"),
+        "sources_cited": section("SOURCES ALREADY CITED"),
+        "uncertain_sections": section("UNCERTAIN SECTIONS"),
+        "known_gaps": section("KNOWN GAPS"),
+        "additional_context": section("ADDITIONAL CONTEXT FOR REVIEW MODELS"),
+    }
+
+    if not results["pre_draft_analysis"]:
+        log.debug(
+            "No PRE-DRAFT ANALYSIS SUMMARY found. "
+            "Argument and completeness models will have less context — consider adding one."
+        )
+
+    return results
+
+
+def build_handoff_from_raw_draft_and_metadata(draft_text, metadata_text, source_name="Untitled"):
+    """Combine a plain draft file with a separate metadata file into a full handoff dict.
+
+    Lets the article body stay a single clean paste (no risk of a chat UI
+    mangling the DRAFT section inside a much longer handoff document) while
+    still supplying PRIMARY CLAIM / TARGET AUDIENCE / etc. for full review context.
+    """
+    draft = draft_text.strip()
+    handoff = parse_metadata_only(metadata_text)
+
+    if not handoff["title"]:
+        title_match = re.search(r"^#\s+(.+)$", draft, re.MULTILINE)
+        handoff["title"] = title_match.group(1).strip() if title_match else source_name
+
+    handoff["draft"] = draft
+    return handoff
 
 
 def parse_draft_submission(text):

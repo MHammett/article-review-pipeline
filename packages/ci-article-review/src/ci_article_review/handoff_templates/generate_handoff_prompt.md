@@ -6,6 +6,20 @@ Copy everything between the dashed lines and paste it as a single message.
 Replace the bracketed fields. The model will output a complete handoff document
 you can save as your-article-handoff.md and pass to `python pipeline.py --draft`.
 
+TWO-FILE VARIANT: for long articles, chat UIs can truncate or mangle a single
+giant paste that mixes analysis and the full article text. If that's a
+problem, ask the model to stop before the DRAFT section and output only
+everything from "DRAFT SUBMISSION HANDOFF" through "ADDITIONAL CONTEXT FOR
+REVIEW MODELS" (see metadata_only.md for the exact shape). Save that as
+your-article-metadata.md, save the raw article text on its own (whatever you
+already have — no wrapping needed) as your-article-draft.md, and run:
+
+    python pipeline.py --raw-draft your-article-draft.md --metadata your-article-metadata.md --publication your_publication_name
+
+This produces the same result as a single --draft handoff — it's just split
+across two files so the draft never has to survive a round trip through the
+chat model.
+
 ──────────────────────────────────────────────────────────────────────────────
 
 You are helping me prepare a draft article for a multi-model AI review pipeline.
@@ -145,3 +159,9 @@ handoff_templates/ and run:
     python pipeline.py --draft handoff_templates/your-article-name-handoff.md --publication your_publication_name
 
 The pipeline will tell you if any required sections are missing before running.
+
+If the article is long enough that you'd rather not have it re-typed or
+re-pasted by the chat model at all, use the two-file variant described above
+instead: ask for everything up to (not including) the DRAFT section, save
+that alone as metadata.md (see metadata_only.md for the exact format), and
+pass your own already-in-hand draft file separately with --raw-draft.

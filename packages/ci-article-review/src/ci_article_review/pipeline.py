@@ -55,7 +55,12 @@ from .config_loader import (
     merge_configs,
     validate_publication_name,
 )
-from .handoff_parser import parse_draft_submission, parse_publication_handoff
+from .handoff_parser import (
+    parse_draft_submission,
+    parse_publication_handoff,
+    build_handoff_from_raw_text,
+    build_handoff_from_raw_draft_and_metadata,
+)
 from . import history as hist
 from . import consolidation
 from . import redact
@@ -284,10 +289,25 @@ def _render_prompt(template: str, **kwargs) -> str:
 
 def _build_user_prompt(draft: str, handoff: dict) -> str:
     parts = [f"ARTICLE TITLE: {handoff['title']}\n"]
+    if handoff.get("target_audience"):
+        parts.append(f"TARGET AUDIENCE: {handoff['target_audience']}\n")
     if handoff.get("primary_claim"):
         parts.append(f"PRIMARY CLAIM: {handoff['primary_claim']}\n")
     if handoff.get("pre_draft_analysis"):
         parts.append(f"PRE-DRAFT ANALYSIS:\n{handoff['pre_draft_analysis']}\n")
+    if handoff.get("sources_cited"):
+        parts.append(f"SOURCES ALREADY CITED:\n{handoff['sources_cited']}\n")
+    if handoff.get("uncertain_sections"):
+        parts.append(
+            f"UNCERTAIN SECTIONS (author-flagged — focus scrutiny here):\n"
+            f"{handoff['uncertain_sections']}\n"
+        )
+    if handoff.get("known_gaps"):
+        parts.append(
+            f"KNOWN GAPS (author is already aware of these — don't just restate "
+            f"them, assess whether they're acceptable or need closing):\n"
+            f"{handoff['known_gaps']}\n"
+        )
     if handoff.get("additional_context"):
         parts.append(f"ADDITIONAL CONTEXT:\n{handoff['additional_context']}\n")
     parts.append(f"\nDRAFT:\n{draft}")
@@ -1369,6 +1389,22 @@ def main():
     group.add_argument(
         "--publish", metavar="HANDOFF_PATH", help="Path to publication handoff document"
     )
+    group.add_argument(
+        "--raw-draft",
+        metavar="DRAFT_PATH",
+        help="Path to a plain draft file with no handoff headers (e.g. pasted "
+        "straight out of a chat session) — the whole file is used as the "
+        "article body. Skips primary_claim/target_audience/etc.; use --draft "
+        "with a full handoff document for full review context, or pair with "
+        "--metadata to supply that context from a separate file.",
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="METADATA_PATH",
+        help="Path to a metadata file (PRIMARY CLAIM, TARGET AUDIENCE, etc., no "
+        "DRAFT section) to combine with --raw-draft. Only valid alongside "
+        "--raw-draft.",
+    )
     parser.add_argument(
         "--publication", required=True, help="Publication config name (without .yaml)"
     )
@@ -1412,6 +1448,9 @@ def main():
             "WARNING: --publish-live has no effect in --draft mode and will be ignored."
         )
 
+    if args.metadata and not args.raw_draft:
+        parser.error("--metadata requires --raw-draft")
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -1453,6 +1492,27 @@ def main():
             )
         elif args.url:
             handoff = build_handoff_from_url(args.url)
+            run_draft_pipeline(
+                None,
+                args.publication,
+                config_dir=args.config_dir,
+                cost_preset=args.cost_preset,
+                no_timeout=args.no_timeout,
+                only_model=args.only_model,
+                only_domain=args.only_domain,
+                handoff=handoff,
+            )
+        elif args.raw_draft:
+            raw_text = _read_handoff_file(args.raw_draft)
+            if args.metadata:
+                metadata_text = _read_handoff_file(args.metadata)
+                handoff = build_handoff_from_raw_draft_and_metadata(
+                    raw_text, metadata_text, source_name=Path(args.raw_draft).stem
+                )
+            else:
+                handoff = build_handoff_from_raw_text(
+                    raw_text, source_name=Path(args.raw_draft).stem
+                )
             run_draft_pipeline(
                 None,
                 args.publication,
