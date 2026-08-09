@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
+from .report_markdown import render_report_markdown
+
 log = logging.getLogger(__name__)
 
 # Windows reserved device names that cannot be used as filenames or directory names.
@@ -65,17 +67,25 @@ def save_run(
         d = _run_dir(history_root, article_title, run_number)
     except OSError as e:
         log.error(f"Cannot create history directory: {e}")
-        return {"report_path": None, "corrections_path": None}
+        return {"report_path": None, "corrections_path": None, "markdown_path": None}
 
     report_path = d / f"run_{run_number}_{ts_str}_report.json"
     corrections_path = d / f"run_{run_number}_{ts_str}_corrections.log"
+    markdown_path = d / f"run_{run_number}_{ts_str}_review.md"
 
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, default=str)
     except OSError as e:
         log.error(f"Could not write report to {report_path}: {e}")
-        return {"report_path": None, "corrections_path": None}
+        return {"report_path": None, "corrections_path": None, "markdown_path": None}
+
+    try:
+        with open(markdown_path, "w", encoding="utf-8") as f:
+            f.write(render_report_markdown(report))
+    except OSError as e:
+        log.warning(f"Could not write markdown review to {markdown_path}: {e}")
+        markdown_path = None
 
     try:
         lines = [
@@ -87,9 +97,17 @@ def save_run(
     except OSError as e:
         log.warning(f"Could not write corrections log to {corrections_path}: {e}")
         # Report saved successfully — corrections log is supplementary, don't fail the run.
-        return {"report_path": str(report_path), "corrections_path": None}
+        return {
+            "report_path": str(report_path),
+            "corrections_path": None,
+            "markdown_path": str(markdown_path) if markdown_path else None,
+        }
 
-    return {"report_path": str(report_path), "corrections_path": str(corrections_path)}
+    return {
+        "report_path": str(report_path),
+        "corrections_path": str(corrections_path),
+        "markdown_path": str(markdown_path) if markdown_path else None,
+    }
 
 
 def load_prior_report(history_root, article_title, run_number):
