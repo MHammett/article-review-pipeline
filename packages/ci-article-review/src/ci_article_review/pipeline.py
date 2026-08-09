@@ -11,8 +11,8 @@ import sys
 
 # Reconfigure stdout/stderr to UTF-8 on Windows (default cp1252 breaks on non-ASCII report content)
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
 
 # Version guard — must run before any other imports
 if sys.version_info < (3, 10):
@@ -1194,6 +1194,16 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         links = pre.get("links", [])
         if links:
             broken = [lk for lk in links if not lk.get("ok")]
+            # A 403 with no Wayback snapshot to fall back on is likely still a
+            # live page blocking automated fetches, not a dead link — unlike a
+            # 404 or 5xx, which are confirmed-dead/origin-error. Both still
+            # count toward "broken" above (we couldn't verify the content
+            # either way), but callers should treat them differently before
+            # acting on the report.
+            blocked_403 = [lk for lk in broken if lk.get("status_code") == 403]
+            via_archive = [
+                lk for lk in links if lk.get("verified_via") == "wayback_fallback"
+            ]
             not_archived = [
                 lk for lk in links if lk.get("wayback", {}).get("archived") is False
             ]
@@ -1205,17 +1215,26 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             print(f"\nLinks: {len(links)} found", end="")
             if broken:
                 print(f", {len(broken)} broken/error", end="")
+            if via_archive:
+                print(f", {len(via_archive)} recovered via archive", end="")
             if not_archived:
                 print(f", {len(not_archived)} not archived", end="")
             if stale_archive:
                 print(f", {len(stale_archive)} stale archive", end="")
             print()
-            for lk in links:
-                status = (
-                    "OK"
-                    if lk.get("ok")
-                    else f"BROKEN ({lk.get('status_code') or lk.get('error', '?')})"
+            if blocked_403:
+                print(
+                    f"  Note: {len(blocked_403)} of the broken link(s) are 403 with no "
+                    "archive snapshot — blocked, likely still valid; verify manually. "
+                    "This is distinct from a 404, which is confirmed dead."
                 )
+            for lk in links:
+                if lk.get("verified_via") == "wayback_fallback":
+                    status = "OK (via archive)"
+                elif lk.get("ok"):
+                    status = "OK"
+                else:
+                    status = f"BROKEN ({lk.get('status_code') or lk.get('error', '?')})"
                 wb = lk.get("wayback", {})
                 age = wb.get("snapshot_age_days")
                 if wb.get("is_archive_url"):

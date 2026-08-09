@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from ci_core.http import USER_AGENT
+from ci_core.http import DEFAULT_HEADERS
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def check(url, timeout=10, stale_days=None):
             _AVAILABILITY_API,
             params={"url": url},
             timeout=timeout,
-            headers={"User-Agent": USER_AGENT},
+            headers=DEFAULT_HEADERS,
         )
         resp.raise_for_status()
         data = resp.json()

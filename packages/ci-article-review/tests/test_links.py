@@ -1,6 +1,6 @@
 """Tests for analysis.links — URL extraction, SSRF guard, parallel validation."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ci_article_review.analysis import links
 
@@ -101,3 +101,73 @@ class TestValidateLinks:
             links.validate_links(text, check_wayback=True, wayback_stale_days=90)
         _, kwargs = mock_wb.call_args
         assert kwargs.get("stale_days") == 90
+
+
+class TestWaybackFallbackOn403:
+    """A direct 403 should fall back to a Wayback snapshot; 404/5xx should not."""
+
+    def _head_response(self, status_code):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.url = "https://example.com/blocked"
+        return resp
+
+    def test_403_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/blocked"
+        )
+        snap_resp = MagicMock(status_code=200)
+
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                return_value=self._head_response(403),
+            ),
+            patch(
+                "ci_article_review.analysis.links.requests.get",
+                return_value=snap_resp,
+            ) as mock_get,
+            patch(
+                "ci_article_review.analysis.links.wayback_check",
+                return_value={"archived": True, "snapshot_url": snapshot_url},
+            ),
+        ):
+            result = links._check_http("https://example.com/blocked")
+
+        assert result["ok"] is True
+        assert result["status_code"] == 403
+        assert result["verified_via"] == "wayback_fallback"
+        assert result["wayback_snapshot_url"] == snapshot_url
+        mock_get.assert_called_once()
+
+    def test_403_with_no_snapshot_stays_blocked(self):
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                return_value=self._head_response(403),
+            ),
+            patch(
+                "ci_article_review.analysis.links.wayback_check",
+                return_value={"archived": False},
+            ),
+        ):
+            result = links._check_http("https://example.com/blocked")
+
+        assert result["ok"] is False
+        assert result["status_code"] == 403
+        assert result["verified_via"] == "direct"
+        assert "wayback_snapshot_url" not in result
+
+    def test_404_does_not_attempt_wayback_fallback(self):
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                return_value=self._head_response(404),
+            ),
+            patch("ci_article_review.analysis.links.wayback_check") as mock_wb,
+        ):
+            result = links._check_http("https://example.com/gone")
+
+        assert result["ok"] is False
+        assert result["status_code"] == 404
+        mock_wb.assert_not_called()

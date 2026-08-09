@@ -1,6 +1,8 @@
 """Tests for adapters.citation.resolver — parallel resolution, ordering, pointer flag."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import requests
 
 from ci_article_review.adapters.citation import resolver
 
@@ -193,3 +195,82 @@ class TestResolveCitations:
 
         assert results[0]["resolved"] is True
         assert results[0]["source_name"] == "FRED"
+
+
+def _http_error_response(status_code):
+    resp = MagicMock()
+    resp.status_code = status_code
+    error = requests.exceptions.HTTPError(f"{status_code} error", response=resp)
+    resp.raise_for_status.side_effect = error
+    return resp
+
+
+class TestKnownUrlWaybackFallback:
+    """A direct 403 on a known_url should fall back to a Wayback snapshot;
+    404/5xx should not — see resolver._wayback_fallback_content scoping."""
+
+    def test_403_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/page"
+        )
+        snap_resp = MagicMock(text="archived page content")
+        snap_resp.raise_for_status.return_value = None
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                side_effect=[_http_error_response(403), snap_resp],
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": True, "snapshot_url": snapshot_url},
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["verified_via"] == "wayback_fallback"
+        assert results[0]["checksum"] == resolver.sha256_checksum(
+            "archived page content"
+        )
+        assert mock_get.call_count == 2
+
+    def test_403_with_no_snapshot_reports_unresolved(self):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=_http_error_response(403),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": False},
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/blocked"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is False
+        assert "note" in results[0]
+
+    def test_404_does_not_attempt_wayback_fallback(self):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=_http_error_response(404),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check"
+            ) as mock_wb,
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/gone"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is False
+        mock_wb.assert_not_called()
