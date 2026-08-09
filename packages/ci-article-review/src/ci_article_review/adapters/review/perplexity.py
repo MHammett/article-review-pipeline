@@ -206,13 +206,20 @@ def _call_perplexity(
         }
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
-        log.error(f"Perplexity {model} call failed after {elapsed}s: {e}")
+        error_body = redact.capture_error_body(e)
+        if error_body:
+            log.error(
+                f"Perplexity {model} call failed after {elapsed}s: {e} | {error_body}"
+            )
+        else:
+            log.error(f"Perplexity {model} call failed after {elapsed}s: {e}")
         status = getattr(getattr(e, "response", None), "status_code", None)
         if status == 400:
             _log_payload_diagnostics(model, payload)
         return {
             "failed": True,
             "error": str(e),
+            "error_body": error_body,
             "raw": None,
             "model": model,
             "tokens": {},

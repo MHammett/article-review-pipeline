@@ -4,6 +4,7 @@ import logging
 import requests
 
 from . import streaming
+from ... import redact
 
 DEFAULT_MODEL = "grok-4.3"
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -144,11 +145,18 @@ def _call_model(
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         safe_err = _redact_key(e, api_key)
-        log.error(f"Grok {model} call failed after {elapsed}s: {safe_err}")
+        error_body = _redact_key(redact.capture_error_body(e), api_key)
+        if error_body:
+            log.error(
+                f"Grok {model} call failed after {elapsed}s: {safe_err} | {error_body}"
+            )
+        else:
+            log.error(f"Grok {model} call failed after {elapsed}s: {safe_err}")
         session.close()
         return {
             "failed": True,
             "error": safe_err,
+            "error_body": error_body,
             "raw": None,
             "model": model,
             "tokens": {},

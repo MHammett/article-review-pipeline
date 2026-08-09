@@ -859,6 +859,10 @@ def run_draft_pipeline(
         }
         if not status_ok and result.get("raw"):
             log_entry["raw_excerpt"] = _raw_excerpt(result["raw"])
+        if not status_ok and result.get("error_body"):
+            # Adapters already redact/truncate this via redact.capture_error_body()
+            # before returning it, so it's safe to persist as-is.
+            log_entry["error_body_excerpt"] = result["error_body"]
         api_call_log.append(log_entry)
         # Machine-facing structured record — one grep-able line per call, persisted
         # to pipeline_history/pipeline_<date>.log for cross-run calibration analysis.
@@ -888,6 +892,11 @@ def run_draft_pipeline(
                 log.debug(
                     f"  {model_name}:{domain}: raw response excerpt:\n"
                     f"{log_entry['raw_excerpt']}"
+                )
+            if "error_body_excerpt" in log_entry:
+                log.debug(
+                    f"  {model_name}:{domain}: error body excerpt:\n"
+                    f"{log_entry['error_body_excerpt']}"
                 )
 
     all_failed = all(r.get("failed") for r in results.values())

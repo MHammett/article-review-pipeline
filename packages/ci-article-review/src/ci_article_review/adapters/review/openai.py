@@ -47,6 +47,7 @@ import logging
 import requests
 
 from . import streaming
+from ... import redact
 
 DEFAULT_MODEL = "gpt-5.4"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
@@ -258,11 +259,20 @@ def _call_with_web_search(
         assembled = streaming.accumulate_openai_responses(resp)
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
-        log.warning(f"OpenAI Responses API {model} call failed after {elapsed}s: {e}")
+        error_body = redact.capture_error_body(e)
+        if error_body:
+            log.warning(
+                f"OpenAI Responses API {model} call failed after {elapsed}s: {e} | {error_body}"
+            )
+        else:
+            log.warning(
+                f"OpenAI Responses API {model} call failed after {elapsed}s: {e}"
+            )
         session.close()
         return {
             "failed": True,
             "error": str(e),
+            "error_body": error_body,
             "raw": None,
             "model": model,
             "tokens": {},
@@ -500,7 +510,7 @@ def _execute_openai_responses(
         assembled = streaming.accumulate_openai_responses(resp)
     except requests.HTTPError as e:
         elapsed = round(time.monotonic() - t0, 2)
-        body = e.response.text[:400] if e.response is not None else ""
+        body = redact.capture_error_body(e)
         log.error(f"OpenAI {model} call failed after {elapsed}s: {e} | {body}")
         return {
             "failed": True,
@@ -590,7 +600,7 @@ def _execute_request(
         assembled = streaming.accumulate_chat_completions(resp)
     except requests.HTTPError as e:
         elapsed = round(time.monotonic() - t0, 2)
-        body = e.response.text[:400] if e.response is not None else ""
+        body = redact.capture_error_body(e)
         log.error(f"OpenAI {model} call failed after {elapsed}s: {e} | {body}")
         return {
             "failed": True,
