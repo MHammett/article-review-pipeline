@@ -1002,7 +1002,9 @@ def run_draft_pipeline(
                 )
                 claims.append({"claim": claim, "known_url": known_url})
         if claims:
-            citation_results = resolve_citations(claims, citation_sources, api_keys)
+            citation_results = resolve_citations(
+                claims, citation_sources, api_keys, verification_call_log=api_call_log
+            )
             verified_count = sum(
                 1 for r in citation_results if r.get("verification") == "checksum"
             )
