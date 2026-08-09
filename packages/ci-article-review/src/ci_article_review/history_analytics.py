@@ -95,7 +95,12 @@ def iter_reports(history_root, article_slug=None):
 def load_reports(history_root, article_slug=None):
     """Load all reports as {slug, path, report, timestamp} dicts, oldest first."""
     entries = [
-        {"slug": slug, "path": path, "report": report, "timestamp": _parse_timestamp(report, path)}
+        {
+            "slug": slug,
+            "path": path,
+            "report": report,
+            "timestamp": _parse_timestamp(report, path),
+        }
         for slug, path, report in iter_reports(history_root, article_slug)
     ]
     entries.sort(key=lambda e: e["timestamp"])
@@ -122,7 +127,9 @@ def _provider_calls(entries):
             provider = pass_key.split(":", 1)[0]
             if not provider:
                 continue
-            calls.setdefault(provider, []).append((e["timestamp"], bool(call.get("failed"))))
+            calls.setdefault(provider, []).append(
+                (e["timestamp"], bool(call.get("failed")))
+            )
     for provider_calls in calls.values():
         provider_calls.sort(key=lambda c: c[0])
     return calls
@@ -150,7 +157,10 @@ def provider_reliability(
             baseline_rate = None
             baseline_success_rate = None
 
-        degraded = baseline_rate is not None and (recent_rate - baseline_rate) >= degraded_threshold
+        degraded = (
+            baseline_rate is not None
+            and (recent_rate - baseline_rate) >= degraded_threshold
+        )
 
         results[provider] = {
             "total_calls": len(calls),
@@ -212,7 +222,9 @@ def cost_trend(entries, recent_window=RECENT_WINDOW):
         "total_usd": round(total, 4),
         "average_usd": round(total / len(points), 4),
         "recent_average_usd": round(recent_avg, 4),
-        "baseline_average_usd": round(baseline_avg, 4) if baseline_avg is not None else None,
+        "baseline_average_usd": round(baseline_avg, 4)
+        if baseline_avg is not None
+        else None,
         "trend": _trend_direction(baseline_avg, recent_avg),
     }
 
@@ -233,7 +245,9 @@ def _quality_metrics(report):
     seo_issue_count = len(seo_issues) if isinstance(seo_issues, list) else None
 
     links = pre.get("links")
-    broken_link_count = sum(1 for lk in links if not lk.get("ok")) if isinstance(links, list) else None
+    broken_link_count = (
+        sum(1 for lk in links if not lk.get("ok")) if isinstance(links, list) else None
+    )
 
     return {
         "fk_grade": fk_grade,
@@ -274,9 +288,15 @@ def per_article_quality_trend(entries):
             "article_title": runs[-1]["report"].get("article_title", slug),
             "first": first_metrics,
             "last": last_metrics,
-            "fk_grade_trend": _direction(first_metrics["fk_grade"], last_metrics["fk_grade"]),
-            "seo_issues_trend": _direction(first_metrics["seo_issue_count"], last_metrics["seo_issue_count"]),
-            "broken_links_trend": _direction(first_metrics["broken_link_count"], last_metrics["broken_link_count"]),
+            "fk_grade_trend": _direction(
+                first_metrics["fk_grade"], last_metrics["fk_grade"]
+            ),
+            "seo_issues_trend": _direction(
+                first_metrics["seo_issue_count"], last_metrics["seo_issue_count"]
+            ),
+            "broken_links_trend": _direction(
+                first_metrics["broken_link_count"], last_metrics["broken_link_count"]
+            ),
         }
     return results
 
@@ -303,7 +323,9 @@ def global_quality_trend(entries, recent_window=RECENT_WINDOW):
         out[key] = {
             "average": round(avg_all, 2) if avg_all is not None else None,
             "recent_average": round(avg_recent, 2) if avg_recent is not None else None,
-            "baseline_average": round(avg_baseline, 2) if avg_baseline is not None else None,
+            "baseline_average": round(avg_baseline, 2)
+            if avg_baseline is not None
+            else None,
             "trend": trend,
         }
     return out
@@ -314,15 +336,21 @@ def global_quality_trend(entries, recent_window=RECENT_WINDOW):
 # ---------------------------------------------------------------------------
 
 
-def build_history_report(history_root=HISTORY_ROOT, article_slug=None, recent_window=RECENT_WINDOW):
+def build_history_report(
+    history_root=HISTORY_ROOT, article_slug=None, recent_window=RECENT_WINDOW
+):
     entries = load_reports(history_root, article_slug)
     return {
         "history_root": str(history_root),
         "article_slug": article_slug,
         "total_reports": len(entries),
-        "provider_reliability": provider_reliability(entries, recent_window=recent_window),
+        "provider_reliability": provider_reliability(
+            entries, recent_window=recent_window
+        ),
         "cost_trend": cost_trend(entries, recent_window=recent_window),
-        "global_quality_trend": global_quality_trend(entries, recent_window=recent_window),
+        "global_quality_trend": global_quality_trend(
+            entries, recent_window=recent_window
+        ),
         "per_article_quality_trend": per_article_quality_trend(entries),
     }
 
@@ -331,7 +359,9 @@ def print_history_report(result):
     print("\n" + "=" * 60)
     print("PIPELINE HISTORY ANALYTICS")
     scope = result["article_slug"] or "all articles"
-    print(f"Scope: {scope}  ({result['total_reports']} run report(s) under {result['history_root']})")
+    print(
+        f"Scope: {scope}  ({result['total_reports']} run report(s) under {result['history_root']})"
+    )
     print("=" * 60)
 
     if result["total_reports"] == 0:
@@ -346,7 +376,9 @@ def print_history_report(result):
     for provider, r in sorted(reliability.items()):
         recent_pct = f"{r['recent_success_rate'] * 100:.0f}%"
         baseline_pct = (
-            f"{r['baseline_success_rate'] * 100:.0f}%" if r["baseline_success_rate"] is not None else "n/a"
+            f"{r['baseline_success_rate'] * 100:.0f}%"
+            if r["baseline_success_rate"] is not None
+            else "n/a"
         )
         flag = "  <-- DEGRADED" if r["degraded"] else ""
         if r["degraded"]:
@@ -387,12 +419,16 @@ def print_history_report(result):
         if m["trend"] == "insufficient_history":
             print(f"  {label}: insufficient history")
         else:
-            print(f"  {label}: recent avg {m['recent_average']} vs. baseline avg {m['baseline_average']} -> {m['trend']}")
+            print(
+                f"  {label}: recent avg {m['recent_average']} vs. baseline avg {m['baseline_average']} -> {m['trend']}"
+            )
 
     per_article = result["per_article_quality_trend"]
     multi_run = {slug: v for slug, v in per_article.items() if v["runs"] > 1}
     if multi_run:
-        print(f"\nPer-article revision trend ({len(multi_run)} article(s) with multiple runs):")
+        print(
+            f"\nPer-article revision trend ({len(multi_run)} article(s) with multiple runs):"
+        )
         for slug, v in sorted(multi_run.items()):
             print(
                 f"  {v['article_title']!r} ({v['runs']} runs): "
@@ -435,7 +471,9 @@ def main():
         action="store_true",
         help="Print the raw analytics result as JSON instead of the console summary",
     )
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG logging")
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
