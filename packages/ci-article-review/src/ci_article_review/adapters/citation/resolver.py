@@ -27,6 +27,13 @@ ADAPTER_MAP = {
 #: Bound on concurrent claim resolutions so we don't open dozens of sockets at once.
 _MAX_PARALLEL = 8
 
+#: Bound on concurrent Wayback *submissions*, kept well below _MAX_PARALLEL.
+#: archive.org's Save Page Now API does a real page capture (slow, rate-limited),
+#: not a cheap read, so a burst of 8 concurrent submissions risks getting the
+#: pipeline's IP rate-limited or blocked. Submissions run as a follow-up pass
+#: after the main resolution completes, rather than inline per-claim.
+_MAX_SUBMIT_PARALLEL = 2
+
 
 def _load_adapter(adapter_name):
     module_path = ADAPTER_MAP.get(adapter_name)
@@ -160,6 +167,54 @@ def _resolve_one(claim, citation_sources, known_url=None):
     }
 
 
+def _submit_missing_archives(results, archive_org_creds=None):
+    """Follow-up pass: request Wayback archiving for resolved citations whose
+    URL isn't archived yet.
+
+    Runs after the main resolution pass, at a lower concurrency
+    (_MAX_SUBMIT_PARALLEL) than claim resolution — archive.org's Save Page Now
+    API does a real page capture per request, so submitting inline per-claim
+    at the same parallelism as resolution risks a rate-limit or IP block.
+    Submission is fire-and-forget: it does not verify the capture completed
+    (that can take seconds to minutes on archive.org's side); a future run's
+    ``wayback.check()`` will pick up the new snapshot once it exists.
+
+    Mutates each result's ``wayback`` dict in place, adding ``submitted`` and,
+    on failure, ``submission_error``. Never raises — a submission failure
+    degrades to "still shows as unarchived", it does not fail the run.
+    """
+    creds = archive_org_creds or {}
+    access_key = creds.get("access_key")
+    secret_key = creds.get("secret_key")
+
+    targets = [
+        r
+        for r in results
+        if r.get("resolved")
+        and r.get("url")
+        and r.get("wayback", {}).get("archived") is False
+    ]
+    if not targets:
+        return
+
+    def _submit_one(entry):
+        try:
+            sub = wayback.submit(
+                entry["url"], access_key=access_key, secret_key=secret_key
+            )
+        except Exception as e:
+            log.warning(f"Wayback submission raised for {entry['url']}: {e}")
+            sub = {"submitted": False, "error": str(e)}
+        entry["wayback"]["submitted"] = sub.get("submitted", False)
+        if sub.get("error"):
+            entry["wayback"]["submission_error"] = sub["error"]
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(targets), _MAX_SUBMIT_PARALLEL)
+    ) as pool:
+        list(pool.map(_submit_one, targets))
+
+
 def _normalize_claim_entry(entry):
     """Accept either a plain claim string or a dict with an optional
     already-known source URL: {"claim": str, "known_url": str | None}.
@@ -169,7 +224,7 @@ def _normalize_claim_entry(entry):
     return entry.get("claim", ""), entry.get("known_url")
 
 
-def resolve_citations(claims, citation_sources):
+def resolve_citations(claims, citation_sources, api_keys=None):
     """
     For each claim, resolve a primary source. If the claim entry carries a
     ``known_url`` (a source the fact-check model already supplied), that URL
@@ -177,6 +232,14 @@ def resolve_citations(claims, citation_sources):
     adapter is tried in order. Claims are resolved in parallel (bounded by
     _MAX_PARALLEL) because each one performs blocking network I/O — the
     source lookup plus a Wayback check.
+
+    After resolution, any resolved citation whose URL isn't yet archived is
+    submitted to Wayback's Save Page Now API for archiving (see
+    ``_submit_missing_archives``). Optional ``api_keys["archive_org"]``
+    (``{"access_key": ..., "secret_key": ...}``) authenticates those
+    submissions; without it, submission falls back to the unauthenticated
+    trigger endpoint.
+
     Returns a list of resolution results in the original claim order.
     """
     if not claims:
@@ -204,4 +267,6 @@ def resolve_citations(claims, citation_sources):
                     "note": f"Resolution error: {e}",
                 }
 
-    return [ordered[i] for i in range(len(normalized))]
+    resolved_results = [ordered[i] for i in range(len(normalized))]
+    _submit_missing_archives(resolved_results, (api_keys or {}).get("archive_org"))
+    return resolved_results

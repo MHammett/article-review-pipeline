@@ -274,3 +274,125 @@ class TestKnownUrlWaybackFallback:
 
         assert results[0]["resolved"] is False
         mock_wb.assert_not_called()
+
+
+class TestArchiveSubmission:
+    def _archived_wayback(self, url, timeout=10):
+        return {"archived": True}
+
+    def _unarchived_wayback(self, url, timeout=10):
+        return {"archived": False}
+
+    def test_submits_only_when_not_archived(self):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=self._unarchived_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ) as mock_submit,
+        ):
+            results = resolver.resolve_citations(["c"], _SOURCES)
+
+        mock_submit.assert_called_once()
+        assert mock_submit.call_args.args[0] == "https://x"
+        assert results[0]["wayback"]["submitted"] is True
+
+    def test_does_not_submit_when_already_archived(self):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=self._archived_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+            ) as mock_submit,
+        ):
+            results = resolver.resolve_citations(["c"], _SOURCES)
+
+        mock_submit.assert_not_called()
+        assert "submitted" not in results[0]["wayback"]
+
+    def test_submission_failure_does_not_raise_or_fail_resolution(self):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=self._unarchived_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                side_effect=RuntimeError("rate limited"),
+            ),
+        ):
+            results = resolver.resolve_citations(["c"], _SOURCES)
+
+        assert results[0]["resolved"] is True
+        assert results[0]["wayback"]["submitted"] is False
+        assert "rate limited" in results[0]["wayback"]["submission_error"]
+
+    def test_archive_org_credentials_passed_through(self):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=self._unarchived_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": "j1"},
+            ) as mock_submit,
+        ):
+            resolver.resolve_citations(
+                ["c"],
+                _SOURCES,
+                api_keys={"archive_org": {"access_key": "AK", "secret_key": "SK"}},
+            )
+
+        assert mock_submit.call_args.kwargs["access_key"] == "AK"
+        assert mock_submit.call_args.kwargs["secret_key"] == "SK"
+
+    def test_no_submission_when_unresolved(self):
+        def fake_resolve(claim, api_key=None):
+            return {"found": False}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+            ) as mock_submit,
+        ):
+            resolver.resolve_citations(["c"], _SOURCES)
+
+        mock_submit.assert_not_called()

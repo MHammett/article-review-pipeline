@@ -8,9 +8,12 @@ import requests
 
 from ci_core.http import DEFAULT_HEADERS
 
+from ... import redact
+
 log = logging.getLogger(__name__)
 
 _AVAILABILITY_API = "https://archive.org/wayback/available"
+_SAVE_API = "https://web.archive.org/save"
 _STALE_DAYS = (
     180  # default — overridden by pipeline.wayback_snapshot_stale_days in user.yaml
 )
@@ -106,6 +109,55 @@ def check(url, timeout=10, stale_days=None):
         "snapshot_stale": snapshot_age_days is not None
         and snapshot_age_days > stale_threshold,
     }
+
+
+def submit(url, timeout=30, access_key=None, secret_key=None):
+    """Request that archive.org capture and archive ``url`` (Save Page Now / SPN2).
+
+    Fire-and-forget by design: SPN2 captures run asynchronously on archive.org's
+    side and a real page capture can take anywhere from seconds to minutes. This
+    does not poll the job-status endpoint for completion — the pipeline should
+    not block on someone else's crawl. A later run's ``check()`` call will
+    naturally see the new snapshot once archive.org finishes it.
+
+    With ``access_key``/``secret_key`` (an archive.org S3-style API key pair,
+    from https://archive.org/account/s3.php), submission goes through the
+    authenticated SPN2 endpoint, which gets higher rate limits and returns a
+    job id. Without credentials, falls back to the unauthenticated capture
+    trigger (``GET /save/<url>``), which works but is subject to tighter,
+    unpredictable archive.org rate limits.
+
+    Returns a dict with:
+      url        str
+      submitted  bool  — True if archive.org accepted the request
+      job_id     str | None — SPN2 job id, only set for authenticated submission
+      error      str  — set only on failure
+    """
+    headers = dict(DEFAULT_HEADERS)
+    try:
+        if access_key and secret_key:
+            headers["Authorization"] = f"LOW {access_key}:{secret_key}"
+            resp = requests.post(
+                _SAVE_API,
+                data={"url": url},
+                headers=headers,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            return {"url": url, "submitted": True, "job_id": payload.get("job_id")}
+
+        resp = requests.get(
+            f"{_SAVE_API}/{url}",
+            headers=headers,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return {"url": url, "submitted": True, "job_id": None}
+    except Exception as exc:
+        err = redact.redact_value(redact.redact_url_keys(str(exc)), secret_key)
+        log.warning("Wayback submission failed for %s: %s", url, err)
+        return {"url": url, "submitted": False, "error": err}
 
 
 def format_summary(wb):
