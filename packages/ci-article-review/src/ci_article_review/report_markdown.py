@@ -253,6 +253,14 @@ def render_report_markdown(report):
         )
         lines.append("")
 
+    if report.get("truncated_results"):
+        lines.append(
+            "WARNING — truncated model responses (output-token ceiling hit; "
+            "some findings were recovered, some were lost): "
+            f"{', '.join(report['truncated_results'])}"
+        )
+        lines.append("")
+
     delta = report.get("delta")
     if delta:
         lines.append("## Delta From Prior Run")

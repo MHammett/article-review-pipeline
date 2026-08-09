@@ -23,16 +23,24 @@ stored in ``api_keys.mistral.api_key`` in user.yaml as usual; just point it
 to your Azure endpoint key.
 """
 
-import json
 import time
 import logging
 import requests
 
 from . import streaming
+from .json_utils import extract_json_with_salvage
 from ... import redact
 
 DEFAULT_MODEL = "mistral-large-latest"
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+
+# Mistral's chat-completions endpoint doesn't document a default `max_tokens`
+# when the param is omitted, but it's evidently well below the context window:
+# a live run against mistral-medium-3-5 was cut off mid-response at 23,511
+# completion tokens with no explicit cap set (elapsed 126s of a 624s budget —
+# not a stall, an output-length ceiling). Setting max_tokens explicitly gives
+# real headroom against the model's 128K+ context window.
+DEFAULT_MAX_TOKENS = 64000
 
 # Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
 _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
@@ -108,6 +116,7 @@ def call(
     # --- La Plateforme path with fallback chain ---
     requested_model = _resolve_model(model, cfg)
     reasoning_effort = cfg.get("reasoning_effort")
+    max_tokens = cfg.get("max_tokens", DEFAULT_MAX_TOKENS)
     models_to_try = [requested_model] + [
         m for m in _FALLBACK_MODELS if m != requested_model
     ]
@@ -122,6 +131,7 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens,
             timeout=timeout,
         )
         if not result.get("failed"):
@@ -159,6 +169,7 @@ def _call_laplateforme(
     retry=True,
     retry_delay=10,
     reasoning_effort=None,
+    max_tokens=None,
     timeout=None,
 ):
     return _execute_request(
@@ -170,6 +181,7 @@ def _call_laplateforme(
         retry=retry,
         retry_delay=retry_delay,
         reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
         timeout=timeout,
     )
 
@@ -208,6 +220,7 @@ def _call_azure(
         model=model_name,
         retry=retry,
         retry_delay=retry_delay,
+        max_tokens=cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
         timeout=timeout,
     )
     result["provider"] = "azure"
@@ -228,6 +241,7 @@ def _execute_request(
     retry,
     retry_delay,
     reasoning_effort=None,
+    max_tokens=None,
     timeout=None,
 ):
     if timeout is None:
@@ -246,6 +260,7 @@ def _execute_request(
             ],
             "stream": True,
             "stream_options": {"include_usage": True},
+            "max_tokens": max_tokens or DEFAULT_MAX_TOKENS,
         }
         if with_reasoning and reasoning_effort:
             # reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
@@ -359,26 +374,7 @@ def _execute_request(
     if not content:
         log.warning(f"Mistral {model} returned no text content after {elapsed}s")
 
-    def _try_parse_json(text):
-        """Try to parse JSON from text, stripping markdown fences if present."""
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        cleaned = text.strip()
-        # Strip leading markdown fences (```json or ```)
-        if "```" in cleaned:
-            import re
-
-            m = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", cleaned)
-            if m:
-                try:
-                    return json.loads(m.group(1).strip())
-                except json.JSONDecodeError:
-                    pass
-        return None
-
-    parsed = _try_parse_json(content)
+    parsed, truncated = extract_json_with_salvage(content)
     if parsed is None:
         log.warning(
             f"Mistral {model} returned non-JSON content after {elapsed}s: "
@@ -396,9 +392,16 @@ def _execute_request(
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(
-        f"Mistral {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
-    )
+    if truncated:
+        log.warning(
+            f"Mistral {model} response was truncated (likely hit the output-token "
+            f"ceiling — {usage.get('completion_tokens', '?')} completion tokens) after "
+            f"{elapsed}s; salvaged the complete elements, discarded the rest."
+        )
+    else:
+        log.debug(
+            f"Mistral {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
+        )
     result = {
         "failed": False,
         "data": parsed,
@@ -409,6 +412,11 @@ def _execute_request(
         },
         "elapsed_seconds": elapsed,
     }
+    if truncated:
+        # Not "failed" — the recovered findings are real — but flagged so
+        # downstream reporting can distinguish this from a clean response.
+        result["truncated"] = True
+        result["raw"] = content
     if misconfig_msg:
         result["misconfiguration_warning"] = misconfig_msg
     return result

@@ -854,7 +854,14 @@ def run_draft_pipeline(
         elapsed = result.get("elapsed_seconds")
         out_tokens = (result.get("tokens") or {}).get("completion")
         timed_out = "timed out" in str(result.get("error", "")).lower()
-        status = "ok" if status_ok else ("timeout" if timed_out else "failed")
+        truncated = bool(result.get("truncated"))
+        status = (
+            "ok"
+            if status_ok and not truncated
+            else "partial"
+            if status_ok and truncated
+            else ("timeout" if timed_out else "failed")
+        )
         headroom = (
             round(budget - elapsed, 1)
             if (budget is not None and elapsed is not None)
@@ -864,6 +871,7 @@ def run_draft_pipeline(
             "pass": f"{model_name}:{domain}",
             "model": f"{model_tag}{grounding}",
             "failed": not status_ok,
+            "truncated": truncated,
             "tokens": result.get("tokens", {}),
             "elapsed_seconds": elapsed,
             "error": result.get("error") if not status_ok else None,
@@ -874,7 +882,7 @@ def run_draft_pipeline(
             "char_count": char_count,
             "status": status,
         }
-        if not status_ok and result.get("raw"):
+        if (not status_ok or truncated) and result.get("raw"):
             log_entry["raw_excerpt"] = _raw_excerpt(result["raw"])
         if not status_ok and result.get("error_body"):
             # Adapters already redact/truncate this via redact.capture_error_body()
@@ -896,11 +904,21 @@ def run_draft_pipeline(
             status,
             headroom,
         )
-        if status_ok:
+        if status_ok and not truncated:
             log.info(
                 f"  {model_name}:{domain}: OK "
                 f"({result.get('elapsed_seconds', '?')}s, {model_tag}{grounding})"
             )
+        elif status_ok and truncated:
+            log.warning(
+                f"  {model_name}:{domain}: PARTIAL — response was truncated "
+                f"(output-token ceiling); some findings recovered, some lost"
+            )
+            if "raw_excerpt" in log_entry:
+                log.debug(
+                    f"  {model_name}:{domain}: raw response excerpt:\n"
+                    f"{log_entry['raw_excerpt']}"
+                )
         else:
             log.warning(
                 f"  {model_name}:{domain}: FAILED — {result.get('error', 'unknown error')}"
@@ -1263,7 +1281,13 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     if report.get("api_call_log"):
         print("\nAPI call times  (elapsed / budget — headroom shows timeout margin):")
         for entry in report["api_call_log"]:
-            status = "OK" if not entry["failed"] else "FAILED"
+            status = (
+                "PARTIAL"
+                if entry.get("truncated")
+                else "OK"
+                if not entry["failed"]
+                else "FAILED"
+            )
             elapsed = (
                 f"{entry['elapsed_seconds']}s"
                 if entry.get("elapsed_seconds") is not None
