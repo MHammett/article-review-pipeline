@@ -11,8 +11,8 @@ import sys
 
 # Reconfigure stdout/stderr to UTF-8 on Windows (default cp1252 breaks on non-ASCII report content)
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore
 
 # Version guard — must run before any other imports
 if sys.version_info < (3, 10):
