@@ -148,7 +148,9 @@ def parse_metadata_only(text):
     return results
 
 
-def build_handoff_from_raw_draft_and_metadata(draft_text, metadata_text, source_name="Untitled"):
+def build_handoff_from_raw_draft_and_metadata(
+    draft_text, metadata_text, source_name="Untitled"
+):
     """Combine a plain draft file with a separate metadata file into a full handoff dict.
 
     Lets the article body stay a single clean paste (no risk of a chat UI
