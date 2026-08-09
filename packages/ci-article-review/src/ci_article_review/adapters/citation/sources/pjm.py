@@ -8,6 +8,8 @@ and point at the right public page for manual retrieval.
 
 import logging
 
+from ..topic_match import topic_match
+
 log = logging.getLogger(__name__)
 
 PJM_TERMS = [
@@ -25,7 +27,7 @@ PJM_TERMS = [
 
 def resolve(claim, api_key=None):
     claim_lower = claim.lower()
-    if not any(t in claim_lower for t in PJM_TERMS):
+    if not topic_match(claim_lower, PJM_TERMS):
         return {"found": False}
 
     if (

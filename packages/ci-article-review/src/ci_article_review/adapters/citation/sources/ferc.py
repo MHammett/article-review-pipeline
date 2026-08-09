@@ -8,6 +8,8 @@ retrieval.
 
 import logging
 
+from ..topic_match import topic_match
+
 log = logging.getLogger(__name__)
 
 FERC_BASE = "https://elibrary.ferc.gov/eLibrary/search"
@@ -24,7 +26,7 @@ FERC_TERMS = [
 
 def resolve(claim, api_key=None):
     claim_lower = claim.lower()
-    if not any(t in claim_lower for t in FERC_TERMS):
+    if not topic_match(claim_lower, FERC_TERMS):
         return {"found": False}
 
     return {

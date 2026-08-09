@@ -198,15 +198,31 @@ def _render_section_9(citations):
         lines.append("_No citation resolution attempted._")
         return lines
 
-    resolved = [c for c in citations if c.get("resolved")]
+    verified = [c for c in citations if c.get("verification") == "checksum"]
+    pointer = [c for c in citations if c.get("verification") == "pointer"]
     unresolved = [c for c in citations if not c.get("resolved")]
 
-    lines.append(f"Resolved: {len(resolved)}/{len(citations)}")
+    lines.append(
+        f"{len(verified)} verified, {len(pointer)} pointer-only "
+        f"(not independently verified), {len(unresolved)} unresolved "
+        f"— {len(citations)} claim(s) total"
+    )
     lines.append("")
 
-    if resolved:
-        lines.append("### Resolved")
-        for c in resolved:
+    if verified:
+        lines.append("### Verified (checksummed against fetched content)")
+        for c in verified:
+            lines.append(f'- "{c.get("claim", "")}"')
+            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+                lines.append(kv)
+        lines.append("")
+
+    if pointer:
+        lines.append(
+            "### Pointer-only (topic-relevant source identified, NOT independently "
+            "verified — confirm manually before citing)"
+        )
+        for c in pointer:
             lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)

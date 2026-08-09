@@ -290,12 +290,50 @@ class TestSection9Citations:
             ]
         )
         md = render_report_markdown(report)
-        assert "### Resolved" in md
+        assert "### Verified" in md
         assert "### Unresolved" in md
         assert "The bridge cost $4 million." in md
         assert "https://example.gov/budget.pdf" in md
         assert "The plan was approved in 2021." in md
         assert "No configured source adapter could resolve this claim" in md
+
+    def test_verified_and_pointer_reported_distinctly(self):
+        """A checksum-verified fetch and a pointer-only match must not be
+        collapsed into one "resolved" bucket — see the bug this guards against:
+        both used to render under the same "### Resolved" heading with no way
+        to tell a verified claim from an unverified topic pointer.
+        """
+        report = _base_report(
+            section_9_citations=[
+                {
+                    "claim": "The bridge cost $4 million.",
+                    "resolved": True,
+                    "source_name": "County Budget",
+                    "url": "https://example.gov/budget.pdf",
+                    "verification": "checksum",
+                    "wayback": {"archived": True},
+                },
+                {
+                    "claim": "PJM's latest capacity auction cleared at a record price.",
+                    "resolved": True,
+                    "source_name": "pjm",
+                    "url": "https://www.pjm.com/markets-and-operations/rpm",
+                    "verification": "pointer",
+                    "wayback": {"archived": False},
+                },
+            ]
+        )
+        md = render_report_markdown(report)
+        assert "### Verified" in md
+        assert "### Pointer-only" in md
+        assert "not independently verified" in md.lower()
+
+        verified_section = md.split("### Verified")[1].split("### Pointer-only")[0]
+        pointer_section = md.split("### Pointer-only")[1]
+        assert "The bridge cost $4 million." in verified_section
+        assert "capacity auction" not in verified_section.lower()
+        assert "capacity auction" in pointer_section.lower()
+        assert "The bridge cost $4 million." not in pointer_section
 
 
 class TestEmptyReport:

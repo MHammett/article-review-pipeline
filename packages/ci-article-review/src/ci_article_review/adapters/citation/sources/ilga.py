@@ -9,6 +9,8 @@ right ilga.gov search for manual retrieval.
 import logging
 import re
 
+from ..topic_match import topic_match
+
 log = logging.getLogger(__name__)
 
 ILGA_BASE = "https://www.ilga.gov"
@@ -27,7 +29,7 @@ _BILL_RE = re.compile(r"\b([SH]B)\s?0*(\d{1,5})\b", re.IGNORECASE)
 
 def resolve(claim, api_key=None):
     claim_lower = claim.lower()
-    if not any(t in claim_lower for t in ILGA_TERMS):
+    if not topic_match(claim_lower, ILGA_TERMS):
         return {"found": False}
 
     pa_match = _PUBLIC_ACT_RE.search(claim)

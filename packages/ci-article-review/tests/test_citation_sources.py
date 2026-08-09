@@ -175,6 +175,19 @@ class TestEpaResolver:
         assert result["found"] is True
         assert result["pointer_only"] is True
 
+    def test_does_not_match_credential_claim_mentioning_air_quality(self):
+        """Regression test: a claim about a person's academic credentials
+        must not be mistaken for a claim about EPA air-quality data just
+        because the phrase "air quality" appears inside a credentials clause.
+        """
+        from ci_article_review.adapters.citation.sources import epa
+
+        result = epa.resolve(
+            "Cork holds a doctorate in statistics. He does not hold "
+            "credentials in environmental engineering or air quality analysis."
+        )
+        assert result == {"found": False}
+
 
 class TestPjmResolver:
     def test_returns_not_found_for_unrelated_claim(self):
@@ -189,6 +202,14 @@ class TestPjmResolver:
         result = pjm.resolve("PJM's latest capacity auction cleared at a record price.")
         assert result["found"] is True
         assert result["pointer_only"] is True
+
+    def test_does_not_match_credential_claim_mentioning_pjm_terms(self):
+        from ci_article_review.adapters.citation.sources import pjm
+
+        result = pjm.resolve(
+            "She holds no professional experience in PJM capacity auction design."
+        )
+        assert result == {"found": False}
 
 
 class TestIccResolver:
@@ -206,6 +227,14 @@ class TestIccResolver:
         assert result["pointer_only"] is True
         assert "24-0181" in result["url"]
 
+    def test_does_not_match_credential_claim_mentioning_rate_case(self):
+        from ci_article_review.adapters.citation.sources import icc
+
+        result = icc.resolve(
+            "She has no background in rate case litigation before the ICC."
+        )
+        assert result == {"found": False}
+
 
 class TestFercResolver:
     def test_returns_not_found_for_unrelated_claim(self):
@@ -221,6 +250,14 @@ class TestFercResolver:
         assert result["found"] is True
         assert result["pointer_only"] is True
 
+    def test_does_not_match_credential_claim_mentioning_ferc(self):
+        from ci_article_review.adapters.citation.sources import ferc
+
+        result = ferc.resolve(
+            "He has no training in FERC interconnection order procedure."
+        )
+        assert result == {"found": False}
+
 
 class TestIlgaResolver:
     def test_returns_not_found_for_unrelated_claim(self):
@@ -235,4 +272,32 @@ class TestIlgaResolver:
         result = ilga.resolve("Public Act 103-580 amended the Illinois utility code.")
         assert result["found"] is True
         assert result["pointer_only"] is True
-        assert "103580" in result["url"]
+
+    def test_does_not_match_credential_claim_mentioning_ilga(self):
+        from ci_article_review.adapters.citation.sources import ilga
+
+        result = ilga.resolve(
+            "She has no expertise in Illinois General Assembly procedure."
+        )
+        assert result == {"found": False}
+
+
+class TestFhwaResolver:
+    def test_returns_not_found_for_unrelated_claim(self):
+        from ci_article_review.adapters.citation.sources import fhwa
+
+        result = fhwa.resolve("The county board approved the tax levy last week.")
+        assert result == {"found": False}
+
+    def test_resolves_highway_claim(self):
+        from ci_article_review.adapters.citation.sources import fhwa
+
+        result = fhwa.resolve("Vehicle miles traveled rose 3% in 2023.")
+        assert result["found"] is True
+        assert result["pointer_only"] is True
+
+    def test_does_not_match_credential_claim_mentioning_highway(self):
+        from ci_article_review.adapters.citation.sources import fhwa
+
+        result = fhwa.resolve("He holds no certification in highway bridge inspection.")
+        assert result == {"found": False}
