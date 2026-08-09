@@ -1010,9 +1010,13 @@ def run_draft_pipeline(
     )
     if paths["report_path"]:
         log.info(f"Report saved: {paths['report_path']}")
+    if paths.get("markdown_path"):
+        log.info(f"Readable review: {paths['markdown_path']}")
 
     elapsed_total = round(time.monotonic() - t_start, 1)
-    _print_draft_summary(report, delta_cfg, elapsed_total)
+    _print_draft_summary(
+        report, delta_cfg, elapsed_total, markdown_path=paths.get("markdown_path")
+    )
 
     return report
 
@@ -1022,7 +1026,7 @@ def run_draft_pipeline(
 # ---------------------------------------------------------------------------
 
 
-def _print_draft_summary(report, delta_cfg, elapsed_total=None):
+def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=None):
     print("\n" + "=" * 60)
     print(f"REVIEW COMPLETE: {report['article_title']}")
     print(f"Run #{report['run_number']} — {report['generated']}")
@@ -1306,6 +1310,8 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None):
     print(
         f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/"
     )
+    if markdown_path:
+        print(f"Readable review (paste into chat): {markdown_path}")
     print("=" * 60)
 
 
