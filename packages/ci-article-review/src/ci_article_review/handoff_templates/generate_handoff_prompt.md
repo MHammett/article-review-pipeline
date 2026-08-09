@@ -165,3 +165,10 @@ re-pasted by the chat model at all, use the two-file variant described above
 instead: ask for everything up to (not including) the DRAFT section, save
 that alone as metadata.md (see metadata_only.md for the exact format), and
 pass your own already-in-hand draft file separately with --raw-draft.
+
+AFTER A REVIEW RUN: don't hand-patch the DRAFT section and call it done —
+PRIMARY CLAIM, SOURCES ALREADY CITED, UNCERTAIN SECTIONS, and KNOWN GAPS all
+feed the review models directly, so a stale UNCERTAIN SECTIONS or KNOWN GAPS
+entry after a revision keeps drawing scrutiny for something you already
+fixed. Use revise_after_review_prompt.md to have the chat model revise the
+draft and reconcile the metadata together, every round.
