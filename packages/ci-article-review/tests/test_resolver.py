@@ -1,5 +1,6 @@
 """Tests for adapters.citation.resolver — parallel resolution, ordering, pointer flag."""
 
+import json
 from unittest.mock import patch
 
 from ci_article_review.adapters.citation import resolver
@@ -10,6 +11,21 @@ _SOURCES = [{"name": "FRED", "adapter": "fred"}]
 
 def _no_wayback(url, timeout=10):
     return {"archived": None}
+
+
+def _write_report(root, slug, run_number, ts, citations):
+    d = root / slug
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"run_{run_number}_{ts.replace(':', '').replace('-', '')}_report.json"
+    report = {
+        "generated": ts,
+        "run_number": run_number,
+        "article_title": slug,
+        "section_9_citations": citations,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f)
+    return path
 
 
 class TestResolveCitations:
@@ -193,3 +209,193 @@ class TestResolveCitations:
 
         assert results[0]["resolved"] is True
         assert results[0]["source_name"] == "FRED"
+
+
+class TestContentDriftDetection:
+    """Cross-run checksum comparison: a URL resolved before, with a different
+    checksum now, should be flagged as content_changed_since."""
+
+    def test_same_url_same_checksum_no_drift(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [
+                {
+                    "claim": "old claim",
+                    "url": "https://example.com/data",
+                    "checksum": resolver.sha256_checksum("same content"),
+                    "resolved": True,
+                }
+            ],
+        )
+
+        def fake_resolve(claim, api_key=None):
+            return {
+                "found": True,
+                "url": "https://example.com/data",
+                "content": "same content",
+            }
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                ["new claim"], _SOURCES, history_root=str(tmp_path)
+            )
+
+        assert "content_changed_since" not in results[0]
+
+    def test_same_url_different_checksum_flags_drift(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            3,
+            "2026-01-01T00:00:00",
+            [
+                {
+                    "claim": "old claim",
+                    "url": "https://example.com/data",
+                    "checksum": resolver.sha256_checksum("old content"),
+                    "resolved": True,
+                }
+            ],
+        )
+
+        def fake_resolve(claim, api_key=None):
+            return {
+                "found": True,
+                "url": "https://example.com/data",
+                "content": "new content",
+            }
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                ["new claim"], _SOURCES, history_root=str(tmp_path)
+            )
+
+        drift = results[0]["content_changed_since"]
+        assert drift["prior_run"] == 3
+        assert drift["prior_article"] == "article-one"
+        assert drift["prior_date"] == "2026-01-01T00:00:00"
+        assert drift["prior_checksum"] == resolver.sha256_checksum("old content")
+
+    def test_never_before_seen_url_no_comparison(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [
+                {
+                    "claim": "old claim",
+                    "url": "https://example.com/unrelated",
+                    "checksum": resolver.sha256_checksum("whatever"),
+                    "resolved": True,
+                }
+            ],
+        )
+
+        def fake_resolve(claim, api_key=None):
+            return {
+                "found": True,
+                "url": "https://example.com/brand-new",
+                "content": "brand new content",
+            }
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                ["new claim"], _SOURCES, history_root=str(tmp_path)
+            )
+
+        assert results[0]["resolved"] is True
+        assert "content_changed_since" not in results[0]
+
+    def test_drift_detected_across_different_articles(self, tmp_path):
+        """The same source URL cited by a different article's prior run still
+        counts — sources get reused across articles for the same publication."""
+        _write_report(
+            tmp_path,
+            "some-other-article",
+            1,
+            "2026-01-01T00:00:00",
+            [
+                {
+                    "claim": "unrelated claim",
+                    "url": "https://example.com/shared-source",
+                    "checksum": resolver.sha256_checksum("v1"),
+                    "resolved": True,
+                }
+            ],
+        )
+
+        def fake_resolve(claim, api_key=None):
+            return {
+                "found": True,
+                "url": "https://example.com/shared-source",
+                "content": "v2",
+            }
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                ["new claim"], _SOURCES, history_root=str(tmp_path)
+            )
+
+        assert results[0]["content_changed_since"]["prior_article"] == (
+            "some-other-article"
+        )
+
+    def test_empty_history_root_no_crash(self, tmp_path):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                ["c"], _SOURCES, history_root=str(tmp_path / "does-not-exist")
+            )
+
+        assert "content_changed_since" not in results[0]

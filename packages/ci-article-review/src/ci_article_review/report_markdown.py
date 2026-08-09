@@ -204,11 +204,28 @@ def _render_section_9(citations):
     lines.append(f"Resolved: {len(resolved)}/{len(citations)}")
     lines.append("")
 
+    changed = [c for c in resolved if c.get("content_changed_since")]
+    if changed:
+        lines.append(f"### ⚠ Content changed since prior checksum ({len(changed)})")
+        for c in changed:
+            drift = c["content_changed_since"]
+            when = f" on {drift['prior_date']}" if drift.get("prior_date") else ""
+            lines.append(f'- "{c.get("claim", "")}"')
+            lines.append(f"  - URL: {c.get('url', '')}")
+            lines.append(
+                f"  - Last matched in run {drift.get('prior_run')} of "
+                f"'{drift.get('prior_article')}'{when} — content has since changed. "
+                "Previously-verified claim may need re-checking."
+            )
+        lines.append("")
+
     if resolved:
         lines.append("### Resolved")
         for c in resolved:
             lines.append(f'- "{c.get("claim", "")}"')
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+            for kv in _kv_lines(
+                c, exclude=("claim", "resolved", "content_changed_since")
+            ):
                 lines.append(kv)
         lines.append("")
 

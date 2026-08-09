@@ -984,7 +984,9 @@ def run_draft_pipeline(
                 )
                 claims.append({"claim": claim, "known_url": known_url})
         if claims:
-            citation_results = resolve_citations(claims, citation_sources)
+            citation_results = resolve_citations(
+                claims, citation_sources, history_root=HISTORY_ROOT
+            )
             resolved_count = sum(1 for r in citation_results if r.get("resolved"))
             log.info(
                 "Citations: %d claim(s), %d resolved to primary sources",
@@ -1335,6 +1337,29 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             print(
                 f"  {len(stale)} resolved URL(s) have a stale Wayback snapshot (>180 days)"
             )
+        changed = [c for c in resolved if c.get("content_changed_since")]
+        if changed:
+            print(f"\n{'!' * 60}")
+            print(
+                f"WARNING: {len(changed)} resolved source(s) have changed content "
+                "since a prior run checksummed them:"
+            )
+            for c in changed:
+                drift = c["content_changed_since"]
+                print(f"  {c.get('url')}")
+                print(
+                    f"    Last matched in run {drift.get('prior_run')} of "
+                    f"'{drift.get('prior_article')}'"
+                    + (
+                        f" on {drift.get('prior_date')}"
+                        if drift.get("prior_date")
+                        else ""
+                    )
+                )
+            print(
+                "Claims previously verified against these sources may need re-checking."
+            )
+            print("!" * 60)
 
     print(
         f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/"
