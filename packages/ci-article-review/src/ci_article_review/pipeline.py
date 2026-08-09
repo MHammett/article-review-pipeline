@@ -896,6 +896,15 @@ def run_draft_pipeline(
         sys.exit(1)
 
     prior_report = hist.load_prior_report(HISTORY_ROOT, article_title, run_number)
+    if prior_report is None and run_number > 1:
+        log.warning(
+            f"No prior report found for '{article_title}' at run {run_number - 1} — "
+            "continuity tracking (claim/structure delta, consensus-flag carryover) is "
+            "being skipped for this run, same as a first run. If this article was "
+            "actually reviewed before, check that the handoff's 'Article:' title "
+            "matches the prior run exactly and that 'Pipeline run:' was incremented "
+            "correctly from the previous round."
+        )
 
     # Tag ensemble config with thoroughness for the report
     ensemble_cfg_tagged = {**ensemble_cfg, "thoroughness": thoroughness}

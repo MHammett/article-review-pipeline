@@ -8,7 +8,9 @@ build_handoff_from_raw_draft_and_metadata, added alongside the --raw-draft /
 from ci_article_review.handoff_parser import (
     build_handoff_from_raw_draft_and_metadata,
     build_handoff_from_raw_text,
+    parse_draft_submission,
     parse_metadata_only,
+    parse_publication_handoff,
 )
 
 
@@ -198,3 +200,136 @@ class TestBuildHandoffFromRawDraftAndMetadata:
             draft_text, SAMPLE_METADATA, source_name="fallback"
         )
         assert handoff["title"] == "How Fiber Reaches Rural Towns"
+
+
+SAMPLE_DRAFT_SUBMISSION = """DRAFT SUBMISSION HANDOFF
+Generated: 2026-08-09
+Pipeline run: 2
+Article: Test Article
+Publication: mikehammett
+
+PRIMARY CLAIM
+Some claim.
+
+TARGET AUDIENCE
+General readers.
+
+PRE-DRAFT ANALYSIS SUMMARY
+Analysis here.
+
+SOURCES ALREADY CITED
+Source A, Source B.
+
+KNOWN GAPS
+This is the known gaps content.
+
+UNCERTAIN SECTIONS
+This is the uncertain sections content.
+
+ADDITIONAL CONTEXT FOR REVIEW MODELS
+Context here.
+
+DRAFT
+The actual article body.
+"""
+
+
+class TestParseDraftSubmission:
+    def test_parses_in_canonical_order(self):
+        result = parse_draft_submission(SAMPLE_DRAFT_SUBMISSION)
+        assert result["title"] == "Test Article"
+        assert result["known_gaps"] == "This is the known gaps content."
+        assert result["uncertain_sections"] == "This is the uncertain sections content."
+        assert result["draft"] == "The actual article body."
+
+    def test_swapped_known_gaps_and_uncertain_sections_dont_bleed(self):
+        # Regression test: KNOWN GAPS and UNCERTAIN SECTIONS swapped from
+        # canonical order (e.g. a chat model regenerating metadata per
+        # handoff_templates/revise_after_review_prompt.md). Before the fix,
+        # KNOWN GAPS's boundary regex only knew about canonically-later
+        # headers, so it skipped past the out-of-order UNCERTAIN SECTIONS
+        # header and swallowed it whole.
+        doc = SAMPLE_DRAFT_SUBMISSION.replace(
+            "KNOWN GAPS\nThis is the known gaps content.\n\n"
+            "UNCERTAIN SECTIONS\nThis is the uncertain sections content.\n\n",
+            "UNCERTAIN SECTIONS\nThis is the uncertain sections content.\n\n"
+            "KNOWN GAPS\nThis is the known gaps content.\n\n",
+        )
+        result = parse_draft_submission(doc)
+        assert result["known_gaps"] == "This is the known gaps content."
+        assert result["uncertain_sections"] == "This is the uncertain sections content."
+
+    def test_swapped_sources_cited_and_target_audience_dont_bleed(self):
+        doc = SAMPLE_DRAFT_SUBMISSION.replace(
+            "TARGET AUDIENCE\nGeneral readers.\n\n"
+            "PRE-DRAFT ANALYSIS SUMMARY\nAnalysis here.\n\n"
+            "SOURCES ALREADY CITED\nSource A, Source B.\n\n",
+            "SOURCES ALREADY CITED\nSource A, Source B.\n\n"
+            "TARGET AUDIENCE\nGeneral readers.\n\n"
+            "PRE-DRAFT ANALYSIS SUMMARY\nAnalysis here.\n\n",
+        )
+        result = parse_draft_submission(doc)
+        assert result["target_audience"] == "General readers."
+        assert result["pre_draft_analysis"] == "Analysis here."
+        assert result["sources_cited"] == "Source A, Source B."
+
+    def test_missing_sources_cited_debug_logs(self, caplog):
+        text = "Article: Some Title\n\nPRIMARY CLAIM\nThe claim.\n\nDRAFT\nBody.\n"
+        with caplog.at_level("DEBUG"):
+            result = parse_draft_submission(text)
+        assert result["sources_cited"] == ""
+        assert any(
+            "sources_cited" in r.message and r.levelname == "DEBUG"
+            for r in caplog.records
+        )
+
+    def test_missing_target_audience_debug_logs(self, caplog):
+        text = "Article: Some Title\n\nPRIMARY CLAIM\nThe claim.\n\nDRAFT\nBody.\n"
+        with caplog.at_level("DEBUG"):
+            result = parse_draft_submission(text)
+        assert result["target_audience"] == ""
+        assert any(
+            "target_audience" in r.message and r.levelname == "DEBUG"
+            for r in caplog.records
+        )
+
+
+SAMPLE_PUB_HANDOFF = """PUBLICATION HANDOFF
+Generated: 2026-08-09
+Article: Test Article
+Publication: mikehammett
+
+PUBLICATION PARAMETERS
+category: news
+
+SEO METADATA
+Focus keyword: fiber
+
+EMBEDS AND SPECIAL ELEMENTS
+An embedded chart.
+
+DISPOSITION LOG
+Approved by editor.
+
+FINAL DRAFT
+The final article body.
+"""
+
+
+class TestParsePublicationHandoff:
+    def test_parses_in_canonical_order(self):
+        result = parse_publication_handoff(SAMPLE_PUB_HANDOFF)
+        assert result["embeds"] == "An embedded chart."
+        assert result["disposition_log"] == "Approved by editor."
+        assert result["final_draft"] == "The final article body."
+
+    def test_swapped_embeds_and_disposition_log_dont_bleed(self):
+        doc = SAMPLE_PUB_HANDOFF.replace(
+            "EMBEDS AND SPECIAL ELEMENTS\nAn embedded chart.\n\n"
+            "DISPOSITION LOG\nApproved by editor.\n\n",
+            "DISPOSITION LOG\nApproved by editor.\n\n"
+            "EMBEDS AND SPECIAL ELEMENTS\nAn embedded chart.\n\n",
+        )
+        result = parse_publication_handoff(doc)
+        assert result["embeds"] == "An embedded chart."
+        assert result["disposition_log"] == "Approved by editor."
