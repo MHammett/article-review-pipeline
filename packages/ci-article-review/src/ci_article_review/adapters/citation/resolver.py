@@ -12,6 +12,12 @@ ADAPTER_MAP = {
     "fred": "ci_article_review.adapters.citation.sources.fred",
     "census": "ci_article_review.adapters.citation.sources.census",
     "fhwa": "ci_article_review.adapters.citation.sources.fhwa",
+    "crossref": "ci_article_review.adapters.citation.sources.crossref",
+    "epa": "ci_article_review.adapters.citation.sources.epa",
+    "pjm": "ci_article_review.adapters.citation.sources.pjm",
+    "icc": "ci_article_review.adapters.citation.sources.icc",
+    "ferc": "ci_article_review.adapters.citation.sources.ferc",
+    "ilga": "ci_article_review.adapters.citation.sources.ilga",
 }
 
 #: Bound on concurrent claim resolutions so we don't open dozens of sockets at once.
