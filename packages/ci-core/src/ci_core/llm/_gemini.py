@@ -7,17 +7,21 @@ from ._base import _with_retry
 
 _DEFAULT_MODEL = "gemini-1.5-pro"
 
+# ``as Client``/``as ClientError`` (same name) makes the binding re-exportable
+# and visible to mypy even though the import is inside a try block — mirrors
+# the pattern in _anthropic.py so ``patch("ci_core.llm._gemini.Client", ...)``
+# works the same way regardless of whether the SDK is installed.
 try:
-    from google import genai
-    from google.genai import errors as _genai_errors
-    from google.genai import types as _genai_types
+    from google.genai import Client as Client
+    from google.genai.errors import ClientError as ClientError
+    from google.genai.types import GenerateContentConfig as GenerateContentConfig
 
     _available = True
 except ImportError:
     _available = False
-    genai = None  # type: ignore[assignment]
-    _genai_errors = None  # type: ignore[assignment]
-    _genai_types = None  # type: ignore[assignment]
+    Client = None  # type: ignore[assignment,misc]
+    ClientError = None  # type: ignore[assignment,misc]
+    GenerateContentConfig = None  # type: ignore[assignment,misc]
 
 
 class _GeminiRateLimit(Exception):
@@ -57,7 +61,7 @@ class GeminiAdapter:
             raise RuntimeError(
                 "google-genai package not installed; pip install 'ci-core[gemini]'"
             )
-        self._client = genai.Client(api_key=config.api_key)  # type: ignore[union-attr]
+        self._client = Client(api_key=config.api_key)  # type: ignore[misc]
         self._model_name = config.model or _DEFAULT_MODEL
         self._config = config
         self._max_attempts = config.max_retries
@@ -76,7 +80,7 @@ class GeminiAdapter:
         entirely (passing an empty string can cause validation errors in some
         model versions).
         """
-        generation_config = _genai_types.GenerateContentConfig(  # type: ignore[union-attr]
+        generation_config = GenerateContentConfig(  # type: ignore[misc]
             system_instruction=system or None,
             temperature=temperature,
             max_output_tokens=max_tokens,
@@ -89,11 +93,11 @@ class GeminiAdapter:
                     contents=prompt,
                     config=generation_config,
                 )
-            except _genai_errors.ClientError as exc:  # type: ignore[union-attr]
+            except ClientError as exc:  # type: ignore[misc]
                 if exc.code == 429:
                     raise _GeminiRateLimit(str(exc)) from exc
                 raise
-            return response.text
+            return response.text or ""
 
         return await _with_retry(
             _call, max_attempts=self._max_attempts, rate_limit_excs=(_GeminiRateLimit,)

@@ -174,6 +174,30 @@ async def test_openai_adapter_complete():
 # ---------------------------------------------------------------------------
 
 
+# CI's ci-core job runs ``uv sync`` with no extras, so google-genai (an
+# optional dep, like anthropic/openai/mistralai) is absent there. These two
+# tests patch a flat module-level name (mirrors AsyncAnthropic/AsyncOpenAI)
+# so they don't need the real package importable. The two below that
+# exercise ``ClientError`` specifically do need it, so they're skipped when
+# it's not installed — same tradeoff CI already makes for the other
+# providers by never running their retry logic against real SDK exceptions.
+
+
+class _FakeGenerateContentConfig:
+    """Stand-in for ``google.genai.types.GenerateContentConfig``.
+
+    Only implements the kwargs ``_gemini.py`` actually passes, so these tests
+    don't need the real (optional) google-genai package installed.
+    """
+
+    def __init__(
+        self, *, system_instruction=None, temperature=None, max_output_tokens=None
+    ):
+        self.system_instruction = system_instruction
+        self.temperature = temperature
+        self.max_output_tokens = max_output_tokens
+
+
 def _make_gemini_response(text: str) -> MagicMock:
     resp = MagicMock()
     resp.text = text
@@ -190,7 +214,8 @@ async def test_gemini_adapter_complete():
 
     with (
         patch("ci_core.llm._gemini._available", True),
-        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.GenerateContentConfig", _FakeGenerateContentConfig),
     ):
         from ci_core.llm._gemini import GeminiAdapter
 
@@ -215,7 +240,8 @@ async def test_gemini_adapter_no_system():
 
     with (
         patch("ci_core.llm._gemini._available", True),
-        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.GenerateContentConfig", _FakeGenerateContentConfig),
     ):
         from ci_core.llm._gemini import GeminiAdapter
 
@@ -228,7 +254,7 @@ async def test_gemini_adapter_no_system():
 
 @pytest.mark.asyncio
 async def test_gemini_adapter_retries_on_rate_limit(monkeypatch):
-    from google.genai import errors as genai_errors
+    genai_errors = pytest.importorskip("google.genai.errors")
 
     monkeypatch.setattr("ci_core.llm._base.asyncio.sleep", AsyncMock())
     config = ProviderConfig(api_key="AIza-test", max_retries=3)
@@ -255,7 +281,8 @@ async def test_gemini_adapter_retries_on_rate_limit(monkeypatch):
 
     with (
         patch("ci_core.llm._gemini._available", True),
-        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.ClientError", genai_errors.ClientError),
     ):
         from ci_core.llm._gemini import GeminiAdapter
 
@@ -268,7 +295,7 @@ async def test_gemini_adapter_retries_on_rate_limit(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gemini_adapter_does_not_retry_non_rate_limit_client_error():
-    from google.genai import errors as genai_errors
+    genai_errors = pytest.importorskip("google.genai.errors")
 
     config = ProviderConfig(api_key="AIza-test", max_retries=3)
     mock_client = MagicMock()
@@ -280,7 +307,8 @@ async def test_gemini_adapter_does_not_retry_non_rate_limit_client_error():
 
     with (
         patch("ci_core.llm._gemini._available", True),
-        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.Client", return_value=mock_client),
+        patch("ci_core.llm._gemini.ClientError", genai_errors.ClientError),
     ):
         from ci_core.llm._gemini import GeminiAdapter
 
@@ -351,7 +379,7 @@ def test_factory_returns_gemini():
 
     with (
         patch("ci_core.llm._gemini._available", True),
-        patch("ci_core.llm._gemini.genai.Client"),
+        patch("ci_core.llm._gemini.Client"),
     ):
         adapter = AdapterFactory.get("gemini", llm_settings=settings)
 
