@@ -1005,7 +1005,9 @@ def run_draft_pipeline(
         log.info(f"Readable review: {paths['markdown_path']}")
 
     elapsed_total = round(time.monotonic() - t_start, 1)
-    _print_draft_summary(report, delta_cfg, elapsed_total, markdown_path=paths.get("markdown_path"))
+    _print_draft_summary(
+        report, delta_cfg, elapsed_total, markdown_path=paths.get("markdown_path")
+    )
 
     return report
 

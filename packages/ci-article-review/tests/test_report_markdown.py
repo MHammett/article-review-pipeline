@@ -61,7 +61,10 @@ class TestSection1Consensus:
             section_1_consensus=[
                 {
                     "passage": "Grande Reserve has approximately 2,200 planned homes",
-                    "models": ["mistral:argument_integrity", "openai:argument_integrity"],
+                    "models": [
+                        "mistral:argument_integrity",
+                        "openai:argument_integrity",
+                    ],
                     "weight_sum": 3.3,
                     "languagetool_also_flagged": False,
                     "flags": [

@@ -32,15 +32,26 @@ def _render_section_1(consensus_flags):
         passage = entry.get("passage", "")
         models = ", ".join(entry.get("models", []))
         weight = entry.get("weight_sum")
-        lt = " (LanguageTool also flagged)" if entry.get("languagetool_also_flagged") else ""
-        lines.append(f"### {i}. \"{passage}\"")
+        lt = (
+            " (LanguageTool also flagged)"
+            if entry.get("languagetool_also_flagged")
+            else ""
+        )
+        lines.append(f'### {i}. "{passage}"')
         lines.append(f"- Flagged by: {models} — weight {weight}{lt}")
         for flag in entry.get("flags", []):
             source = flag.get("source_model", "?")
             domain = flag.get("domain", "?")
             lines.append(f"  - **{source}:{domain}**")
             for kv in _kv_lines(
-                flag, exclude=("domain", "source_model", "type", "passage", "passage_reference")
+                flag,
+                exclude=(
+                    "domain",
+                    "source_model",
+                    "type",
+                    "passage",
+                    "passage_reference",
+                ),
             ):
                 lines.append(f"  {kv}")
         lines.append("")
@@ -67,7 +78,7 @@ def _render_section_2(fact_check):
         lines.append(f"### {label}")
         for item in items:
             claim = item.get("claim", "")
-            lines.append(f"- \"{claim}\"")
+            lines.append(f'- "{claim}"')
             for kv in _kv_lines(item, exclude=("claim",)):
                 lines.append(kv)
         lines.append("")
@@ -77,7 +88,7 @@ def _render_section_2(fact_check):
         lines.append("### Additional observations (fact-check pass)")
         for obs in observations:
             passage = obs.get("passage") or obs.get("observation", "")
-            lines.append(f"- \"{passage}\"")
+            lines.append(f'- "{passage}"')
             for kv in _kv_lines(obs, exclude=("passage",)):
                 lines.append(kv)
         lines.append("")
@@ -92,7 +103,7 @@ def _render_flags_section(title, flags, passage_key="passage"):
         return lines
     for flag in flags:
         passage = flag.get(passage_key, "")
-        lines.append(f"- \"{passage}\"")
+        lines.append(f'- "{passage}"')
         for kv in _kv_lines(flag, exclude=(passage_key,)):
             lines.append(kv)
     lines.append("")
@@ -100,7 +111,7 @@ def _render_flags_section(title, flags, passage_key="passage"):
 
 
 def _render_red_team_entry(label, item):
-    lines = [f"- **{label}**: \"{item.get('passage', '')}\""]
+    lines = [f'- **{label}**: "{item.get("passage", "")}"']
     for kv in _kv_lines(item, exclude=("passage",)):
         lines.append(kv)
     return lines
@@ -141,7 +152,11 @@ def _render_section_6(red_team):
 
 
 def _render_section_7(low_confidence):
-    lines = ["## SECTION 7: Low-Confidence Flags", "_For awareness only — dismiss unless something catches your attention._", ""]
+    lines = [
+        "## SECTION 7: Low-Confidence Flags",
+        "_For awareness only — dismiss unless something catches your attention._",
+        "",
+    ]
     if not low_confidence:
         lines.append("_None._")
         return lines
@@ -149,8 +164,10 @@ def _render_section_7(low_confidence):
         passage = item.get("passage") or item.get("passage_reference", "")
         source = item.get("source_model", "?")
         domain = item.get("domain", "?")
-        lines.append(f"> \"{passage}\" — {source}:{domain}")
-        for kv in _kv_lines(item, exclude=("passage", "passage_reference", "source_model", "domain")):
+        lines.append(f'> "{passage}" — {source}:{domain}')
+        for kv in _kv_lines(
+            item, exclude=("passage", "passage_reference", "source_model", "domain")
+        ):
             lines.append(f"> {kv.strip('- ')}")
     lines.append("")
     return lines
@@ -166,7 +183,7 @@ def _render_section_8(additional):
         category = obs.get("category", "?")
         source = obs.get("source_model", "?")
         domain = obs.get("source_domain", "?")
-        lines.append(f"- [{category}] \"{passage}\" — flagged by {source}:{domain}")
+        lines.append(f'- [{category}] "{passage}" — flagged by {source}:{domain}')
         for kv in _kv_lines(
             obs, exclude=("passage", "category", "source_model", "source_domain")
         ):
@@ -190,7 +207,7 @@ def _render_section_9(citations):
     if resolved:
         lines.append("### Resolved")
         for c in resolved:
-            lines.append(f"- \"{c.get('claim', '')}\"")
+            lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)
         lines.append("")
@@ -198,7 +215,7 @@ def _render_section_9(citations):
     if unresolved:
         lines.append("### Unresolved")
         for c in unresolved:
-            lines.append(f"- \"{c.get('claim', '')}\"")
+            lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)
         lines.append("")
@@ -231,7 +248,9 @@ def render_report_markdown(report):
     lines.append("")
 
     if report.get("model_failures"):
-        lines.append(f"WARNING — failed model passes: {', '.join(report['model_failures'])}")
+        lines.append(
+            f"WARNING — failed model passes: {', '.join(report['model_failures'])}"
+        )
         lines.append("")
 
     delta = report.get("delta")
@@ -254,7 +273,9 @@ def render_report_markdown(report):
     lines.extend(_render_section_1(report.get("section_1_consensus", [])))
     lines.extend(_render_section_2(report.get("section_2_fact_check", {})))
     lines.extend(
-        _render_flags_section("SECTION 3: Voice and AI-Speak", report.get("section_3_voice", []))
+        _render_flags_section(
+            "SECTION 3: Voice and AI-Speak", report.get("section_3_voice", [])
+        )
     )
     lines.extend(
         _render_flags_section(
