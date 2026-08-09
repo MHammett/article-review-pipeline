@@ -8,6 +8,8 @@ terms and point at the e-Docket search page for manual retrieval.
 import logging
 import re
 
+from ..topic_match import topic_match
+
 log = logging.getLogger(__name__)
 
 ICC_BASE = "https://icc.illinois.gov/docket/dockets.aspx"
@@ -28,7 +30,7 @@ _DOCKET_RE = re.compile(r"\b(\d{2}-\d{4})\b")
 
 def resolve(claim, api_key=None):
     claim_lower = f" {claim.lower()} "
-    if not any(t in claim_lower for t in ICC_TERMS):
+    if not topic_match(claim_lower, ICC_TERMS):
         return {"found": False}
 
     docket_match = _DOCKET_RE.search(claim)

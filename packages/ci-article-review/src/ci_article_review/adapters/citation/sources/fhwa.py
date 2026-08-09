@@ -2,6 +2,8 @@
 
 import logging
 
+from ..topic_match import topic_match
+
 FHWA_BASE = "https://www.fhwa.dot.gov/policyinformation/statistics"
 log = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ def resolve(claim, api_key=None):
         "motor fuel",
     ]
 
-    if not any(t in claim_lower for t in highway_terms):
+    if not topic_match(claim_lower, highway_terms):
         return {"found": False}
 
     year_match = _extract_year(claim)

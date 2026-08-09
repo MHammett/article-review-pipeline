@@ -10,6 +10,8 @@ at that program's public data portal for manual retrieval.
 
 import logging
 
+from ..topic_match import topic_match
+
 log = logging.getLogger(__name__)
 
 # Ordered so the first (most specific) category to match wins — e.g. a PFAS
@@ -84,7 +86,7 @@ def resolve(claim, api_key=None):
     claim_lower = f" {claim.lower()} "
 
     for program, terms, url in _CATEGORIES:
-        if any(t in claim_lower for t in terms):
+        if topic_match(claim_lower, terms):
             return {
                 "found": True,
                 "pointer_only": True,
@@ -93,7 +95,7 @@ def resolve(claim, api_key=None):
                 "content": f"EPA source pointer ({program}) for: {claim[:200]}",
             }
 
-    if any(t in claim_lower for t in _GENERIC_TERMS):
+    if topic_match(claim_lower, _GENERIC_TERMS):
         url = "https://enviro.epa.gov/"
         return {
             "found": True,
