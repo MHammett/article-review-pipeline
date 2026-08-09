@@ -1094,9 +1094,9 @@ class TestGemini:
 
         assert result["failed"] is True
         error_text = " ".join(r.message for r in caplog.records)
-        assert (
-            "fact-check" not in error_text.lower()
-        ), f"log message names a specific domain the adapter doesn't know: {error_text!r}"
+        assert "fact-check" not in error_text.lower(), (
+            f"log message names a specific domain the adapter doesn't know: {error_text!r}"
+        )
         assert "stream_read_timeout" in error_text, (
             f"log message should point at stream_read_timeout (the actual read-gap "
             f"control), not timeout_seconds: {error_text!r}"
@@ -2434,9 +2434,9 @@ class TestStreamingTimeoutAcrossAdapters:
         kwargs = sess.post.call_args.kwargs
         assert kwargs.get("stream") is True, f"{module_name} did not pass stream=True"
         timeout = kwargs.get("timeout")
-        assert (
-            isinstance(timeout, tuple) and len(timeout) == 2
-        ), f"{module_name} must pass a (connect, read) tuple under streaming — got {timeout!r}"
+        assert isinstance(timeout, tuple) and len(timeout) == 2, (
+            f"{module_name} must pass a (connect, read) tuple under streaming — got {timeout!r}"
+        )
         read_gap = timeout[1]
         assert read_gap == _DEFAULT_READ_GAPS[module_name], (
             f"{module_name} read-gap should be the constant "
@@ -2474,6 +2474,6 @@ class TestStreamingTimeoutAcrossAdapters:
                 provider_config={"model": model, "stream_read_timeout": 222},
             )
         timeout = sess.post.call_args.kwargs.get("timeout")
-        assert (
-            timeout[1] == 222
-        ), f"{module_name} ignored stream_read_timeout override — got {timeout[1]!r} (expected 222)"
+        assert timeout[1] == 222, (
+            f"{module_name} ignored stream_read_timeout override — got {timeout[1]!r} (expected 222)"
+        )
