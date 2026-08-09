@@ -46,3 +46,26 @@ def truncate_excerpt(text, head=2000, tail=500):
         return text
     omitted = len(text) - head - tail
     return f"{text[:head]}\n...[{omitted} chars omitted]...\n{text[-tail:]}"
+
+
+def capture_error_body(exc):
+    """Return a redacted, truncated excerpt of an HTTP error response body.
+
+    ``raise_for_status()`` raises with only the bare status line (e.g. "401
+    Client Error: Unauthorized for url: ..."), never the response body — so a
+    401 gives no way to tell an invalid key from a revoked one, insufficient
+    credits, or a suspended account. Most providers put that distinction in
+    the JSON error body. ``exc`` is expected to be a ``requests.HTTPError``
+    (or anything else carrying a ``.response``); returns "" if no body is
+    available, e.g. a ``Timeout``/``ConnectionError`` with no response.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return ""
+    try:
+        text = resp.text
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    return truncate_excerpt(redact_url_keys(text))

@@ -27,6 +27,28 @@ def _sse_mock(lines, status=200):
     return mock
 
 
+def _error_mock(status, body_text):
+    """A mock response whose raise_for_status() raises HTTPError with a body.
+
+    Mirrors what ``requests`` does for a real 4xx/5xx: the response object is
+    attached to the exception via ``.response`` (still readable via ``.text``
+    since nothing has consumed the stream yet), and ``raise_for_status()``'s own
+    message is just the bare status line — the body only comes from ``.text``.
+    """
+    mock = MagicMock()
+    mock.status_code = status
+    mock.text = body_text
+    mock.close = MagicMock()
+
+    def _raise():
+        raise requests.exceptions.HTTPError(
+            f"{status} Client Error: for url: https://example.invalid", response=mock
+        )
+
+    mock.raise_for_status.side_effect = _raise
+    return mock
+
+
 def _split(text, n=3):
     """Split text into roughly n non-empty chunks to exercise delta accumulation."""
     if not text:
@@ -588,6 +610,33 @@ class TestOpenAI:
         ] or "responses" in mock_session.post.call_args.kwargs.get("url", "")
         assert mock_session.post.call_args.kwargs["json"]["stream"] is True
 
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line. OpenAI's error body says which of
+        # invalid/revoked/insufficient-quota/suspended actually caused the 401.
+        from ci_article_review.adapters.review import openai as oai
+
+        body_text = json.dumps(
+            {
+                "error": {
+                    "message": "You exceeded your current quota",
+                    "code": "insufficient_quota",
+                }
+            }
+        )
+        with patch(
+            "ci_article_review.adapters.review.openai.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = oai.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "You exceeded your current quota" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "You exceeded your current quota" in error_text
+
 
 # ---------------------------------------------------------------------------
 # Mistral adapter
@@ -675,6 +724,26 @@ class TestMistral:
             result = mistral.call("system", "user", "key", retry=False)
         assert result["failed"] is True
         assert "elapsed_seconds" in result
+
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line. Mistral's error body carries the
+        # actual reason (invalid key, revoked, suspended, etc.).
+        from ci_article_review.adapters.review import mistral
+
+        body_text = json.dumps({"message": "Unauthorized", "request_id": "abc123"})
+        with patch(
+            "ci_article_review.adapters.review.mistral.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = mistral.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "Unauthorized" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "Unauthorized" in error_text
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +970,37 @@ class TestGemini:
             "default — see the 205.78s live timeout this regresses against."
         )
 
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line for both the grounded and (after
+        # retrying without grounding) plain payload attempts. Gemini's error
+        # body carries the real reason (invalid key, revoked, suspended, etc.).
+        from ci_article_review.adapters.review import gemini
+
+        body_text = json.dumps(
+            {
+                "error": {
+                    "code": 401,
+                    "message": "API key not valid",
+                    "status": "UNAUTHENTICATED",
+                }
+            }
+        )
+        with patch(
+            "ci_article_review.adapters.review.gemini.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = gemini.call(
+                    "system", "user", "sk-test-fakesecret12345", retry=False
+                )
+        assert result["failed"] is True
+        assert "API key not valid" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "API key not valid" in error_text
+
 
 # ---------------------------------------------------------------------------
 # Grok adapter
@@ -975,6 +1075,37 @@ class TestGrok:
             mock_session.post.return_value = self._mock_response(content)
             result = grok.call("system", "user", "key", model="grok-2-latest")
         assert result["model"] == "grok-2-latest"
+
+    def test_401_captures_response_body(self, caplog):
+        # raise_for_status() alone only gives the bare status line ("401 Client
+        # Error: Unauthorized"), which can't distinguish an invalid key from a
+        # revoked one, insufficient credits, or a suspended account. The provider's
+        # JSON body carries that distinction — it must show up in the log and in
+        # the returned failure dict, not just the status line.
+        from ci_article_review.adapters.review import grok
+
+        body_text = json.dumps(
+            {
+                "error": {
+                    "message": "Incorrect API key provided",
+                    "code": "invalid_api_key",
+                }
+            }
+        )
+        with patch(
+            "ci_article_review.adapters.review.grok.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = grok.call(
+                    "system", "user", "sk-test-fakesecret12345", retry=False
+                )
+        assert result["failed"] is True
+        assert "Incorrect API key provided" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "Incorrect API key provided" in error_text
 
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1240,36 @@ class TestClaude:
             mock_session.post.return_value = self._mock_response(content)
             result = claude.call("system", "user", "key", model="claude-sonnet-4-5")
         assert result["model"] == "claude-sonnet-4-5"
+
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line, not the reason. Anthropic's error body
+        # distinguishes an invalid key from other causes of a 401.
+        from ci_article_review.adapters.review import claude
+
+        body_text = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "invalid x-api-key",
+                },
+            }
+        )
+        with patch(
+            "ci_article_review.adapters.review.claude.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = claude.call(
+                    "system", "user", "sk-test-fakesecret12345", retry=False
+                )
+        assert result["failed"] is True
+        assert "invalid x-api-key" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "invalid x-api-key" in error_text
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1513,31 @@ class TestPerplexityStreamFailures:
             result["raw"] == "This is prose with no JSON payload anywhere in it at all."
         )
         assert result["tokens"] == {"prompt_tokens": 50, "completion_tokens": 20}
+
+    def test_401_captures_response_body(self, caplog):
+        # Live occurrence (2026-08-09): Perplexity started returning 401 with no
+        # code changes on our side. raise_for_status() alone gives only "401
+        # Client Error: Unauthorized", which can't distinguish an invalid key
+        # from a revoked one, insufficient credits, or a suspended account —
+        # the provider's JSON body carries that distinction and must be
+        # captured, not just the bare status line.
+        from ci_article_review.adapters.review import perplexity
+
+        body_text = json.dumps(
+            {"error": {"message": "Invalid API key", "type": "invalid_request_error"}}
+        )
+        with patch(
+            "ci_article_review.adapters.review.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "Invalid API key" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "Invalid API key" in error_text
 
 
 # ---------------------------------------------------------------------------

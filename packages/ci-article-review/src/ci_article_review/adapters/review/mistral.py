@@ -29,6 +29,7 @@ import logging
 import requests
 
 from . import streaming
+from ... import redact
 
 DEFAULT_MODEL = "mistral-large-latest"
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -278,7 +279,7 @@ def _execute_request(
         assembled = _post(_build_payload(True))
     except requests.HTTPError as e:
         elapsed = round(time.monotonic() - t0, 2)
-        body = e.response.text[:400] if e.response is not None else ""
+        body = redact.capture_error_body(e)
         # If the model rejected reasoning_effort, retry without it so the pass still runs.
         # This is a MISCONFIGURATION: the preset specifies a Magistral model but user.yaml
         # overrides it with a standard Mistral model. Fix by not overriding the Mistral model
@@ -295,7 +296,7 @@ def _execute_request(
                 assembled = _post(_build_payload(False))
             except requests.HTTPError as e2:
                 elapsed = round(time.monotonic() - t0, 2)
-                body2 = e2.response.text[:400] if e2.response is not None else ""
+                body2 = redact.capture_error_body(e2)
                 log.error(
                     f"Mistral {model} fallback call failed after {elapsed}s: {e2} | {body2}"
                 )

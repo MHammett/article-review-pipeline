@@ -31,6 +31,7 @@ import logging
 import requests
 
 from . import streaming
+from ... import redact
 from .json_utils import extract_json as _extract_json
 
 DEFAULT_MODEL = "gemini-2.5-flash"
@@ -413,9 +414,7 @@ def _execute_request(
             "elapsed_seconds": elapsed,
         }
     except requests.HTTPError as e:
-        body = _redact_key(
-            e.response.text[:400] if e.response is not None else "", api_key
-        )
+        body = _redact_key(redact.capture_error_body(e), api_key)
         safe_err = _redact_key(e, api_key)
         log.warning(
             f"Gemini {model} with search grounding failed: {safe_err} | {body}. "
@@ -426,9 +425,7 @@ def _execute_request(
             assembled = _post(payload_plain)
         except requests.HTTPError as e2:
             elapsed = round(time.monotonic() - t0, 2)
-            body2 = _redact_key(
-                e2.response.text[:400] if e2.response is not None else "", api_key
-            )
+            body2 = _redact_key(redact.capture_error_body(e2), api_key)
             safe_err2 = _redact_key(e2, api_key)
             log.error(
                 f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2} | {body2}"
@@ -437,6 +434,7 @@ def _execute_request(
             return {
                 "failed": True,
                 "error": safe_err2,
+                "error_body": body2,
                 "raw": None,
                 "model": model,
                 "tokens": {},
@@ -446,6 +444,7 @@ def _execute_request(
         except Exception as e2:
             elapsed = round(time.monotonic() - t0, 2)
             safe_err2 = _redact_key(e2, api_key)
+            error_body2 = _redact_key(redact.capture_error_body(e2), api_key)
             log.error(
                 f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2}"
             )
@@ -453,6 +452,7 @@ def _execute_request(
             return {
                 "failed": True,
                 "error": safe_err2,
+                "error_body": error_body2,
                 "raw": None,
                 "model": model,
                 "tokens": {},
@@ -471,6 +471,7 @@ def _execute_request(
         except Exception as e2:
             elapsed = round(time.monotonic() - t0, 2)
             safe_err2 = _redact_key(e2, api_key)
+            error_body2 = _redact_key(redact.capture_error_body(e2), api_key)
             log.error(
                 f"Gemini {model} call failed entirely after {elapsed}s: {safe_err2}"
             )
@@ -478,6 +479,7 @@ def _execute_request(
             return {
                 "failed": True,
                 "error": safe_err2,
+                "error_body": error_body2,
                 "raw": None,
                 "model": model,
                 "tokens": {},
