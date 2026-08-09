@@ -11,8 +11,8 @@ import sys
 
 # Reconfigure stdout/stderr to UTF-8 on Windows (default cp1252 breaks on non-ASCII report content)
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr,attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr,attr-defined]
 
 # Version guard — must run before any other imports
 if sys.version_info < (3, 10):
@@ -984,7 +984,7 @@ def run_draft_pipeline(
                 )
                 claims.append({"claim": claim, "known_url": known_url})
         if claims:
-            citation_results = resolve_citations(claims, citation_sources)
+            citation_results = resolve_citations(claims, citation_sources, api_keys)
             resolved_count = sum(1 for r in citation_results if r.get("resolved"))
             log.info(
                 "Citations: %d claim(s), %d resolved to primary sources",
@@ -1325,11 +1325,34 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         not_archived = [
             c for c in resolved if c.get("wayback", {}).get("archived") is False
         ]
+        submitted = [c for c in not_archived if c.get("wayback", {}).get("submitted")]
+        submission_failed = [
+            c
+            for c in not_archived
+            if c.get("wayback", {}).get("submitted") is False
+            and c.get("wayback", {}).get("submission_error")
+        ]
         stale = [c for c in resolved if c.get("wayback", {}).get("snapshot_stale")]
         print(f"\nSection 9 — Citations: {len(resolved)}/{len(citations)} resolved")
-        if not_archived:
+        if submitted:
             print(
-                f"  {len(not_archived)} resolved URL(s) not yet archived in Wayback Machine"
+                f"  {len(submitted)} resolved URL(s) submitted for archiving "
+                "(check back later — archive.org processes asynchronously)"
+            )
+        if submission_failed:
+            print(
+                f"  {len(submission_failed)} resolved URL(s) failed Wayback submission "
+                "— still not archived"
+            )
+        not_attempted = [
+            c
+            for c in not_archived
+            if not c.get("wayback", {}).get("submitted")
+            and not c.get("wayback", {}).get("submission_error")
+        ]
+        if not_attempted:
+            print(
+                f"  {len(not_attempted)} resolved URL(s) not archived in Wayback Machine"
             )
         if stale:
             print(

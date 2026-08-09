@@ -182,3 +182,59 @@ class TestWaybackCheck:
         summary = wayback.format_summary(wb)
         assert "30d" in summary
         assert "[STALE]" not in summary
+
+
+class TestWaybackSubmit:
+    def test_unauthenticated_submit_success(self):
+        resp = _mock_response({})
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=resp,
+        ) as mock_get:
+            result = wayback.submit("https://example.com")
+        assert result["submitted"] is True
+        assert result["job_id"] is None
+        # No credentials given — falls back to the unauthenticated trigger endpoint.
+        mock_get.assert_called_once()
+        assert (
+            "https://web.archive.org/save/https://example.com"
+            in mock_get.call_args[0][0]
+        )
+
+    def test_authenticated_submit_success(self):
+        resp = _mock_response({"job_id": "spn2-abc123"})
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.post",
+            return_value=resp,
+        ) as mock_post:
+            result = wayback.submit(
+                "https://example.com",
+                access_key="AK123",
+                secret_key="SK456",
+            )
+        assert result["submitted"] is True
+        assert result["job_id"] == "spn2-abc123"
+        headers = mock_post.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "LOW AK123:SK456"
+
+    def test_submit_failure_does_not_raise(self):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            side_effect=Exception("rate limited"),
+        ):
+            result = wayback.submit("https://example.com")
+        assert result["submitted"] is False
+        assert "rate limited" in result["error"]
+
+    def test_submit_authenticated_failure_redacts_secret(self):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.post",
+            side_effect=Exception("auth failed for SK456"),
+        ):
+            result = wayback.submit(
+                "https://example.com",
+                access_key="AK123",
+                secret_key="SK456",
+            )
+        assert result["submitted"] is False
+        assert "SK456" not in result["error"]
