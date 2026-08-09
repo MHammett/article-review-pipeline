@@ -175,6 +175,186 @@ class TestResolveCitations:
         assert results[0]["resolved"] is False
         assert "note" in results[0]
 
+    def test_no_api_keys_skips_relevance_check(self):
+        """Without a mistral API key, the relevance check is skipped and the
+        citation degrades to the pre-existing (unverified-relevance) behavior
+        rather than blocking resolution."""
+        mock_resp = type(
+            "R", (), {"raise_for_status": lambda self: None, "text": "page content"}
+        )()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call"
+            ) as mock_mistral,
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+
+        mock_mistral.assert_not_called()
+        assert results[0]["resolved"] is True
+        assert results[0]["verification"] == "checksum"
+        assert "relevance_check" in results[0]
+
+    def test_relevance_check_supports_claim_stays_checksum_verified(self):
+        mock_resp = type(
+            "R", (), {"raise_for_status": lambda self: None, "text": "page content"}
+        )()
+        call_log = []
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call",
+                return_value={
+                    "failed": False,
+                    "data": {"verdict": "supports", "reason": "matches"},
+                    "model": "mistral-small-latest",
+                    "tokens": {"prompt": 10, "completion": 5},
+                    "elapsed_seconds": 0.2,
+                },
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+                verification_call_log=call_log,
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["verification"] == "checksum"
+        assert results[0]["relevance_verdict"] == "supports"
+        assert len(call_log) == 1
+        assert call_log[0]["failed"] is False
+        assert call_log[0]["model"] == "mistral-small-latest"
+
+    def test_relevance_check_contradicts_downgrades_citation(self):
+        mock_resp = type(
+            "R", (), {"raise_for_status": lambda self: None, "text": "page content"}
+        )()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call",
+                return_value={
+                    "failed": False,
+                    "data": {
+                        "verdict": "not_addressed",
+                        "reason": "page never mentions this",
+                    },
+                    "model": "mistral-small-latest",
+                    "tokens": {"prompt": 10, "completion": 5},
+                    "elapsed_seconds": 0.2,
+                },
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+            )
+
+        assert results[0]["resolved"] is False
+        assert results[0]["verification"] != "checksum"
+        assert "note" in results[0]
+
+    def test_relevance_check_call_failure_degrades_gracefully(self):
+        """The verification call itself failing (rate limit, timeout, etc.)
+        must not crash resolution or block the citation — it degrades back
+        to the pre-existing unverified-relevance behavior with a note."""
+        mock_resp = type(
+            "R", (), {"raise_for_status": lambda self: None, "text": "page content"}
+        )()
+        call_log = []
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call",
+                return_value={
+                    "failed": True,
+                    "error": "rate limited",
+                    "model": "mistral-small-latest",
+                    "tokens": {},
+                    "elapsed_seconds": 0.1,
+                },
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+                verification_call_log=call_log,
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["verification"] == "checksum"
+        assert "relevance_check" in results[0]
+        assert len(call_log) == 1
+        assert call_log[0]["failed"] is True
+
+    def test_relevance_check_exception_does_not_crash_resolution(self):
+        mock_resp = type(
+            "R", (), {"raise_for_status": lambda self: None, "text": "page content"}
+        )()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["verification"] == "checksum"
+        assert "relevance_check" in results[0]
+
     def test_dict_entry_without_known_url_uses_adapter_loop(self):
         def fake_resolve(claim, api_key=None):
             return {"found": True, "url": "https://x", "content": "data"}

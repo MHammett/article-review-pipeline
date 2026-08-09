@@ -7,9 +7,31 @@ import requests
 
 from ci_core.http import DEFAULT_HEADERS
 
+from ... import redact
+from ..review import mistral
 from . import wayback
 
 log = logging.getLogger(__name__)
+
+#: Verdicts that pass content-relevance verification; anything else downgrades
+#: the citation instead of letting it through at checksum-level confidence.
+_SUPPORTING_VERDICTS = {"supports"}
+_KNOWN_VERDICTS = {"supports", "contradicts", "not_addressed", "inconclusive"}
+
+#: Cheap/fast model used for the relevance check — this runs once per known_url
+#: citation, so it deliberately avoids a heavyweight reasoning model.
+_VERIFICATION_MODEL = "mistral-small-latest"
+
+_VERIFICATION_SYSTEM_PROMPT = (
+    "You verify whether a web page's content supports a specific factual claim. "
+    "Respond with ONLY a JSON object of the form "
+    '{"verdict": "supports" | "contradicts" | "not_addressed" | "inconclusive", '
+    '"reason": "<one sentence>"}. '
+    '"supports" means the page content directly backs the claim. "contradicts" means '
+    'the page says something that conflicts with the claim. "not_addressed" means the '
+    'page does not discuss this claim at all. "inconclusive" means the page is related '
+    "but too ambiguous to judge either way."
+)
 
 ADAPTER_MAP = {
     "eia": "ci_article_review.adapters.citation.sources.eia",
@@ -66,7 +88,76 @@ def _wayback_fallback_content(url, timeout):
     return snapshot_url, resp.text
 
 
-def _resolve_known_url(claim, known_url, timeout=15):
+def _verify_relevance(claim, content, api_keys):
+    """Ask a cheap/fast model whether ``content`` actually supports ``claim``.
+
+    ``known_url`` citations often come from an ungrounded model recalling a
+    URL from training data rather than a live search — the URL loading is not
+    evidence the page says what the claim says. This makes a real check.
+
+    Returns ``(verdict_info, call_log_entry)``. ``verdict_info`` is
+    ``{"checked": False, "reason": str}`` when the check couldn't run (no
+    credentials, call failure, unparseable verdict) or
+    ``{"checked": True, "verdict": str, "reason": str}`` on success.
+    ``call_log_entry`` is a cost-tracking dict (same shape as pipeline.py's
+    ``api_call_log`` entries) when a call was actually attempted, else None.
+    Never raises — a failure here must degrade to the pre-existing unverified
+    behavior, not crash citation resolution.
+    """
+    api_key = ((api_keys or {}).get("mistral") or {}).get("api_key", "")
+    if not api_key:
+        return {
+            "checked": False,
+            "reason": "relevance check skipped: no mistral API key configured",
+        }, None
+
+    excerpt = redact.truncate_excerpt(content, head=4000, tail=1000)
+    user_prompt = f'Claim: "{claim}"\n\nPage content:\n{excerpt}'
+
+    try:
+        result = mistral.call(
+            _VERIFICATION_SYSTEM_PROMPT,
+            user_prompt,
+            api_key,
+            model=_VERIFICATION_MODEL,
+        )
+    except Exception as e:
+        log.warning(
+            f"Citation relevance verification raised for claim '{claim[:50]}': {e}"
+        )
+        return {"checked": False, "reason": f"relevance check failed: {e}"}, None
+
+    call_log_entry = {
+        "pass": "citation_verification:known_url",
+        "model": result.get("model", _VERIFICATION_MODEL),
+        "failed": bool(result.get("failed")),
+        "tokens": result.get("tokens", {}),
+        "elapsed_seconds": result.get("elapsed_seconds"),
+        "error": result.get("error") if result.get("failed") else None,
+    }
+
+    if result.get("failed"):
+        return {
+            "checked": False,
+            "reason": f"relevance check call failed: {result.get('error', 'unknown error')}",
+        }, call_log_entry
+
+    data = result.get("data") or {}
+    verdict = str(data.get("verdict", "")).strip().lower()
+    if verdict not in _KNOWN_VERDICTS:
+        return {
+            "checked": False,
+            "reason": f"relevance check returned an unrecognized verdict: {verdict!r}",
+        }, call_log_entry
+
+    return {
+        "checked": True,
+        "verdict": verdict,
+        "reason": data.get("reason", ""),
+    }, call_log_entry
+
+
+def _resolve_known_url(claim, known_url, api_keys=None, call_log=None, timeout=15):
     """Resolve a claim whose source URL is already known (e.g. supplied by the
     fact-check model itself), bypassing the narrow adapter matching entirely.
 
@@ -74,6 +165,11 @@ def _resolve_known_url(claim, known_url, timeout=15):
     scoping) triggers a single fallback attempt against a Wayback snapshot of
     the same URL, so a claim isn't reported unresolved just because the origin
     site blocks automated fetches.
+
+    After a successful fetch, the content is passed through
+    ``_verify_relevance`` before the citation is allowed to carry the
+    strongest "checksum" verification tier — see that function's docstring
+    for why a loaded URL alone isn't proof the claim is supported.
     """
     verified_via = "direct"
     try:
@@ -105,7 +201,7 @@ def _resolve_known_url(claim, known_url, timeout=15):
         }
 
     wb = wayback.check(known_url)
-    return {
+    result = {
         "claim": claim,
         "source_name": "fact-check model",
         "url": known_url,
@@ -117,8 +213,35 @@ def _resolve_known_url(claim, known_url, timeout=15):
         "wayback": wb,
     }
 
+    verdict_info, verification_call_log = _verify_relevance(claim, content, api_keys)
+    if call_log is not None and verification_call_log is not None:
+        call_log.append(verification_call_log)
 
-def _resolve_one(claim, citation_sources, known_url=None):
+    if not verdict_info["checked"]:
+        # Verification didn't run or couldn't be interpreted — degrade
+        # gracefully to the pre-existing (unverified-relevance) behavior
+        # rather than blocking resolution, but leave a clear note.
+        result["relevance_check"] = verdict_info["reason"]
+        return result
+
+    result["relevance_verdict"] = verdict_info["verdict"]
+    result["relevance_reason"] = verdict_info["reason"]
+    if verdict_info["verdict"] not in _SUPPORTING_VERDICTS:
+        # The URL loaded and checksummed fine, but content verification says
+        # it doesn't actually back the claim — never let that pass silently
+        # at checksum-level confidence.
+        result["resolved"] = False
+        result["verification"] = "content_mismatch"
+        result["note"] = (
+            f"Source URL loaded and checksummed, but content verification found "
+            f"it does not support this specific claim "
+            f"({verdict_info['verdict']}): {verdict_info['reason']}"
+        )
+
+    return result
+
+
+def _resolve_one(claim, citation_sources, known_url=None, api_keys=None, call_log=None):
     """Resolve a single claim against the configured sources, in order.
 
     If ``known_url`` is given (a source URL the fact-check model already
@@ -131,7 +254,9 @@ def _resolve_one(claim, citation_sources, known_url=None):
     checksummed against retrieved data.
     """
     if known_url:
-        return _resolve_known_url(claim, known_url)
+        return _resolve_known_url(
+            claim, known_url, api_keys=api_keys, call_log=call_log
+        )
 
     for source_config in citation_sources:
         adapter_name = source_config.get("adapter")
@@ -224,7 +349,9 @@ def _normalize_claim_entry(entry):
     return entry.get("claim", ""), entry.get("known_url")
 
 
-def resolve_citations(claims, citation_sources, api_keys=None):
+def resolve_citations(
+    claims, citation_sources, api_keys=None, verification_call_log=None
+):
     """
     For each claim, resolve a primary source. If the claim entry carries a
     ``known_url`` (a source the fact-check model already supplied), that URL
@@ -232,6 +359,15 @@ def resolve_citations(claims, citation_sources, api_keys=None):
     adapter is tried in order. Claims are resolved in parallel (bounded by
     _MAX_PARALLEL) because each one performs blocking network I/O — the
     source lookup plus a Wayback check.
+
+    A ``known_url`` fetch also runs a content-relevance check (see
+    ``_verify_relevance``) — a cheap LLM call confirming the fetched page
+    actually supports the claim, not just that the URL loaded. Passing a
+    ``verification_call_log`` list (e.g. the pipeline's ``api_call_log``)
+    appends one cost-tracking entry per relevance check performed, in the
+    same shape as the pipeline's own entries, so it flows into
+    ``cost_analysis.calculate`` like any other model call. Without it, the
+    checks still run but their cost isn't tracked anywhere.
 
     After resolution, any resolved citation whose URL isn't yet archived is
     submitted to Wayback's Save Page Now API for archiving (see
@@ -246,12 +382,15 @@ def resolve_citations(claims, citation_sources, api_keys=None):
         return []
 
     normalized = [_normalize_claim_entry(entry) for entry in claims]
+    call_log = verification_call_log if verification_call_log is not None else []
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(len(normalized), _MAX_PARALLEL)
     ) as pool:
         futures = {
-            pool.submit(_resolve_one, claim, citation_sources, known_url): idx
+            pool.submit(
+                _resolve_one, claim, citation_sources, known_url, api_keys, call_log
+            ): idx
             for idx, (claim, known_url) in enumerate(normalized)
         }
         ordered: dict[int, dict] = {}
