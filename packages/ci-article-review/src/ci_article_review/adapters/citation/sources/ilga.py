@@ -34,7 +34,9 @@ def resolve(claim, api_key=None):
     if pa_match:
         pa_number = pa_match.group(1)
         url = f"{ILGA_BASE}/legislation/publicacts/{pa_number.replace('-', '')}.html"
-        summary = f"Illinois Public Act {pa_number} — manual retrieval required. See {url}"
+        summary = (
+            f"Illinois Public Act {pa_number} — manual retrieval required. See {url}"
+        )
         return {
             "found": True,
             "pointer_only": True,

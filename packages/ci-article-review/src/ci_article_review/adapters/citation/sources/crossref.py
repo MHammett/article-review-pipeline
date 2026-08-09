@@ -111,7 +111,11 @@ def _search_bibliographic(claim, headers):
             return None
         confidence = difflib.SequenceMatcher(None, query.lower(), title.lower()).ratio()
         if confidence < _SEARCH_CONFIDENCE_THRESHOLD:
-            log.debug("Crossref search match below confidence threshold (%.2f): %s", confidence, title)
+            log.debug(
+                "Crossref search match below confidence threshold (%.2f): %s",
+                confidence,
+                title,
+            )
             return None
         doi = item.get("DOI")
         url = f"https://doi.org/{doi}" if doi else item.get("URL")
@@ -127,7 +131,9 @@ def _build_result(message, url):
     title = " ".join(message.get("title") or []) or "(untitled)"
     authors = message.get("author") or []
     author_names = ", ".join(
-        f"{a.get('given', '')} {a.get('family', '')}".strip() for a in authors if a.get("family")
+        f"{a.get('given', '')} {a.get('family', '')}".strip()
+        for a in authors
+        if a.get("family")
     )
     container = " ".join(message.get("container-title") or [])
     publisher = message.get("publisher", "")
@@ -137,7 +143,9 @@ def _build_result(message, url):
         or message.get("published", {}).get("date-parts")
         or []
     )
-    published = "-".join(str(p) for p in date_parts[0]) if date_parts and date_parts[0] else ""
+    published = (
+        "-".join(str(p) for p in date_parts[0]) if date_parts and date_parts[0] else ""
+    )
 
     summary_bits = [title]
     if author_names:

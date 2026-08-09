@@ -28,10 +28,18 @@ def resolve(claim, api_key=None):
     if not any(t in claim_lower for t in PJM_TERMS):
         return {"found": False}
 
-    if "capacity auction" in claim_lower or "rpm" in claim_lower or "reliability pricing model" in claim_lower:
+    if (
+        "capacity auction" in claim_lower
+        or "rpm" in claim_lower
+        or "reliability pricing model" in claim_lower
+    ):
         url = "https://www.pjm.com/markets-and-operations/rpm"
         program = "Capacity (RPM) Auction Results"
-    elif "interconnection queue" in claim_lower or "generation interconnection" in claim_lower or "teac" in claim_lower:
+    elif (
+        "interconnection queue" in claim_lower
+        or "generation interconnection" in claim_lower
+        or "teac" in claim_lower
+    ):
         url = "https://www.pjm.com/planning/service-requests"
         program = "Generation Interconnection Queue / TEAC"
     else:

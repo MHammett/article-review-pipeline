@@ -68,7 +68,12 @@ _CATEGORIES = [
     ),
 ]
 
-_GENERIC_TERMS = ["environmental protection agency", " epa ", "epa regulation", "epa data"]
+_GENERIC_TERMS = [
+    "environmental protection agency",
+    " epa ",
+    "epa regulation",
+    "epa data",
+]
 
 
 def resolve(claim, api_key=None):
