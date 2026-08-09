@@ -1,0 +1,494 @@
+"""
+Cross-run analytics over pipeline_history/.
+
+Every pipeline run writes a full report JSON via history.save_run(), but until
+this module the only code that ever read that history back was
+history.load_prior_report() — and that only fetches the single immediately-
+prior run for one article, for delta-tracking. Nothing aggregated across runs,
+across articles, or over time.
+
+This module scans all run_*_report.json files under a history root and
+reports on trends that only become visible across many runs:
+
+  - Provider reliability: per-model success rate, recent vs historical
+    baseline, flagged when a provider degrades sharply (the kind of thing
+    that would have caught a 401-across-every-domain API key outage
+    automatically instead of after several human-noticed failed runs).
+  - Cost: per-run spend, totals, and trend direction.
+  - Readability/SEO/link quality: trending better or worse, both globally
+    and per article across its revision history.
+
+Report JSON schema has evolved over the life of this project (fields like
+raw_excerpt, fallback_warnings, and model_currency were added at different
+times), so every field is read with .get() and missing data is treated as
+"not enough history" rather than an error.
+
+Reads pipeline_history/ fresh on every call — no database, no persistent
+index. That's fine at the dozens-to-low-hundreds-of-files scale this
+operates at.
+"""
+
+import argparse
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+HISTORY_ROOT = "pipeline_history"
+
+# How many of the most recent data points (calls, for provider reliability;
+# runs, for cost/quality) count as "recent" vs everything before them being
+# "baseline". Simple fixed-window comparison — no attempt at anything fancier.
+RECENT_WINDOW = 5
+
+# A provider needs at least this many baseline calls before we trust the
+# baseline enough to compare against — otherwise a single early failure
+# looks like a "100% -> 0%" collapse.
+MIN_BASELINE_CALLS = 3
+
+# Flag a provider as degraded when its recent failure rate is at least this
+# many percentage points worse than its baseline failure rate.
+DEGRADED_THRESHOLD = 0.4
+
+# A cost/quality metric trend is only called "increasing"/"decreasing" when
+# the relative change between recent and baseline averages exceeds this.
+TREND_RELATIVE_THRESHOLD = 0.15
+
+
+def _parse_timestamp(report, path):
+    generated = report.get("generated")
+    if generated:
+        try:
+            return datetime.fromisoformat(generated)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def iter_reports(history_root, article_slug=None):
+    """Yield (article_slug, path, report_dict) for every readable report JSON."""
+    root = Path(history_root)
+    if not root.is_dir():
+        return
+    if article_slug:
+        dirs = [root / article_slug]
+    else:
+        dirs = sorted(d for d in root.iterdir() if d.is_dir())
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for path in sorted(d.glob("run_*_report.json")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    report = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                log.warning("Skipping unreadable report %s: %s", path, e)
+                continue
+            yield d.name, path, report
+
+
+def load_reports(history_root, article_slug=None):
+    """Load all reports as {slug, path, report, timestamp} dicts, oldest first."""
+    entries = [
+        {
+            "slug": slug,
+            "path": path,
+            "report": report,
+            "timestamp": _parse_timestamp(report, path),
+        }
+        for slug, path, report in iter_reports(history_root, article_slug)
+    ]
+    entries.sort(key=lambda e: e["timestamp"])
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Provider reliability
+# ---------------------------------------------------------------------------
+
+
+def _provider_calls(entries):
+    """provider -> chronological list of (timestamp, failed) from api_call_log."""
+    calls = {}
+    for e in entries:
+        for call in e["report"].get("api_call_log") or []:
+            pass_key = call.get("pass") or ""
+            # Expect "model:domain" (e.g. "openai:fact_check"). Some very old
+            # reports recorded just the domain with no colon — that can't be
+            # attributed to a provider, so skip it rather than misreading the
+            # domain as a provider name.
+            if ":" not in pass_key:
+                continue
+            provider = pass_key.split(":", 1)[0]
+            if not provider:
+                continue
+            calls.setdefault(provider, []).append(
+                (e["timestamp"], bool(call.get("failed")))
+            )
+    for provider_calls in calls.values():
+        provider_calls.sort(key=lambda c: c[0])
+    return calls
+
+
+def provider_reliability(
+    entries,
+    recent_window=RECENT_WINDOW,
+    min_baseline=MIN_BASELINE_CALLS,
+    degraded_threshold=DEGRADED_THRESHOLD,
+):
+    """Per-provider recent vs baseline success rate, with a degradation flag."""
+    results = {}
+    for provider, calls in sorted(_provider_calls(entries).items()):
+        recent = calls[-recent_window:]
+        baseline = calls[:-recent_window]
+
+        recent_rate = sum(1 for _, failed in recent if failed) / len(recent)
+        recent_success_rate = 1 - recent_rate
+
+        if len(baseline) >= min_baseline:
+            baseline_rate = sum(1 for _, failed in baseline if failed) / len(baseline)
+            baseline_success_rate = 1 - baseline_rate
+        else:
+            baseline_rate = None
+            baseline_success_rate = None
+
+        degraded = (
+            baseline_rate is not None
+            and (recent_rate - baseline_rate) >= degraded_threshold
+        )
+
+        results[provider] = {
+            "total_calls": len(calls),
+            "recent_calls": len(recent),
+            "recent_success_rate": recent_success_rate,
+            "baseline_calls": len(baseline),
+            "baseline_success_rate": baseline_success_rate,
+            "degraded": degraded,
+        }
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Cost trend
+# ---------------------------------------------------------------------------
+
+
+def _trend_direction(baseline_avg, recent_avg, threshold=TREND_RELATIVE_THRESHOLD):
+    """Raw numeric direction (increasing/decreasing/flat) — no good/bad judgment.
+
+    Cost has no "better" direction to editorialize about; per-article and
+    global quality trends use _direction() separately for improved/worsened.
+    """
+    if baseline_avg is None or recent_avg is None:
+        return "insufficient_history"
+    if baseline_avg == 0:
+        return "flat" if recent_avg == 0 else "increasing"
+    change = (recent_avg - baseline_avg) / abs(baseline_avg)
+    if abs(change) < threshold:
+        return "flat"
+    return "increasing" if change > 0 else "decreasing"
+
+
+def cost_trend(entries, recent_window=RECENT_WINDOW):
+    points = [
+        (e["timestamp"], e["report"]["cost_summary"]["total_usd"])
+        for e in entries
+        if isinstance(e["report"].get("cost_summary"), dict)
+        and e["report"]["cost_summary"].get("total_usd") is not None
+    ]
+    if not points:
+        return {
+            "runs": 0,
+            "total_usd": 0.0,
+            "average_usd": 0.0,
+            "recent_average_usd": None,
+            "baseline_average_usd": None,
+            "trend": "no_data",
+        }
+
+    total = sum(v for _, v in points)
+    recent = points[-recent_window:]
+    baseline = points[:-recent_window]
+    recent_avg = sum(v for _, v in recent) / len(recent)
+    baseline_avg = (sum(v for _, v in baseline) / len(baseline)) if baseline else None
+
+    return {
+        "runs": len(points),
+        "total_usd": round(total, 4),
+        "average_usd": round(total / len(points), 4),
+        "recent_average_usd": round(recent_avg, 4),
+        "baseline_average_usd": round(baseline_avg, 4)
+        if baseline_avg is not None
+        else None,
+        "trend": _trend_direction(baseline_avg, recent_avg),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Readability / SEO / link quality trend
+# ---------------------------------------------------------------------------
+
+
+def _quality_metrics(report):
+    pre = report.get("pre_analysis") or {}
+
+    readability = pre.get("readability") or {}
+    fk_grade = readability.get("flesch_kincaid_grade")
+
+    seo = pre.get("seo") or {}
+    seo_issues = seo.get("issues")
+    seo_issue_count = len(seo_issues) if isinstance(seo_issues, list) else None
+
+    links = pre.get("links")
+    broken_link_count = (
+        sum(1 for lk in links if not lk.get("ok")) if isinstance(links, list) else None
+    )
+
+    return {
+        "fk_grade": fk_grade,
+        "seo_issue_count": seo_issue_count,
+        "broken_link_count": broken_link_count,
+    }
+
+
+def _direction(first, last):
+    """improved/worsened/unchanged for a "lower is better" metric."""
+    if first is None or last is None:
+        return "unknown"
+    if first == last:
+        return "unchanged"
+    return "improved" if last < first else "worsened"
+
+
+_QUALITY_LABELS = {
+    "fk_grade": "Readability (FK grade)",
+    "seo_issue_count": "SEO issues",
+    "broken_link_count": "Broken links",
+}
+
+
+def per_article_quality_trend(entries):
+    """First run -> latest run direction for each metric, per article."""
+    by_slug = {}
+    for e in entries:
+        by_slug.setdefault(e["slug"], []).append(e)
+
+    results = {}
+    for slug, runs in by_slug.items():
+        runs = sorted(runs, key=lambda e: e["timestamp"])
+        first_metrics = _quality_metrics(runs[0]["report"])
+        last_metrics = _quality_metrics(runs[-1]["report"])
+        results[slug] = {
+            "runs": len(runs),
+            "article_title": runs[-1]["report"].get("article_title", slug),
+            "first": first_metrics,
+            "last": last_metrics,
+            "fk_grade_trend": _direction(
+                first_metrics["fk_grade"], last_metrics["fk_grade"]
+            ),
+            "seo_issues_trend": _direction(
+                first_metrics["seo_issue_count"], last_metrics["seo_issue_count"]
+            ),
+            "broken_links_trend": _direction(
+                first_metrics["broken_link_count"], last_metrics["broken_link_count"]
+            ),
+        }
+    return results
+
+
+def global_quality_trend(entries, recent_window=RECENT_WINDOW):
+    """Recent-runs vs baseline-runs average for each metric, across all articles."""
+    all_metrics = [_quality_metrics(e["report"]) for e in entries]
+    recent_metrics = all_metrics[-recent_window:]
+    baseline_metrics = all_metrics[:-recent_window]
+
+    def _avg(metrics, key):
+        vals = [m[key] for m in metrics if m[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    out = {}
+    for key in _QUALITY_LABELS:
+        avg_all = _avg(all_metrics, key)
+        avg_recent = _avg(recent_metrics, key)
+        avg_baseline = _avg(baseline_metrics, key)
+        if avg_recent is None or avg_baseline is None:
+            trend = "insufficient_history"
+        else:
+            trend = _direction(avg_baseline, avg_recent)
+        out[key] = {
+            "average": round(avg_all, 2) if avg_all is not None else None,
+            "recent_average": round(avg_recent, 2) if avg_recent is not None else None,
+            "baseline_average": round(avg_baseline, 2)
+            if avg_baseline is not None
+            else None,
+            "trend": trend,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Top-level aggregation + console output
+# ---------------------------------------------------------------------------
+
+
+def build_history_report(
+    history_root=HISTORY_ROOT, article_slug=None, recent_window=RECENT_WINDOW
+):
+    entries = load_reports(history_root, article_slug)
+    return {
+        "history_root": str(history_root),
+        "article_slug": article_slug,
+        "total_reports": len(entries),
+        "provider_reliability": provider_reliability(
+            entries, recent_window=recent_window
+        ),
+        "cost_trend": cost_trend(entries, recent_window=recent_window),
+        "global_quality_trend": global_quality_trend(
+            entries, recent_window=recent_window
+        ),
+        "per_article_quality_trend": per_article_quality_trend(entries),
+    }
+
+
+def print_history_report(result):
+    print("\n" + "=" * 60)
+    print("PIPELINE HISTORY ANALYTICS")
+    scope = result["article_slug"] or "all articles"
+    print(
+        f"Scope: {scope}  ({result['total_reports']} run report(s) under {result['history_root']})"
+    )
+    print("=" * 60)
+
+    if result["total_reports"] == 0:
+        print("\nNo report files found.")
+        return
+
+    reliability = result["provider_reliability"]
+    print("\nProvider reliability:")
+    if not reliability:
+        print("  (no api_call_log data found in any report)")
+    degraded_providers = []
+    for provider, r in sorted(reliability.items()):
+        recent_pct = f"{r['recent_success_rate'] * 100:.0f}%"
+        baseline_pct = (
+            f"{r['baseline_success_rate'] * 100:.0f}%"
+            if r["baseline_success_rate"] is not None
+            else "n/a"
+        )
+        flag = "  <-- DEGRADED" if r["degraded"] else ""
+        if r["degraded"]:
+            degraded_providers.append(provider)
+        print(
+            f"  {provider:12s} recent: {recent_pct:>5s} ({r['recent_calls']} calls)   "
+            f"baseline: {baseline_pct:>5s} ({r['baseline_calls']} calls){flag}"
+        )
+
+    if degraded_providers:
+        print(f"\n{'!' * 60}")
+        print(f"WARNING: degraded provider(s): {', '.join(sorted(degraded_providers))}")
+        print("Recent success rate has dropped sharply vs. historical baseline.")
+        print("Check API keys, quotas, and provider status before trusting new runs.")
+        print("!" * 60)
+
+    cost = result["cost_trend"]
+    print("\nCost trend:")
+    if cost["trend"] == "no_data":
+        print("  (no cost_summary data found in any report)")
+    else:
+        print(
+            f"  Total spend: ${cost['total_usd']:.4f} across {cost['runs']} run(s), "
+            f"avg ${cost['average_usd']:.4f}/run"
+        )
+        if cost["baseline_average_usd"] is not None:
+            print(
+                f"  Recent avg ${cost['recent_average_usd']:.4f}/run vs. "
+                f"baseline avg ${cost['baseline_average_usd']:.4f}/run -> {cost['trend']}"
+            )
+        else:
+            print("  Trend: insufficient history for a baseline comparison")
+
+    gq = result["global_quality_trend"]
+    print("\nQuality trend (across all runs, chronological):")
+    for key, label in _QUALITY_LABELS.items():
+        m = gq[key]
+        if m["trend"] == "insufficient_history":
+            print(f"  {label}: insufficient history")
+        else:
+            print(
+                f"  {label}: recent avg {m['recent_average']} vs. baseline avg {m['baseline_average']} -> {m['trend']}"
+            )
+
+    per_article = result["per_article_quality_trend"]
+    multi_run = {slug: v for slug, v in per_article.items() if v["runs"] > 1}
+    if multi_run:
+        print(
+            f"\nPer-article revision trend ({len(multi_run)} article(s) with multiple runs):"
+        )
+        for slug, v in sorted(multi_run.items()):
+            print(
+                f"  {v['article_title']!r} ({v['runs']} runs): "
+                f"FK grade {v['fk_grade_trend']}, SEO {v['seo_issues_trend']}, links {v['broken_links_trend']}"
+            )
+
+    print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Article Review Pipeline — cross-run history analytics",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  ci-history-report\n"
+            "  ci-history-report --article my-article-slug\n"
+            "  ci-history-report --history-root pipeline_history --recent-window 10\n"
+        ),
+    )
+    parser.add_argument(
+        "--history-root",
+        default=HISTORY_ROOT,
+        help=f"Directory containing per-article run history (default: {HISTORY_ROOT})",
+    )
+    parser.add_argument(
+        "--article",
+        metavar="SLUG",
+        help="Scope analytics to one article's history directory (the slug used as its "
+        "pipeline_history subdirectory name, not the article title)",
+    )
+    parser.add_argument(
+        "--recent-window",
+        type=int,
+        default=RECENT_WINDOW,
+        help=f"Number of most recent calls/runs treated as 'recent' vs. baseline (default: {RECENT_WINDOW})",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the raw analytics result as JSON instead of the console summary",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+
+    result = build_history_report(
+        args.history_root, article_slug=args.article, recent_window=args.recent_window
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print_history_report(result)
+
+
+if __name__ == "__main__":
+    main()
