@@ -5,7 +5,7 @@ import logging
 
 import requests
 
-from ci_core.http import USER_AGENT
+from ci_core.http import DEFAULT_HEADERS
 
 from . import wayback
 
@@ -46,16 +46,55 @@ def sha256_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _wayback_fallback_content(url, timeout):
+    """After a direct 403, try archive.org's snapshot as the content source.
+
+    archive.org serves its own cached copy, so a site blocking our fetch
+    doesn't block the archived one. A single attempt, no retry loop. Returns
+    the snapshot's (url, text) on success, or None if there's no snapshot or
+    the snapshot itself doesn't resolve.
+    """
+    wb = wayback.check(url, timeout=timeout)
+    snapshot_url = wb.get("snapshot_url")
+    if not wb.get("archived") or not snapshot_url:
+        return None
+    try:
+        resp = requests.get(snapshot_url, timeout=timeout, headers=DEFAULT_HEADERS)
+        resp.raise_for_status()
+    except Exception:
+        return None
+    return snapshot_url, resp.text
+
+
 def _resolve_known_url(claim, known_url, timeout=15):
     """Resolve a claim whose source URL is already known (e.g. supplied by the
     fact-check model itself), bypassing the narrow adapter matching entirely.
+
+    A direct 403 (but not a 404 or 5xx — see ``_wayback_fallback_content``'s
+    scoping) triggers a single fallback attempt against a Wayback snapshot of
+    the same URL, so a claim isn't reported unresolved just because the origin
+    site blocks automated fetches.
     """
+    verified_via = "direct"
     try:
-        resp = requests.get(
-            known_url, timeout=timeout, headers={"User-Agent": USER_AGENT}
-        )
+        resp = requests.get(known_url, timeout=timeout, headers=DEFAULT_HEADERS)
         resp.raise_for_status()
         content = resp.text
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        fallback = (
+            _wayback_fallback_content(known_url, timeout) if status == 403 else None
+        )
+        if fallback is None:
+            log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
+            return {
+                "claim": claim,
+                "url": known_url,
+                "resolved": False,
+                "note": f"Known source URL could not be fetched: {e}",
+            }
+        _, content = fallback
+        verified_via = "wayback_fallback"
     except Exception as e:
         log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
         return {
@@ -74,6 +113,7 @@ def _resolve_known_url(claim, known_url, timeout=15):
         "checksum": sha256_checksum(content),
         "resolved": True,
         "verification": "checksum",
+        "verified_via": verified_via,
         "wayback": wb,
     }
 

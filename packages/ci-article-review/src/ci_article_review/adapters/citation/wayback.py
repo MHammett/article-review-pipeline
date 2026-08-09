@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from ci_core.http import USER_AGENT
+from ci_core.http import DEFAULT_HEADERS
 
 from ... import redact
 
@@ -76,7 +76,7 @@ def check(url, timeout=10, stale_days=None):
             _AVAILABILITY_API,
             params={"url": url},
             timeout=timeout,
-            headers={"User-Agent": USER_AGENT},
+            headers=DEFAULT_HEADERS,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -133,7 +133,7 @@ def submit(url, timeout=30, access_key=None, secret_key=None):
       job_id     str | None — SPN2 job id, only set for authenticated submission
       error      str  — set only on failure
     """
-    headers = {"User-Agent": USER_AGENT}
+    headers = dict(DEFAULT_HEADERS)
     try:
         if access_key and secret_key:
             headers["Authorization"] = f"LOW {access_key}:{secret_key}"
