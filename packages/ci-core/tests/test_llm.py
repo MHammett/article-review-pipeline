@@ -241,7 +241,13 @@ async def test_gemini_adapter_retries_on_rate_limit(monkeypatch):
         attempts += 1
         if attempts < 3:
             raise genai_errors.ClientError(
-                429, {"error": {"message": "quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+                429,
+                {
+                    "error": {
+                        "message": "quota exceeded",
+                        "status": "RESOURCE_EXHAUSTED",
+                    }
+                },
             )
         return _make_gemini_response("done")
 
