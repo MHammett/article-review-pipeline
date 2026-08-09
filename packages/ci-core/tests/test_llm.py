@@ -170,6 +170,132 @@ async def test_openai_adapter_complete():
 
 
 # ---------------------------------------------------------------------------
+# GeminiAdapter
+# ---------------------------------------------------------------------------
+
+
+def _make_gemini_response(text: str) -> MagicMock:
+    resp = MagicMock()
+    resp.text = text
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_complete():
+    config = ProviderConfig(api_key="AIza-test", model="gemini-2.5-flash")
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(
+        return_value=_make_gemini_response("Hello!")
+    )
+
+    with (
+        patch("ci_core.llm._gemini._available", True),
+        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+    ):
+        from ci_core.llm._gemini import GeminiAdapter
+
+        adapter = GeminiAdapter(config)
+        result = await adapter.complete("Hi", system="Be helpful")
+
+    assert result == "Hello!"
+    mock_client.aio.models.generate_content.assert_awaited_once()
+    call_kwargs = mock_client.aio.models.generate_content.call_args.kwargs
+    assert call_kwargs["model"] == "gemini-2.5-flash"
+    assert call_kwargs["contents"] == "Hi"
+    assert call_kwargs["config"].system_instruction == "Be helpful"
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_no_system():
+    config = ProviderConfig(api_key="AIza-test")
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(
+        return_value=_make_gemini_response("Hi")
+    )
+
+    with (
+        patch("ci_core.llm._gemini._available", True),
+        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+    ):
+        from ci_core.llm._gemini import GeminiAdapter
+
+        adapter = GeminiAdapter(config)
+        await adapter.complete("Hi")
+
+    call_kwargs = mock_client.aio.models.generate_content.call_args.kwargs
+    assert call_kwargs["config"].system_instruction is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_retries_on_rate_limit(monkeypatch):
+    from google.genai import errors as genai_errors
+
+    monkeypatch.setattr("ci_core.llm._base.asyncio.sleep", AsyncMock())
+    config = ProviderConfig(api_key="AIza-test", max_retries=3)
+    mock_client = MagicMock()
+
+    attempts = 0
+
+    async def _flaky(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise genai_errors.ClientError(
+                429, {"error": {"message": "quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+            )
+        return _make_gemini_response("done")
+
+    mock_client.aio.models.generate_content = AsyncMock(side_effect=_flaky)
+
+    with (
+        patch("ci_core.llm._gemini._available", True),
+        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+    ):
+        from ci_core.llm._gemini import GeminiAdapter
+
+        adapter = GeminiAdapter(config)
+        result = await adapter.complete("Hi")
+
+    assert result == "done"
+    assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_does_not_retry_non_rate_limit_client_error():
+    from google.genai import errors as genai_errors
+
+    config = ProviderConfig(api_key="AIza-test", max_retries=3)
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(
+        side_effect=genai_errors.ClientError(
+            400, {"error": {"message": "bad request", "status": "INVALID_ARGUMENT"}}
+        )
+    )
+
+    with (
+        patch("ci_core.llm._gemini._available", True),
+        patch("ci_core.llm._gemini.genai.Client", return_value=mock_client),
+    ):
+        from ci_core.llm._gemini import GeminiAdapter
+
+        adapter = GeminiAdapter(config)
+        with pytest.raises(genai_errors.ClientError):
+            await adapter.complete("Hi")
+
+    mock_client.aio.models.generate_content.assert_awaited_once()
+
+
+def test_gemini_not_available_raises():
+    config = ProviderConfig(api_key="AIza-test")
+
+    with patch("ci_core.llm._gemini._available", False):
+        from ci_core.llm._gemini import GeminiAdapter
+
+        with pytest.raises(RuntimeError, match="google-genai"):
+            GeminiAdapter(config)
+
+
+# ---------------------------------------------------------------------------
 # AdapterFactory
 # ---------------------------------------------------------------------------
 
@@ -209,6 +335,21 @@ def test_factory_returns_openai():
         adapter = AdapterFactory.get("openai", llm_settings=settings)
 
     assert isinstance(adapter, OpenAIAdapter)
+
+
+def test_factory_returns_gemini():
+    from ci_core.llm._factory import AdapterFactory
+    from ci_core.llm._gemini import GeminiAdapter
+
+    settings = LLMSettings(gemini=ProviderConfig(api_key="AIza-x"))
+
+    with (
+        patch("ci_core.llm._gemini._available", True),
+        patch("ci_core.llm._gemini.genai.Client"),
+    ):
+        adapter = AdapterFactory.get("gemini", llm_settings=settings)
+
+    assert isinstance(adapter, GeminiAdapter)
 
 
 def test_factory_returns_grok():

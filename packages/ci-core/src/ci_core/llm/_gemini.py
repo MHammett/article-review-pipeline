@@ -8,50 +8,56 @@ from ._base import _with_retry
 _DEFAULT_MODEL = "gemini-1.5-pro"
 
 try:
-    import google.generativeai as genai
-    from google.api_core.exceptions import ResourceExhausted as _GeminiRateLimit
+    from google import genai
+    from google.genai import errors as _genai_errors
+    from google.genai import types as _genai_types
 
     _available = True
 except ImportError:
     _available = False
     genai = None  # type: ignore[assignment]
-    _GeminiRateLimit = None  # type: ignore[assignment,misc]
+    _genai_errors = None  # type: ignore[assignment]
+    _genai_types = None  # type: ignore[assignment]
+
+
+class _GeminiRateLimit(Exception):
+    """Raised in place of ``google.genai.errors.ClientError`` for HTTP 429.
+
+    The SDK's ``ClientError`` covers the whole 4xx range with no dedicated
+    rate-limit subclass, and ``_with_retry`` retries by exception *type* — so
+    retrying on bare ``ClientError`` would also retry non-transient 4xx
+    failures (bad request, auth). This subclass is raised only when
+    ``ClientError.code == 429``, matching the old SDK's
+    ``ResourceExhausted``-only retry behaviour.
+    """
 
 
 class GeminiAdapter:
     """LLM adapter for Google Gemini models.
 
-    Uses the ``google-generativeai`` SDK (optional dep: ``ci-core[gemini]``).
+    Uses the ``google-genai`` SDK (optional dep: ``ci-core[gemini]``).
     Config is read from ``LLMSettings.gemini`` (a ``ProviderConfig``):
     ``api_key``, ``model`` (defaults to ``gemini-1.5-pro``), ``timeout``,
     and ``max_retries``.
 
-    Rate-limit errors surface as ``google.api_core.exceptions.ResourceExhausted``
-    and are retried via ``_with_retry``.
+    Rate-limit errors (HTTP 429) are retried via ``_with_retry``; other
+    ``ClientError``/``ServerError`` failures propagate immediately.
     """
 
     def __init__(self, config: ProviderConfig) -> None:
         """Initialise the Gemini adapter.
 
-        Calls ``genai.configure(api_key=...)`` to set the API key.  This is a
-        *module-global side effect* in the ``google-generativeai`` SDK — it
-        configures the default credentials for all subsequent SDK calls in the
-        process.  Instantiating multiple ``GeminiAdapter`` objects with
-        different keys will overwrite each other's configuration; use a single
-        instance per process.
-
         Args:
             config: Provider config from ``LLMSettings.gemini``.
 
         Raises:
-            RuntimeError: If the ``google-generativeai`` package is not
-                installed.
+            RuntimeError: If the ``google-genai`` package is not installed.
         """
         if not _available:
             raise RuntimeError(
-                "google-generativeai package not installed; pip install 'ci-core[gemini]'"
+                "google-genai package not installed; pip install 'ci-core[gemini]'"
             )
-        genai.configure(api_key=config.api_key)  # type: ignore[union-attr]
+        self._client = genai.Client(api_key=config.api_key)  # type: ignore[union-attr]
         self._model_name = config.model or _DEFAULT_MODEL
         self._config = config
         self._max_attempts = config.max_retries
@@ -65,31 +71,30 @@ class GeminiAdapter:
     ) -> str:
         """Send *prompt* to Gemini and return the response text.
 
-        When *system* is non-empty it is passed as ``system_instruction`` to
-        ``GenerativeModel``; an empty string is converted to ``None`` so the
-        SDK omits the field entirely (passing an empty string can cause
-        validation errors in some model versions).
-
-        A new ``GenerativeModel`` instance is created per call because the SDK
-        bundles ``system_instruction`` into the model object rather than
-        accepting it per-request.
+        When *system* is non-empty it is passed as ``system_instruction``; an
+        empty string is converted to ``None`` so the SDK omits the field
+        entirely (passing an empty string can cause validation errors in some
+        model versions).
         """
-        rate_limit_excs = (_GeminiRateLimit,) if _GeminiRateLimit is not None else ()
-        model = genai.GenerativeModel(  # type: ignore[union-attr]
-            model_name=self._model_name,
+        generation_config = _genai_types.GenerateContentConfig(  # type: ignore[union-attr]
             system_instruction=system or None,
-        )
-        generation_config = genai.GenerationConfig(  # type: ignore[union-attr]
             temperature=temperature,
             max_output_tokens=max_tokens,
         )
 
         async def _call() -> str:
-            response = await model.generate_content_async(
-                prompt, generation_config=generation_config
-            )
+            try:
+                response = await self._client.aio.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt,
+                    config=generation_config,
+                )
+            except _genai_errors.ClientError as exc:  # type: ignore[union-attr]
+                if exc.code == 429:
+                    raise _GeminiRateLimit(str(exc)) from exc
+                raise
             return response.text
 
         return await _with_retry(
-            _call, max_attempts=self._max_attempts, rate_limit_excs=rate_limit_excs
+            _call, max_attempts=self._max_attempts, rate_limit_excs=(_GeminiRateLimit,)
         )
