@@ -63,7 +63,7 @@ citation_sources:
   - name: FRED
     adapter: fred
     description: Federal Reserve Economic Data (BLS, Census series)
-  # Available adapters: eia, fred, census, fhwa
+  # Available adapters: eia, fred, census, fhwa, crossref, epa, pjm, icc, ferc, ilga
   # Claims from fact-check results are resolved against these sources (Pass 3).
   # Each resolved URL is also checked against the Wayback Machine automatically.
 
