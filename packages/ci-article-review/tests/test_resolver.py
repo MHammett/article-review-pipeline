@@ -126,3 +126,70 @@ class TestResolveCitations:
 
         # Exception is caught; claim reported unresolved rather than crashing the run
         assert results[0]["resolved"] is False
+
+    def test_known_url_resolves_without_adapter_loop(self):
+        """A claim carrying a known_url (e.g. supplied by the fact-check model)
+        must be fetched and checksummed directly, never touching the adapter loop.
+        """
+        mock_resp = type(
+            "R", (), {"raise_for_status": lambda self: None, "text": "page content"}
+        )()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve"
+            ) as mock_adapter,
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["url"] == "https://example.com/page"
+        assert results[0]["source_name"] == "fact-check model"
+        assert results[0]["verification"] == "checksum"
+        mock_get.assert_called_once()
+        mock_adapter.assert_not_called()
+
+    def test_known_url_fetch_failure_reports_unresolved(self):
+        with patch(
+            "ci_article_review.adapters.citation.resolver.requests.get",
+            side_effect=RuntimeError("timeout"),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/broken"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is False
+        assert "note" in results[0]
+
+    def test_dict_entry_without_known_url_uses_adapter_loop(self):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": None}], _SOURCES
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["source_name"] == "FRED"
