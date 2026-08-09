@@ -1,6 +1,6 @@
 """Tests for analysis.cost."""
 
-from ci_article_review.analysis.cost import calculate, _price_for_model
+from ci_core.llm.cost import calculate, _price_for_model
 
 
 class TestPriceForModel:
@@ -15,13 +15,13 @@ class TestPriceForModel:
         assert in_p == 0.30
 
     def test_unknown_model_returns_fallback(self):
-        from ci_article_review.analysis.cost import _UNKNOWN_PRICE
+        from ci_core.llm.cost import _UNKNOWN_PRICE
 
         result = _price_for_model("some-hypothetical-model-9999")
         assert result == _UNKNOWN_PRICE
 
     def test_none_returns_fallback(self):
-        from ci_article_review.analysis.cost import _UNKNOWN_PRICE
+        from ci_core.llm.cost import _UNKNOWN_PRICE
 
         assert _price_for_model(None) == _UNKNOWN_PRICE
 

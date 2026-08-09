@@ -41,8 +41,8 @@ import datetime
 import requests
 
 from .config_loader import load_user_config, _normalize_model_configs
-from .model_registry import _SUPERSEDED, _NEWER_AVAILABLE, REGISTRY_DATE
-from .redact import redact_url_keys
+from ci_core.llm.model_registry import SUPERSEDED, NEWER_AVAILABLE, REGISTRY_DATE
+from ci_core.redact import redact_url_keys
 
 NEW = "\033[32m NEW\033[0m"
 ACTIVE = "\033[36m  ✓\033[0m"
@@ -96,8 +96,8 @@ def _print_model_row(model_id, date, configured_id, configured_date, prefix=""):
         and date > configured_date
         and not is_configured
     )
-    in_superseded = model_id in _SUPERSEDED
-    in_newer_available = model_id in _NEWER_AVAILABLE
+    in_superseded = model_id in SUPERSEDED
+    in_newer_available = model_id in NEWER_AVAILABLE
 
     if is_configured:
         marker_raw = ACTIVE
@@ -107,10 +107,10 @@ def _print_model_row(model_id, date, configured_id, configured_date, prefix=""):
         note = "  ← newer than configured"
     elif in_superseded:
         marker_raw = WARN
-        repl = _SUPERSEDED[model_id]["replacement"]
+        repl = SUPERSEDED[model_id]["replacement"]
         note = f"  ⚠ superseded → {repl}"
     elif in_newer_available:
-        note = "  (soft upgrade: see model_registry.py)"
+        note = "  (soft upgrade: see ci_core.llm.model_registry)"
 
     date_str = f"  {date.isoformat()}  ({_days_ago(date)})" if date else "  (no date)"
     print(f"  {marker_raw}  {prefix}{model_id}{date_str}{note}")
@@ -389,8 +389,8 @@ def main():
         "To update your configured model, edit models: in configs/user.yaml\n"
         "and run: python check.py --publication your_publication_name\n"
         "\nTo update the built-in registry after a model audit:\n"
-        "  1. Edit model_registry.py: _SUPERSEDED, _NEWER_AVAILABLE\n"
-        "  2. Bump REGISTRY_DATE to today's date\n"
+        "  1. Edit ci-core's configs/model_registry.yaml: superseded, newer_available\n"
+        "  2. Bump registry_date to today's date\n"
     )
 
 

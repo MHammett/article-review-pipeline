@@ -60,7 +60,7 @@ _FALLBACK = {
 
 
 def _load():
-    path = Path(__file__).parent / "configs" / "timeouts.yaml"
+    path = Path(__file__).parent.parent / "configs" / "timeouts.yaml"
     if not path.exists():
         return _FALLBACK
     try:

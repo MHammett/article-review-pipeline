@@ -30,9 +30,9 @@ import time
 import logging
 import requests
 
-from . import streaming
+from .. import streaming
 from ... import redact
-from .json_utils import extract_json as _extract_json
+from ..json_utils import extract_json as _extract_json
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 # Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
@@ -546,6 +546,7 @@ def _execute_request(
     )
     return {
         "failed": False,
+        "raw": text,
         "data": parsed,
         "model": model,
         "tokens": {

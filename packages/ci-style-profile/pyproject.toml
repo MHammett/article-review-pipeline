@@ -5,8 +5,9 @@ description = "Synthesize a writing-style profile from a multi-source corpus"
 requires-python = ">=3.10"
 dependencies = [
     "ci-core",
-    "ci-article-review",
     "requests>=2.31",
+    "pyyaml>=6.0,<7.0",
+    "python-dotenv>=1.0.0,<2.0",
     "ruamel.yaml>=0.18",
     "google-auth>=2.0",
     "google-auth-oauthlib>=1.0",
@@ -20,7 +21,6 @@ style-profile-bootstrap = "ci_style_profile.bootstrap:main"
 
 [tool.uv.sources]
 ci-core = { workspace = true }
-ci-article-review = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

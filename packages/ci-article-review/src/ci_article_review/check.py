@@ -36,7 +36,7 @@ from .config_loader import (
     merge_configs,
     validate_publication_name,
 )
-from .redact import redact_url_keys
+from ci_core.redact import redact_url_keys
 
 PASS = "\033[32m PASS\033[0m"
 FAIL = "\033[31m FAIL\033[0m"

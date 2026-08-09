@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ci_article_review.adapters.review.json_utils import extract_json
+from ci_core.llm.json_utils import extract_json
 from .callers import call_all, call_one
 from .collectors.base import Document
 from .detect import (
@@ -138,13 +138,13 @@ def _reconcile(
     style_label: str = "",
 ) -> dict:
     """Run Claude reconciliation pass. Returns parsed result dict."""
-    from ci_article_review.config_loader import _normalize_model_configs
+    from ci_core.config_helpers import normalize_model_configs
 
     system_prompt = _load_prompt("synthesize_reconcile.txt")
     user_prompt = _build_reconcile_input(results, consolidated_lists, style_label)
 
     # Always use Claude for reconciliation
-    models_cfg = _normalize_model_configs(user_config.get("models", {}))
+    models_cfg = normalize_model_configs(user_config.get("models", {}))
     claude_cfg = models_cfg.get("claude")
     if not claude_cfg:
         raise SynthesisError("Claude not configured; required for reconciliation pass")

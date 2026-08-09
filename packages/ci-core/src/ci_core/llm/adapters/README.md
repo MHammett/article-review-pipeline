@@ -1,6 +1,10 @@
-# Review Adapter Interface
+# Provider Adapter Interface
 
-Each review adapter exposes a `call()` function with this signature:
+These are the shared LLM provider adapters. Both `ci-article-review` (the
+review pipeline) and `ci-style-profile` (corpus synthesis) call them, so the
+interface below is a cross-package contract — see `docs/NAMING.md`.
+
+Each adapter exposes a `call()` function with this signature:
 
 ```python
 def call(
@@ -14,7 +18,8 @@ def call(
 ) -> dict:
 ```
 
-`provider_config` is the normalized model config dict from `config_loader` (e.g.
+`provider_config` is the normalized model config dict from
+`ci_core.config_helpers.normalize_model_configs` (e.g.
 `{"provider": "vertex_ai", "model": "gemini-2.5-flash", "project": "my-project", ...}`).
 When `None` or `{}`, each adapter falls back to its default public-API behavior.
 The `model` parameter is kept for backward compatibility; `provider_config["model"]` takes
@@ -29,7 +34,7 @@ precedence when both are supplied.
 | `model` | str | Model identifier actually used |
 | `tokens` | dict | `{"prompt": int, "completion": int}` |
 | `error` | str | Error message (present when `failed=True`) |
-| `raw` | str | Raw response text (present when JSON parsing failed) |
+| `raw` | str | Assembled response text — always present on success, and on failures where text was received |
 | `fallback_from` | str | Set when the adapter fell back to a secondary model |
 | `provider` | str | Set by Azure backends to identify the provider tier |
 
@@ -41,11 +46,13 @@ precedence when both are supplied.
 | `openai.py` | `openai` (default), `azure` | Azure requires `endpoint` and `deployment` |
 | `mistral.py` | `mistral` (default), `azure` | Azure is an endpoint-only swap, same Bearer auth |
 | `grok.py` | `grok` (default) | No alternate providers |
+| `claude.py` | `anthropic` (default) | Falls back through Sonnet/Haiku on capacity (529) |
+| `perplexity.py` | `perplexity` (default) | Always grounded; returns `citations` / `search_results` |
 
 **Streaming (SSE):**
 
 All adapters POST with `stream=True` and assemble the provider's SSE delta stream
-via the shared helpers in [`streaming.py`](streaming.py) before running the existing
+via the shared helpers in [`../streaming.py`](../streaming.py) before running the existing
 JSON parse/validation on the accumulated text. Consequences for the return dict and
 config:
 
@@ -63,7 +70,16 @@ When writing a new adapter, build its payload with `stream=True`, pass
 `streaming.stream_timeout(cfg, <default_read_gap>)` as the request `timeout`, and feed
 the response to the matching `streaming.accumulate_*` helper.
 
-**To add a new review adapter:**
-1. Create a new file in `adapters/review/`
-2. Implement `call()` with the signature above
-3. Register it in `pipeline.py`'s runner list and `consolidation.py`'s `_all_for_additional`
+**Two ways to call an adapter:**
+
+- `call_provider(name, ...)` — dispatch by adapter name; returns the result dict above unchanged.
+- `call_text(name, ...)` — returns the assembled text instead of the JSON verdict, for callers
+  that parse it themselves. A `Malformed JSON response` failure carrying `raw` text becomes a
+  success there; every other failure stays a failure. `ci-style-profile` uses this.
+
+**To add a new adapter:**
+1. Create a new file in `ci_core/llm/adapters/`
+2. Implement `call()` with the signature above, including `raw` in the success return
+3. Register it in `ADAPTER_MODULES` in `__init__.py`
+4. For the review pipeline, also register it in `ci_article_review/pipeline.py`'s runner
+   list and `consolidation.py`'s `_all_for_additional`

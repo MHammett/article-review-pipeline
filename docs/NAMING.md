@@ -38,6 +38,42 @@ rename so the boundary is unambiguous.
 | `ci-article-review` | `ci_article_review` | Review drafted/published articles (incl. `--url` web fetch) | ✅ distinct & accurate |
 | `ci-style-profile` | `ci_style_profile` | Bootstrap a writing-style profile from a multi-source corpus (→ `publication.yaml`) | ✅ distinct & accurate |
 
+### Dependency direction
+
+`ci-core` is the only shared package. Dependencies flow one way:
+
+```
+ci-article-review ──┐
+                    ├──> ci-core
+ci-style-profile ───┘
+```
+
+Two rules follow, and both are enforceable with a `grep`:
+
+1. **The application packages must not depend on each other.** `ci-style-profile`
+   used to declare a dependency on `ci-article-review` and import a dozen symbols
+   from it. Anything two applications both need belongs in `ci-core` instead.
+
+   ```
+   grep -rn "from ci_article_review" packages/ci-style-profile/src/   # must be empty
+   grep -rn "from ci_style_profile" packages/ci-article-review/src/   # must be empty
+   ```
+
+2. **`ci-core` must not import from an application package.** It is the leaf of
+   the graph. When shared code needs app-owned data (a YAML config file, say),
+   the data moves to `ci-core` alongside its loader, or the caller passes it in —
+   `ci-core` never reaches back up.
+
+   ```
+   grep -rn "ci_article_review\|ci_style_profile" packages/ci-core/src/   # must be empty
+   ```
+
+A corollary for naming: anything `ci-core` exposes across a package boundary is
+a **public** name (no leading underscore), because it is a supported contract
+between packages. Cross-package imports of private helpers — `ci-style-profile`
+importing `ci_article_review.config_loader._normalize_model_configs` — are the
+smell that the boundary is in the wrong place.
+
 ### Resolved: `ci-web-intel` → `ci-style-profile`
 
 The package was formerly named `ci-web-intel` (dist description "Web intelligence

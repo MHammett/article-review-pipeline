@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 import requests
 
-from ci_article_review.adapters.review import streaming
+from ci_core.llm import streaming
 
 
 class _FakeRaw:
@@ -145,7 +145,7 @@ class TestPerplexityAdapterEndToEndDecoding:
     """
 
     def test_call_decodes_split_curly_apostrophe_correctly(self):
-        from ci_article_review.adapters.review import perplexity as pplx
+        from ci_core.llm.adapters import perplexity as pplx
 
         answer = json.dumps(
             {"summary": "The utility’s 2025 Uptime’s report", "claims": []},
@@ -178,7 +178,7 @@ class TestPerplexityAdapterEndToEndDecoding:
         resp.close = MagicMock()
 
         with patch(
-            "ci_article_review.adapters.review.perplexity.requests.Session"
+            "ci_core.llm.adapters.perplexity.requests.Session"
         ) as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session

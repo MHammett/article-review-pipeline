@@ -1,8 +1,13 @@
-import os
 import re
 import yaml
 from pathlib import Path
 from dotenv import load_dotenv
+
+from ci_core.config_helpers import (
+    load_yaml as _load_yaml,
+    normalize_model_configs as _normalize_model_configs,
+    resolve_env_recursive as _resolve_env_recursive,
+)
 
 load_dotenv()
 
@@ -38,37 +43,6 @@ def _get_nested(d, *keys):
             return None
         d = d[k]
     return d
-
-
-def _resolve_env(value):
-    if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-        env_key = value[2:-1]
-        resolved = os.getenv(env_key)
-        if resolved is None:
-            raise ValueError(
-                f"Environment variable {env_key!r} is not set. "
-                f"Add it to your .env file or set it in the shell."
-            )
-        return resolved
-    return value
-
-
-def _resolve_env_recursive(obj):
-    if isinstance(obj, dict):
-        return {k: _resolve_env_recursive(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_resolve_env_recursive(i) for i in obj]
-    if isinstance(obj, str):
-        return _resolve_env(obj)
-    return obj
-
-
-def _load_yaml(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        raise ValueError(f"Config file {path} contains invalid YAML:\n  {e}") from e
 
 
 def load_user_config(config_dir="configs"):
@@ -417,69 +391,6 @@ def _apply_preset_overrides(pipeline_cfg, models_raw):
         merged[provider] = current
 
     return merged
-
-
-# Default provider for each adapter when user.yaml uses the simple string form.
-_DEFAULT_PROVIDERS = {
-    "gemini": "ai_studio",
-    "openai": "openai",
-    "mistral": "mistral",
-    "grok": "grok",
-    "claude": "anthropic",
-    "perplexity": "perplexity",
-}
-
-
-def _normalize_model_configs(models_raw):
-    """Normalize the ``models`` section of user.yaml to always be dicts.
-
-    Two forms are accepted — both are valid, and simple strings remain the
-    default so existing user.yaml files need no changes:
-
-    Simple form (backward-compatible)::
-
-        models:
-          gemini: gemini-2.5-flash
-          openai: gpt-4o
-
-    Extended form (enables provider switching)::
-
-        models:
-          gemini:
-            provider: vertex_ai
-            model: gemini-2.5-flash
-            project: my-gcp-project
-            location: us-central1
-          openai:
-            provider: azure
-            model: gpt-4o
-            endpoint: https://my-resource.openai.azure.com
-            deployment: my-gpt4o-deployment
-            api_version: "2024-02-01"
-          mistral:
-            provider: azure
-            model: mistral-large-latest
-            endpoint: https://Mistral-Large-abc.eastus2.inference.ai.azure.com
-
-    After normalization every entry is a dict with at least ``provider`` and
-    ``model`` keys.  The rest of the system only has to deal with dicts.
-    """
-    if not models_raw or not isinstance(models_raw, dict):
-        return {}
-    result = {}
-    for adapter, value in models_raw.items():
-        if isinstance(value, str):
-            result[adapter] = {
-                "provider": _DEFAULT_PROVIDERS.get(adapter, adapter),
-                "model": value,
-            }
-        elif isinstance(value, dict):
-            normalized = dict(value)
-            if "provider" not in normalized:
-                normalized["provider"] = _DEFAULT_PROVIDERS.get(adapter, adapter)
-            result[adapter] = normalized
-        # None or unexpected type — omit silently; adapter will use its built-in default.
-    return result
 
 
 def merge_configs(user_config, pub_config):
