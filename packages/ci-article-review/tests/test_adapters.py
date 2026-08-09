@@ -1756,7 +1756,7 @@ class TestHistoryWriteErrors:
 
         def selective_fail(path, *args, **kwargs):
             call_count["n"] += 1
-            if call_count["n"] == 2:  # second open is the corrections log
+            if call_count["n"] == 3:  # third open is the corrections log
                 raise OSError("disk full")
             return real_open(path, *args, **kwargs)
 
@@ -1764,6 +1764,25 @@ class TestHistoryWriteErrors:
             paths = hist.save_run(str(tmp_path), "Test Article", 1, report, [])
         assert paths["report_path"] is not None
         assert paths["corrections_path"] is None
+
+    def test_markdown_write_failure_returns_other_paths(self, tmp_path):
+        import ci_article_review.history as hist
+
+        report = {"article_title": "Test Article", "run_number": 1}
+        call_count = {"n": 0}
+        real_open = open
+
+        def selective_fail(path, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:  # second open is the markdown review
+                raise OSError("disk full")
+            return real_open(path, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=selective_fail):
+            paths = hist.save_run(str(tmp_path), "Test Article", 1, report, [])
+        assert paths["report_path"] is not None
+        assert paths["corrections_path"] is not None
+        assert paths["markdown_path"] is None
 
 
 # ---------------------------------------------------------------------------

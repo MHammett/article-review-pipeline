@@ -15,7 +15,9 @@ accurate without you doing it by hand.
 
 Copy everything between the dashed lines into the SAME chat thread that has
 the article's context (or paste the CURRENT metadata file if starting fresh),
-then paste the pipeline's CONSOLIDATED REVIEW REPORT (Sections 1-8) below it.
+then open the pipeline run's `run_N_<timestamp>_review.md` file (saved next
+to the JSON report in `pipeline_history/<article-slug>/`) and paste its
+SECTION 1 through SECTION 8 content below it.
 
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -44,8 +46,8 @@ Rules for the metadata update:
 - Increment "Pipeline run" by 1.
 
 Here are the consolidated review findings:
-[paste SECTION 1 through SECTION 8 of the pipeline's CONSOLIDATED REVIEW
-REPORT here]
+[paste SECTION 1 through SECTION 8 from the run's `run_N_<timestamp>_review.md`
+file here]
 
 Here is the current metadata (paste your metadata_only.md content, or the
 full handoff document's non-DRAFT sections):
