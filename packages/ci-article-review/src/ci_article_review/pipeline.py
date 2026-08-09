@@ -43,6 +43,7 @@ import argparse
 import concurrent.futures
 import importlib
 import logging
+import re
 import time
 
 import requests
@@ -312,6 +313,22 @@ def _build_user_prompt(draft: str, handoff: dict) -> str:
         parts.append(f"ADDITIONAL CONTEXT:\n{handoff['additional_context']}\n")
     parts.append(f"\nDRAFT:\n{draft}")
     return "\n".join(parts)
+
+
+# Matches a URL embedded in a fact-check "source" field, which is often free
+# text like "Publisher Name, Article Title, https://example.com/path" rather
+# than a bare URL.
+_SOURCE_URL_RE = re.compile(r"https?://\S+")
+
+
+def _extract_source_url(source_field: str) -> str | None:
+    """Pull an embedded URL out of a fact-check item's "source" field, if any."""
+    if not source_field:
+        return None
+    m = _SOURCE_URL_RE.search(source_field)
+    if not m:
+        return None
+    return m.group(0).rstrip(".,;:)\"'")
 
 
 def _read_handoff_file(path: str) -> str:
@@ -942,18 +959,30 @@ def run_draft_pipeline(
         from .adapters.citation.resolver import resolve_citations
 
         fact_check = report.get("section_2_fact_check") or {}
-        # Pull claim text from outdated, contradicted, and unverifiable lists
+        # Pull claim text from outdated, contradicted, and unverifiable lists.
+        # outdated/contradicted items already carry a model-supplied "source"
+        # field (per prompts/fact_check.txt) — when it contains a URL, use it
+        # directly instead of re-discovering a source via the adapter loop.
         claims = []
+        seen_claim_text = set()
         for key in (
             "outdated",
             "contradicted",
             "unverifiable",
             "primary_source_needed",
         ):
+            known_url_eligible = key in ("outdated", "contradicted")
             for item in fact_check.get(key, []):
                 claim = item.get("claim", "")
-                if claim and claim not in claims:
-                    claims.append(claim)
+                if not claim or claim in seen_claim_text:
+                    continue
+                seen_claim_text.add(claim)
+                known_url = (
+                    _extract_source_url(item.get("source", ""))
+                    if known_url_eligible
+                    else None
+                )
+                claims.append({"claim": claim, "known_url": known_url})
         if claims:
             citation_results = resolve_citations(claims, citation_sources)
             resolved_count = sum(1 for r in citation_results if r.get("resolved"))

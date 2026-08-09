@@ -3,6 +3,10 @@ import hashlib
 import importlib
 import logging
 
+import requests
+
+from ci_core.http import USER_AGENT
+
 from . import wayback
 
 log = logging.getLogger(__name__)
@@ -35,14 +39,53 @@ def sha256_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _resolve_one(claim, citation_sources):
+def _resolve_known_url(claim, known_url, timeout=15):
+    """Resolve a claim whose source URL is already known (e.g. supplied by the
+    fact-check model itself), bypassing the narrow adapter matching entirely.
+    """
+    try:
+        resp = requests.get(
+            known_url, timeout=timeout, headers={"User-Agent": USER_AGENT}
+        )
+        resp.raise_for_status()
+        content = resp.text
+    except Exception as e:
+        log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
+        return {
+            "claim": claim,
+            "url": known_url,
+            "resolved": False,
+            "note": f"Known source URL could not be fetched: {e}",
+        }
+
+    wb = wayback.check(known_url)
+    return {
+        "claim": claim,
+        "source_name": "fact-check model",
+        "url": known_url,
+        "content_summary": content[:500],
+        "checksum": sha256_checksum(content),
+        "resolved": True,
+        "verification": "checksum",
+        "wayback": wb,
+    }
+
+
+def _resolve_one(claim, citation_sources, known_url=None):
     """Resolve a single claim against the configured sources, in order.
+
+    If ``known_url`` is given (a source URL the fact-check model already
+    supplied for this claim), it is fetched and checksummed directly —
+    the narrow adapter matching below is skipped entirely.
 
     Returns the resolution dict.  Pointer-only adapters (e.g. FHWA, which just
     points at a publication for manual retrieval) are reported with
     ``verification: "pointer"`` so the report does not imply the claim was
     checksummed against retrieved data.
     """
+    if known_url:
+        return _resolve_known_url(claim, known_url)
+
     for source_config in citation_sources:
         adapter_name = source_config.get("adapter")
         if not adapter_name or adapter_name == "generic_url":
@@ -77,22 +120,36 @@ def _resolve_one(claim, citation_sources):
     }
 
 
+def _normalize_claim_entry(entry):
+    """Accept either a plain claim string or a dict with an optional
+    already-known source URL: {"claim": str, "known_url": str | None}.
+    """
+    if isinstance(entry, str):
+        return entry, None
+    return entry.get("claim", ""), entry.get("known_url")
+
+
 def resolve_citations(claims, citation_sources):
     """
-    For each claim, try each configured source adapter to find a primary source.
-    Claims are resolved in parallel (bounded by _MAX_PARALLEL) because each one
-    performs blocking network I/O — the source lookup plus a Wayback check.
+    For each claim, resolve a primary source. If the claim entry carries a
+    ``known_url`` (a source the fact-check model already supplied), that URL
+    is fetched and checksummed directly. Otherwise each configured source
+    adapter is tried in order. Claims are resolved in parallel (bounded by
+    _MAX_PARALLEL) because each one performs blocking network I/O — the
+    source lookup plus a Wayback check.
     Returns a list of resolution results in the original claim order.
     """
     if not claims:
         return []
 
+    normalized = [_normalize_claim_entry(entry) for entry in claims]
+
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(len(claims), _MAX_PARALLEL)
+        max_workers=min(len(normalized), _MAX_PARALLEL)
     ) as pool:
         futures = {
-            pool.submit(_resolve_one, claim, citation_sources): idx
-            for idx, claim in enumerate(claims)
+            pool.submit(_resolve_one, claim, citation_sources, known_url): idx
+            for idx, (claim, known_url) in enumerate(normalized)
         }
         ordered: dict[int, dict] = {}
         for future in concurrent.futures.as_completed(futures):
@@ -102,9 +159,9 @@ def resolve_citations(claims, citation_sources):
             except Exception as e:
                 log.warning(f"Citation resolution raised for claim index {idx}: {e}")
                 ordered[idx] = {
-                    "claim": claims[idx],
+                    "claim": normalized[idx][0],
                     "resolved": False,
                     "note": f"Resolution error: {e}",
                 }
 
-    return [ordered[i] for i in range(len(claims))]
+    return [ordered[i] for i in range(len(normalized))]
