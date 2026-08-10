@@ -3,7 +3,7 @@
 Run the check command first:
 
 ```powershell
-uv run python -m ci_article_review.check --publication your_publication_name
+uv run ci-check --publication your_publication_name
 ```
 
 It makes one minimal call to each configured service and tells you exactly what's wrong before you waste a full pipeline run diagnosing it.

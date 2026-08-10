@@ -323,3 +323,88 @@ def test_all_relative_markdown_links_resolve():
                 )
 
     assert not broken, "Broken relative markdown links:\n  " + "\n  ".join(broken)
+
+
+# ---------------------------------------------------------------------------
+# 5. CLI invocation style
+# ---------------------------------------------------------------------------
+
+# The docs invoke the CLIs as console scripts (`uv run ci-check`), not as
+# modules (`uv run python -m ci_article_review.check`). Both run, but only the
+# console script reports its own name in argparse's usage line — `python -m`
+# prints "usage: check.py", a path that has not been runnable since the src/
+# layout landed. Setting prog= to compensate would bake "uv run" into --help,
+# which is wrong for anyone inside an activated venv, so the docs move instead.
+
+_CONSOLE_SCRIPT_REF = re.compile(r"\buv run (ci-[a-z0-9-]+)")
+_MODULE_FORM_REF = re.compile(r"\bpython -m (ci_[a-z_]+)\.([a-z_]+)")
+_SCRIPTS_SECTION = re.compile(r"^\[project\.scripts\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
+_SCRIPT_ENTRY = re.compile(r"^([\w-]+)\s*=\s*[\"']([\w.]+):(\w+)[\"']", re.M)
+
+
+def _declared_console_scripts():
+    """Map console-script name -> "module:function", across every package.
+
+    Parsed with a regex rather than tomllib because tomllib is 3.11+ and this
+    project supports 3.10.
+    """
+    scripts = {}
+    for pyproject in sorted(REPO_ROOT.glob("packages/*/pyproject.toml")):
+        section = _SCRIPTS_SECTION.search(pyproject.read_text(encoding="utf-8"))
+        if not section:
+            continue
+        for name, module, func in _SCRIPT_ENTRY.findall(section.group(1)):
+            scripts[name] = f"{module}:{func}"
+    return scripts
+
+
+def test_documented_console_scripts_are_declared():
+    """Every `uv run ci-foo` in the docs resolves to a real entry point.
+
+    Without this, renaming a script in pyproject.toml leaves the docs quietly
+    pointing at a command that no longer exists.
+    """
+    declared = _declared_console_scripts()
+    assert declared, (
+        "No [project.scripts] entries found under packages/*/pyproject.toml — "
+        "the parser in this test is probably out of date."
+    )
+
+    unknown = []
+    for md_path in _markdown_files():
+        text = md_path.read_text(encoding="utf-8")
+        for name in sorted(set(_CONSOLE_SCRIPT_REF.findall(text))):
+            if name not in declared:
+                unknown.append(f"{md_path.relative_to(REPO_ROOT).as_posix()} → {name}")
+
+    assert not unknown, (
+        "Docs invoke console scripts that no package declares:\n  "
+        + "\n  ".join(unknown)
+        + "\n\nDeclared: "
+        + ", ".join(sorted(declared))
+    )
+
+
+def test_docs_do_not_reintroduce_the_module_invocation_form():
+    """Docs use `uv run ci-foo`, not `uv run python -m ci_article_review.foo`.
+
+    Only flags modules that actually have a console script — `probe` has a
+    parser but no entry point, so documenting it as a module would be correct.
+    """
+    by_target = {target: name for name, target in _declared_console_scripts().items()}
+
+    offenders = []
+    for md_path in _markdown_files():
+        text = md_path.read_text(encoding="utf-8")
+        for package, module in set(_MODULE_FORM_REF.findall(text)):
+            script = by_target.get(f"{package}.{module}:main")
+            if script:
+                offenders.append(
+                    f"{md_path.relative_to(REPO_ROOT).as_posix()}: "
+                    f"python -m {package}.{module} → use `uv run {script}`"
+                )
+
+    assert not offenders, (
+        "Docs use the module invocation form where a console script exists:\n  "
+        + "\n  ".join(sorted(offenders))
+    )
