@@ -154,10 +154,10 @@ At `standard` thoroughness, consensus requires the same passage to be flagged by
 A model returned 503 capacity errors and the pipeline fell back to a less capable variant (e.g., `gemini-2.5-flash-lite` instead of `gemini-2.5-flash`). The findings are valid but may be less thorough. Re-run when the preferred model is available to confirm.
 
 **MODEL CURRENCY warning in summary**  
-One of your configured model IDs has been superseded by a newer model. The old model still works; this is informational. Update `user.yaml` to the replacement model shown. The registry tracking this lives in `model_registry.py` — if you're confident the current model is still the best choice, you can remove its entry from `_SUPERSEDED`.
+One of your configured model IDs has been superseded by a newer model. The old model still works; this is informational. Update `user.yaml` to the replacement model shown. The registry tracking this lives in [`ci-core`'s `model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml) — if you're confident the current model is still the best choice, you can remove its entry from `superseded:`.
 
 **Model registry staleness notice**  
-The built-in model registry hasn't been updated in 60+ days. Provider APIs change frequently. Re-check [PROVIDERS.md](PROVIDERS.md) against current provider documentation, update `_SUPERSEDED` / `_NEWER_AVAILABLE` in `model_registry.py`, and bump `REGISTRY_DATE` to today. This resets the staleness clock.
+The built-in model registry hasn't been updated in 60+ days. Provider APIs change frequently. Re-check [PROVIDERS.md](PROVIDERS.md) against current provider documentation, update `superseded:` / `newer_available:` in [`ci-core`'s `model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml), and bump `registry_date:` to today. This resets the staleness clock. No code change is needed — the pipeline reloads the YAML each run.
 
 **`discover.py` shows no models for a provider**  
 Check that the provider's API key is valid (run `check.py` first). For Gemini configured via Vertex AI, model listing is not supported — check https://ai.google.dev/models manually. For Perplexity, model listing isn't available from their API; the script shows a static documented list.
