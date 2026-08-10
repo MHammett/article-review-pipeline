@@ -1,5 +1,6 @@
 """Tests for adapters.citation.resolver — parallel resolution, ordering, pointer flag."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -12,6 +13,32 @@ _SOURCES = [{"name": "FRED", "adapter": "fred"}]
 
 def _no_wayback(url, timeout=10):
     return {"archived": None}
+
+
+def _prior_citation(url, content, verification="checksum"):
+    """A section_9_citations entry as a prior run would have saved it."""
+    return {
+        "claim": "old claim",
+        "url": url,
+        "checksum": resolver.sha256_checksum(content),
+        "resolved": True,
+        "verification": verification,
+    }
+
+
+def _write_report(root, slug, run_number, ts, citations):
+    d = root / slug
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"run_{run_number}_{ts.replace(':', '').replace('-', '')}_report.json"
+    report = {
+        "generated": ts,
+        "run_number": run_number,
+        "article_title": slug,
+        "section_9_citations": citations,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f)
+    return path
 
 
 class TestResolveCitations:
@@ -576,3 +603,343 @@ class TestArchiveSubmission:
             resolver.resolve_citations(["c"], _SOURCES)
 
         mock_submit.assert_not_called()
+
+
+def _fred_returning(url, content, pointer_only=False):
+    def fake_resolve(claim, api_key=None):
+        result = {"found": True, "url": url, "content": content}
+        if pointer_only:
+            result["pointer_only"] = True
+        return result
+
+    return fake_resolve
+
+
+def _resolve_against_history(history_root, fake_resolve, claims=None):
+    with (
+        patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check",
+            side_effect=_no_wayback,
+        ),
+        patch(
+            "ci_article_review.adapters.citation.sources.fred.resolve",
+            side_effect=fake_resolve,
+        ),
+    ):
+        return resolver.resolve_citations(
+            claims or ["new claim"], _SOURCES, history_root=str(history_root)
+        )
+
+
+class TestContentDriftDetection:
+    """Cross-run checksum comparison: a URL resolved at the checksum tier
+    before, with a different checksum now, is flagged content_changed_since."""
+
+    def test_same_url_same_checksum_no_drift(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/data", "same content")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path, _fred_returning("https://example.com/data", "same content")
+        )
+
+        assert results[0]["verification"] == "checksum"
+        assert "content_changed_since" not in results[0]
+
+    def test_same_url_different_checksum_flags_drift(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            3,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/data", "old content")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path, _fred_returning("https://example.com/data", "new content")
+        )
+
+        drift = results[0]["content_changed_since"]
+        assert drift["prior_run"] == 3
+        assert drift["prior_article"] == "article-one"
+        assert drift["prior_date"] == "2026-01-01T00:00:00"
+        assert drift["prior_checksum"] == resolver.sha256_checksum("old content")
+
+    def test_drift_never_blocks_resolution(self, tmp_path):
+        """A changed source is a reviewer signal, not a resolution failure."""
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/data", "old content")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path, _fred_returning("https://example.com/data", "new content")
+        )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["verification"] == "checksum"
+        assert "content_changed_since" in results[0]
+
+    def test_never_before_seen_url_no_comparison(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/unrelated", "whatever")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path,
+            _fred_returning("https://example.com/brand-new", "brand new content"),
+        )
+
+        assert results[0]["resolved"] is True
+        assert "content_changed_since" not in results[0]
+
+    def test_drift_detected_across_different_articles(self, tmp_path):
+        """The same source URL cited by a different article's prior run still
+        counts — sources get reused across articles for the same publication."""
+        _write_report(
+            tmp_path,
+            "some-other-article",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/shared-source", "v1")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path, _fred_returning("https://example.com/shared-source", "v2")
+        )
+
+        assert results[0]["content_changed_since"]["prior_article"] == (
+            "some-other-article"
+        )
+
+    def test_most_recent_prior_run_wins(self, tmp_path):
+        """With several prior sightings of a URL, the comparison is against the
+        newest one, not whichever file happened to be scanned last."""
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/data", "v1")],
+        )
+        _write_report(
+            tmp_path,
+            "article-two",
+            2,
+            "2026-06-01T00:00:00",
+            [_prior_citation("https://example.com/data", "v2")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path, _fred_returning("https://example.com/data", "v3")
+        )
+
+        drift = results[0]["content_changed_since"]
+        assert drift["prior_article"] == "article-two"
+        assert drift["prior_checksum"] == resolver.sha256_checksum("v2")
+
+    def test_missing_history_root_no_crash(self, tmp_path):
+        results = _resolve_against_history(
+            tmp_path / "does-not-exist", _fred_returning("https://x", "data")
+        )
+
+        assert results[0]["resolved"] is True
+        assert "content_changed_since" not in results[0]
+
+    def test_no_history_root_skips_history_scan_entirely(self):
+        """Callers that don't opt in pay nothing — no history scan happens."""
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=_fred_returning("https://x", "data"),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver."
+                "history_analytics.load_reports"
+            ) as mock_load,
+        ):
+            results = resolver.resolve_citations(["c"], _SOURCES)
+
+        mock_load.assert_not_called()
+        assert "content_changed_since" not in results[0]
+
+    def test_known_url_citation_gets_drift_check(self, tmp_path):
+        """Drift applies to the known_url path too, not just adapter results."""
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/page", "old page content")],
+        )
+        mock_resp = type(
+            "R",
+            (),
+            {"raise_for_status": lambda self: None, "text": "new page content"},
+        )()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+                history_root=str(tmp_path),
+            )
+
+        assert results[0]["verification"] == "checksum"
+        assert results[0]["content_changed_since"]["prior_checksum"] == (
+            resolver.sha256_checksum("old page content")
+        )
+
+    def test_content_mismatch_citation_not_drift_flagged(self, tmp_path):
+        """A citation demoted to content_mismatch has left the checksum tier —
+        it already carries a stronger signal, so drift doesn't pile on."""
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/page", "old page content")],
+        )
+        mock_resp = type(
+            "R",
+            (),
+            {"raise_for_status": lambda self: None, "text": "new page content"},
+        )()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=mock_resp,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call",
+                return_value={
+                    "data": {"verdict": "contradicts", "reason": "no"},
+                    "model": "mistral-small-latest",
+                    "tokens": {},
+                },
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+                history_root=str(tmp_path),
+            )
+
+        assert results[0]["verification"] == "content_mismatch"
+        assert "content_changed_since" not in results[0]
+
+
+class TestChecksumIndexTierFiltering:
+    """Only checksum-tier prior entries are indexed, and only checksum-tier
+    resolutions are compared — a pointer-only checksum is taken over whatever
+    the adapter called content (often nothing), so comparing it is noise."""
+
+    def test_pointer_only_resolution_is_never_drift_flagged(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/portal", "old blurb")],
+        )
+
+        results = _resolve_against_history(
+            tmp_path,
+            _fred_returning(
+                "https://example.com/portal", "new blurb", pointer_only=True
+            ),
+        )
+
+        assert results[0]["verification"] == "pointer"
+        assert "content_changed_since" not in results[0]
+
+    def test_pointer_tier_prior_entry_is_not_indexed(self, tmp_path):
+        """A URL last seen pointer-only must not make a later real fetch of
+        the same URL look like the page changed."""
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/portal", "", verification="pointer")],
+        )
+
+        assert resolver.build_checksum_index(str(tmp_path)) == {}
+
+    def test_prior_entry_without_verification_field_is_not_indexed(self, tmp_path):
+        """Reports predating the confidence tiers can't be placed in a tier,
+        so they're skipped rather than compared on a guess."""
+        entry = _prior_citation("https://example.com/data", "content")
+        del entry["verification"]
+        _write_report(tmp_path, "article-one", 1, "2026-01-01T00:00:00", [entry])
+
+        assert resolver.build_checksum_index(str(tmp_path)) == {}
+
+    def test_unresolved_prior_entry_has_no_checksum_to_index(self, tmp_path):
+        _write_report(
+            tmp_path,
+            "article-one",
+            1,
+            "2026-01-01T00:00:00",
+            [
+                {
+                    "claim": "old claim",
+                    "url": "https://example.com/data",
+                    "resolved": False,
+                    "note": "unfetchable",
+                }
+            ],
+        )
+
+        assert resolver.build_checksum_index(str(tmp_path)) == {}
+
+    def test_checksum_tier_prior_entry_is_indexed(self, tmp_path):
+        """Guard against the filters above passing vacuously — a well-formed
+        checksum-tier entry must actually land in the index."""
+        _write_report(
+            tmp_path,
+            "article-one",
+            7,
+            "2026-01-01T00:00:00",
+            [_prior_citation("https://example.com/data", "content")],
+        )
+
+        index = resolver.build_checksum_index(str(tmp_path))
+
+        assert index["https://example.com/data"] == {
+            "checksum": resolver.sha256_checksum("content"),
+            "article_slug": "article-one",
+            "run_number": 7,
+            "generated": "2026-01-01T00:00:00",
+        }
