@@ -111,8 +111,8 @@ Always saves as a WordPress draft unless you add `--publish-live`.
 
 **Analyze an existing web page:**
 
-```
-python pipeline.py --url https://example.com/some-published-post --publication your_publication_name
+```powershell
+uv run python -m ci_article_review.pipeline --url https://example.com/some-published-post --publication your_publication_name
 ```
 
 Instead of a local handoff file, this fetches the page, extracts the main
