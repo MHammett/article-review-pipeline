@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from ci_article_review.analysis import links
 
 
@@ -103,8 +105,10 @@ class TestValidateLinks:
         assert kwargs.get("stale_days") == 90
 
 
-class TestWaybackFallbackOn403:
-    """A direct 403 should fall back to a Wayback snapshot; 404/5xx should not."""
+class TestWaybackFallbackOnUnreadableOrigin:
+    """A link the origin refused (401/403/429) or that we never reached
+    (timeout, DNS/connection error) should fall back to a Wayback snapshot;
+    404/410/5xx should not."""
 
     def _head_response(self, status_code):
         resp = MagicMock()
@@ -137,6 +141,7 @@ class TestWaybackFallbackOn403:
         assert result["ok"] is True
         assert result["status_code"] == 403
         assert result["verified_via"] == "wayback_fallback"
+        assert result["origin_failure"] == "blocked"
         assert result["wayback_snapshot_url"] == snapshot_url
         mock_get.assert_called_once()
 
@@ -170,4 +175,144 @@ class TestWaybackFallbackOn403:
 
         assert result["ok"] is False
         assert result["status_code"] == 404
+        assert "origin_failure" not in result
         mock_wb.assert_not_called()
+
+    def test_410_does_not_attempt_wayback_fallback(self):
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                return_value=self._head_response(410),
+            ),
+            patch("ci_article_review.analysis.links.wayback_check") as mock_wb,
+        ):
+            result = links._check_http("https://example.com/gone-for-good")
+
+        assert result["ok"] is False
+        mock_wb.assert_not_called()
+
+    def test_5xx_does_not_attempt_wayback_fallback(self):
+        """The origin's own failure isn't something an archive copy stands in
+        for — see wayback._FALLBACK_STATUSES for the reasoning."""
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                return_value=self._head_response(503),
+            ),
+            patch("ci_article_review.analysis.links.wayback_check") as mock_wb,
+        ):
+            result = links._check_http("https://example.com/down")
+
+        assert result["ok"] is False
+        mock_wb.assert_not_called()
+
+    def _check_with_head_failure(self, exc, wayback_result):
+        """Run _check_http where the HEAD request raises ``exc``."""
+        snap_resp = MagicMock(status_code=200)
+        with (
+            patch("ci_article_review.analysis.links.requests.head", side_effect=exc),
+            patch(
+                "ci_article_review.analysis.links.requests.get",
+                return_value=snap_resp,
+            ) as mock_get,
+            patch(
+                "ci_article_review.analysis.links.wayback_check",
+                return_value=wayback_result,
+            ),
+        ):
+            result = links._check_http("https://example.com/slow")
+        return result, mock_get
+
+    def test_timeout_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/slow"
+        )
+        result, mock_get = self._check_with_head_failure(
+            requests.exceptions.ConnectTimeout("connect timed out"),
+            {"archived": True, "snapshot_url": snapshot_url},
+        )
+
+        assert result["ok"] is True
+        assert result["verified_via"] == "wayback_fallback"
+        assert result["origin_failure"] == "timeout"
+        assert result["wayback_snapshot_url"] == snapshot_url
+        # The origin really did fail; the report must not read as a clean fetch.
+        assert result["error"] == "timeout"
+        mock_get.assert_called_once()
+
+    def test_dns_failure_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/slow"
+        )
+        # requests wraps urllib3's NameResolutionError in a ConnectionError.
+        result, _ = self._check_with_head_failure(
+            requests.exceptions.ConnectionError(
+                "NameResolutionError: getaddrinfo failed [Errno 11002]"
+            ),
+            {"archived": True, "snapshot_url": snapshot_url},
+        )
+
+        assert result["ok"] is True
+        assert result["verified_via"] == "wayback_fallback"
+        assert result["origin_failure"] == "unreachable"
+        assert "getaddrinfo failed" in result["error"]
+
+    def test_timeout_with_no_snapshot_stays_broken(self):
+        result, _ = self._check_with_head_failure(
+            requests.exceptions.ReadTimeout("read timed out"), {"archived": False}
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "timeout"
+        # Still classified as unread-not-dead, so the report can say so.
+        assert result["origin_failure"] == "timeout"
+        assert "wayback_snapshot_url" not in result
+
+    def test_unrelated_exception_gets_no_fallback(self):
+        """Only unreachable-origin failures qualify; a malformed URL doesn't."""
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                side_effect=requests.exceptions.InvalidURL("bad url"),
+            ),
+            patch("ci_article_review.analysis.links.wayback_check") as mock_wb,
+        ):
+            result = links._check_http("https://example.com/bad")
+
+        assert result["ok"] is False
+        assert "origin_failure" not in result
+        mock_wb.assert_not_called()
+
+    def test_stale_snapshot_still_flagged_when_it_satisfies_a_timeout(self):
+        """A 245-day-old snapshot recovering a timeout is not silently current."""
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/slow"
+        )
+        wb = {
+            "archived": True,
+            "snapshot_url": snapshot_url,
+            "snapshot_age_days": 245,
+            "snapshot_stale": True,
+        }
+        snap_resp = MagicMock(status_code=200)
+        with (
+            patch(
+                "ci_article_review.analysis.links.requests.head",
+                side_effect=requests.exceptions.Timeout("timed out"),
+            ),
+            patch(
+                "ci_article_review.analysis.links.requests.get",
+                return_value=snap_resp,
+            ),
+            patch("ci_article_review.analysis.links.wayback_check", return_value=wb),
+        ):
+            entry = links._check_one(
+                "https://example.com/slow",
+                check_wayback=True,
+                http_timeout=1,
+                wayback_timeout=1,
+            )
+
+        assert entry["verified_via"] == "wayback_fallback"
+        assert entry["wayback"]["snapshot_stale"] is True
+        assert entry["wayback"]["snapshot_age_days"] == 245

@@ -672,8 +672,9 @@ def _http_error_response(status_code):
 
 
 class TestKnownUrlWaybackFallback:
-    """A direct 403 on a known_url should fall back to a Wayback snapshot;
-    404/5xx should not — see resolver._wayback_fallback_content scoping."""
+    """A known_url the origin refused (401/403/429) or that we never reached
+    (timeout, DNS/connection error) should fall back to a Wayback snapshot;
+    404/410/5xx should not — see resolver._wayback_fallback_content scoping."""
 
     def test_403_recovers_via_wayback_snapshot(self):
         snapshot_url = (
@@ -744,6 +745,126 @@ class TestKnownUrlWaybackFallback:
 
         assert results[0]["resolved"] is False
         mock_wb.assert_not_called()
+
+    def _resolve_with_fetch_failure(self, exc, wayback_result):
+        """Run one known_url claim whose direct fetch raises ``exc``."""
+        snap_resp = _page_response()
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                side_effect=[exc, snap_resp],
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value=wayback_result,
+            ) as mock_wb,
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+        return results[0], mock_get, mock_wb
+
+    def test_timeout_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/page"
+        )
+        result, mock_get, _ = self._resolve_with_fetch_failure(
+            requests.exceptions.ReadTimeout("read timed out"),
+            {"archived": True, "snapshot_url": snapshot_url},
+        )
+
+        assert result["resolved"] is True
+        assert result["verified_via"] == "wayback_fallback"
+        assert result["origin_failure"] == "timeout"
+        assert "archive.org snapshot" in result["archive_provenance"]
+        assert mock_get.call_count == 2
+
+    def test_dns_failure_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/page"
+        )
+        # requests wraps urllib3's NameResolutionError in a ConnectionError.
+        result, _, _ = self._resolve_with_fetch_failure(
+            requests.exceptions.ConnectionError(
+                "NameResolutionError: getaddrinfo failed [Errno 11002]"
+            ),
+            {"archived": True, "snapshot_url": snapshot_url},
+        )
+
+        assert result["resolved"] is True
+        assert result["verified_via"] == "wayback_fallback"
+        assert result["origin_failure"] == "unreachable"
+
+    def test_timeout_with_no_snapshot_reports_unresolved(self):
+        result, _, _ = self._resolve_with_fetch_failure(
+            requests.exceptions.Timeout("timed out"), {"archived": False}
+        )
+
+        assert result["resolved"] is False
+        assert "could not be fetched" in result["note"]
+        assert "verified_via" not in result
+
+    def test_stale_snapshot_stays_flagged_stale(self):
+        """A 245-day-old snapshot satisfying a timeout is still stale."""
+        result, _, mock_wb = self._resolve_with_fetch_failure(
+            requests.exceptions.Timeout("timed out"),
+            {
+                "archived": True,
+                "snapshot_url": "https://web.archive.org/web/20240101000000/https://example.com/page",
+                "snapshot_age_days": 245,
+                "snapshot_stale": True,
+            },
+        )
+
+        assert result["wayback"]["snapshot_stale"] is True
+        assert result["wayback"]["snapshot_age_days"] == 245
+        assert "245 days old" in result["archive_provenance"]
+        # The availability answer from the fallback is reused, not re-fetched.
+        assert mock_wb.call_count == 1
+
+    def test_5xx_does_not_attempt_wayback_fallback(self):
+        """An origin-side error is the origin's problem, not something an
+        archive copy should paper over — see wayback._FALLBACK_STATUSES."""
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                return_value=_http_error_response(503),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check"
+            ) as mock_wb,
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/down"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is False
+        mock_wb.assert_not_called()
+
+    def test_429_recovers_via_wayback_snapshot(self):
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/page"
+        )
+        snap_resp = _page_response()
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.requests.get",
+                side_effect=[_http_error_response(429), snap_resp],
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": True, "snapshot_url": snapshot_url},
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+
+        assert results[0]["resolved"] is True
+        assert results[0]["origin_failure"] == "rate_limited"
 
 
 class TestArchiveSubmission:
