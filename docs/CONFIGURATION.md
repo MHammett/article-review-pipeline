@@ -808,6 +808,7 @@ A re-run is recommended when **any** of these is true: word change exceeds the t
 
 - **Claim comparison** is whitespace- and case-insensitive, and only fires when both runs supplied a claim — reports from before claim tracking won't trigger a spurious re-run.
 - **Structure comparison** looks only at headings (`#`–`######`), so body-only edits don't count as a structural change.
+- **Which run is "prior"** is decided by execution time, not by the handoff's `Pipeline run:` number. That number is author-declared, so running the same handoff twice writes two reports at the same run number; the delta always compares against the report from the execution that immediately preceded this one, whatever number it declared. The report it picked is recorded in the delta as `compared_against` and printed in the console summary and the markdown review as `Compared against: run_2_20260810_005452_report.json`.
 
 ---
 
