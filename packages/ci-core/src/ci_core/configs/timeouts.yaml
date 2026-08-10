@@ -5,7 +5,7 @@
 # WHAT THIS SIZES (streaming): the review adapters stream (SSE), so this value is
 # the per-task thread WALL-CLOCK BACKSTOP, not the HTTP socket timeout. The socket
 # read timeout is a small constant inter-token gap held by the adapters (see
-# adapters/review/streaming.py and the `stream_read_timeout` per-model override).
+# ci_core/llm/streaming.py and the `stream_read_timeout` per-model override).
 # This ceiling still has to cover the genuine TOTAL generation time (streaming does
 # not make a long call finish faster); what it no longer absorbs is a hang/stall,
 # which the read-gap layer now catches in ~120s.

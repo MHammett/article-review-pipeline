@@ -31,8 +31,9 @@ import logging
 import requests
 
 from .. import streaming
+from ..tokens import normalize_tokens
 from ... import redact
-from ..json_utils import extract_json as _extract_json
+from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 # Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
@@ -509,7 +510,11 @@ def _execute_request(
 
     # Robust parse: handles fences and prose/reasoning preambles that survive the
     # thought-part filtering above. Shared with the other review adapters.
-    parsed = _extract_json(text)
+    # Falls back to truncation salvage, because Gemini hits the output-token
+    # ceiling routinely — thinking tokens draw from the same budget as the
+    # answer, so a large thinking_budget can cut the JSON off mid-array even
+    # when finishReason comes back as STOP.
+    parsed, truncated = _extract_json_with_salvage(text)
     if parsed is None:
         # finishReason=MAX_TOKENS means generation was cut off mid-output (often
         # because the thinking budget consumed most of the token budget before
@@ -535,24 +540,36 @@ def _execute_request(
             "error": error_msg,
             "raw": text,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "grounding_available": grounding_available,
             "elapsed_seconds": elapsed,
             "finish_reason": finish_reason,
         }
 
-    log.debug(
-        f"Gemini {model} call succeeded in {elapsed}s (grounding={grounding_available})"
-    )
-    return {
+    if truncated:
+        log.warning(
+            f"Gemini {model} response was truncated (finishReason={finish_reason}, "
+            f"{usage.get('candidatesTokenCount', '?')} candidate + "
+            f"{usage.get('thoughtsTokenCount', '?')} thinking tokens) after "
+            f"{elapsed}s; salvaged the complete elements, discarded the rest."
+        )
+    else:
+        log.debug(
+            f"Gemini {model} call succeeded in {elapsed}s "
+            f"(grounding={grounding_available})"
+        )
+    result = {
         "failed": False,
         "raw": text,
         "data": parsed,
         "model": model,
-        "tokens": {
-            "prompt": usage.get("promptTokenCount"),
-            "completion": usage.get("candidatesTokenCount"),
-        },
+        "tokens": normalize_tokens(usage),
         "grounding_available": grounding_available,
         "elapsed_seconds": elapsed,
     }
+    if truncated:
+        # Not "failed" — the recovered findings are real — but flagged so
+        # downstream reporting can distinguish this from a clean response.
+        result["truncated"] = True
+        result["finish_reason"] = finish_reason
+    return result

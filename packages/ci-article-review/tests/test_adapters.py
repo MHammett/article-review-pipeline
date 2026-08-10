@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 # ---------------------------------------------------------------------------
 # The review adapters POST with stream=True and consume the response via
 # resp.iter_lines(). These helpers build mock responses that yield provider-shaped
-# SSE `data:` lines so the accumulators in adapters/review/streaming.py parse them
+# SSE `data:` lines so the accumulators in ci_core/llm/streaming.py parse them
 # exactly as they would a live stream.
 
 

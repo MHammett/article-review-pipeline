@@ -23,8 +23,9 @@ import logging
 import requests
 
 from .. import streaming
+from ..tokens import normalize_tokens
 from ... import redact
-from ..json_utils import extract_json as _extract_json
+from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
 
 DEFAULT_MODEL = "sonar-reasoning-pro"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -252,7 +253,7 @@ def _call_perplexity(
             "error": f"Perplexity stream error: {stream_error}",
             "raw": content or None,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
             "grounding_available": False,
         }
@@ -272,14 +273,16 @@ def _call_perplexity(
             "error": "Empty response (no content received from Perplexity stream)",
             "raw": None,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
             "grounding_available": False,
         }
 
     # Parse JSON — sonar models may prepend a <think> reasoning block or wrap
-    # output in markdown code fences. _extract_json handles both plus a raw {...} span.
-    parsed = _extract_json(content)
+    # output in markdown code fences. _extract_json handles both plus a raw {...}
+    # span; salvage then recovers the complete elements of a response that hit
+    # the output-token ceiling mid-array.
+    parsed, truncated = _extract_json_with_salvage(content)
     if parsed is None:
         log.warning(f"Perplexity {model} returned non-JSON content after {elapsed}s")
         return {
@@ -287,27 +290,34 @@ def _call_perplexity(
             "error": "Malformed JSON response",
             "raw": content,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
             "grounding_available": bool(citations),
         }
 
-    log.debug(
-        f"Perplexity {model} call succeeded in {elapsed}s "
-        f"(citations={len(citations)}, search_results={len(search_results)}, "
-        f"grounding={'yes' if citations else 'no'})"
-    )
-    return {
+    if truncated:
+        log.warning(
+            f"Perplexity {model} response was truncated (likely hit the output-token "
+            f"ceiling — {usage.get('completion_tokens', '?')} completion tokens) after "
+            f"{elapsed}s; salvaged the complete elements, discarded the rest."
+        )
+    else:
+        log.debug(
+            f"Perplexity {model} call succeeded in {elapsed}s "
+            f"(citations={len(citations)}, search_results={len(search_results)}, "
+            f"grounding={'yes' if citations else 'no'})"
+        )
+    result = {
         "failed": False,
         "raw": content,
         "data": parsed,
         "model": model,
-        "tokens": {
-            "prompt": usage.get("prompt_tokens"),
-            "completion": usage.get("completion_tokens"),
-        },
+        "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
         "grounding_available": True,  # Always true for sonar models
         "citations": citations,
         "search_results": search_results,
     }
+    if truncated:
+        result["truncated"] = True
+    return result

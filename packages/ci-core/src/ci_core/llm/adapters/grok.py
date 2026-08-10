@@ -1,9 +1,10 @@
-import json
 import time
 import logging
 import requests
 
 from .. import streaming
+from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
+from ..tokens import normalize_tokens
 from ... import redact
 
 DEFAULT_MODEL = "grok-4.3"
@@ -169,30 +170,40 @@ def _call_model(
     content = assembled["content"]
     usage = assembled["usage"]
 
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
+    # Shared extractor rather than a bare json.loads: grok-4.x reasoning models
+    # can emit a <think> preamble or a markdown fence, and salvage recovers the
+    # complete elements of a response cut off at the output-token ceiling.
+    parsed, truncated = _extract_json_with_salvage(content)
+    if parsed is None:
         log.warning(f"Grok {model} returned non-JSON content after {elapsed}s")
         return {
             "failed": True,
             "error": "Malformed JSON response",
             "raw": content,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(
-        f"Grok {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
-    )
-    return {
+    if truncated:
+        log.warning(
+            f"Grok {model} response was truncated (likely hit the output-token "
+            f"ceiling — {usage.get('completion_tokens', '?')} completion tokens) after "
+            f"{elapsed}s; salvaged the complete elements, discarded the rest."
+        )
+    else:
+        log.debug(
+            f"Grok {model} call succeeded in {elapsed}s "
+            f"({usage.get('total_tokens', '?')} tokens)"
+        )
+    result = {
         "failed": False,
         "raw": content,
         "data": parsed,
         "model": model,
-        "tokens": {
-            "prompt": usage.get("prompt_tokens"),
-            "completion": usage.get("completion_tokens"),
-        },
+        "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
     }
+    if truncated:
+        result["truncated"] = True
+    return result

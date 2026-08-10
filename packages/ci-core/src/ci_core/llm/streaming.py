@@ -244,7 +244,7 @@ def accumulate_openai_responses(resp):
     ``response.reasoning_summary_text.added`` / ``.delta`` / ``.done`` while the
     model is still "thinking" — before this, reasoning models sent zero bytes
     during that phase, which is what forced the inter-token read-gap timeout up
-    to 200-300s for high/xhigh effort (see adapters/review/openai.py). These
+    to 200-300s for high/xhigh effort (see ci_core/llm/adapters/openai.py). These
     events carry no answer content, but reading them off the socket is what
     resets the read-gap timer, so the summary text is captured (for
     debug/logging) rather than discarded outright. Any other typed event

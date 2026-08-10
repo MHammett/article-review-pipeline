@@ -341,6 +341,8 @@ content-intelligence/
 │   │   │   │   ├── streaming.py       SSE accumulation and read-gap timeouts
 │   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,
 │   │   │   │   │                      truncation salvage)
+│   │   │   │   ├── tokens.py          normalizes provider-native usage dicts to
+│   │   │   │   │                      the {prompt, completion} contract
 │   │   │   │   ├── cost.py            token-based cost estimation
 │   │   │   │   ├── timeout_model.py   sliding-scale timeout from size × model × effort
 │   │   │   │   └── model_registry.py  current/superseded model detection

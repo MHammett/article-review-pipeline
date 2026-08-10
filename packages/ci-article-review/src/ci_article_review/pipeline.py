@@ -648,7 +648,7 @@ def run_draft_pipeline(
     # timeout. Streaming does not make a long generation finish faster (a gpt-5.5
     # xhigh call still emits tokens for ~800s); it changes the socket read timeout,
     # which the adapters now hold at a small constant inter-token gap (see
-    # adapters/review/streaming.py) instead of the whole-generation budget. So this
+    # ci_core/llm/streaming.py) instead of the whole-generation budget. So this
     # ceiling must still cover the genuine total generation time; what it no longer
     # has to absorb is "model buffered everything and sent nothing" — a stall is now
     # caught in ~120s by the adapter's read-gap timeout, not here. Writing into
