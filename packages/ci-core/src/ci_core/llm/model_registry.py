@@ -17,7 +17,9 @@ import datetime
 import logging
 from pathlib import Path
 
-import yaml as _yaml
+import yaml as _yaml  # noqa: F401
+
+from ci_core.config_helpers import PackagedConfigError, load_packaged_yaml
 
 log = logging.getLogger(__name__)
 
@@ -25,142 +27,55 @@ log = logging.getLogger(__name__)
 # Hardcoded fallbacks — used only when configs/model_registry.yaml is missing.
 # ---------------------------------------------------------------------------
 
-_SUPERSEDED_FALLBACK: dict[str, dict] = {
-    "gpt-4": {"replacement": "gpt-5.4", "note": "GPT-5 family available (2026)"},
-    "gpt-4-turbo": {"replacement": "gpt-5.4", "note": "GPT-5 family available (2026)"},
-    "gpt-4-turbo-preview": {"replacement": "gpt-5.4"},
-    "gpt-4o": {"replacement": "gpt-5.4", "note": "GPT-5 family available (2026)"},
-    "gpt-4o-mini": {
-        "replacement": "gpt-5.4-mini",
-        "note": "GPT-5 family available (2026)",
-    },
-    "gpt-3.5-turbo": {"replacement": "gpt-5.4-mini"},
-    "o3": {
-        "replacement": "gpt-5.5",
-        "note": "gpt-5.5 with reasoning_effort: xhigh supersedes o3 at maximum preset",
-    },
-    "o4-mini": {
-        "replacement": "gpt-5.4",
-        "note": "gpt-5.4 with reasoning_effort supersedes o4-mini at balanced/thorough presets",
-    },
-    "gemini-pro": {"replacement": "gemini-2.5-flash"},
-    "gemini-1.0-pro": {"replacement": "gemini-2.5-flash"},
-    "gemini-1.5-flash": {"replacement": "gemini-2.5-flash"},
-    "gemini-1.5-flash-latest": {"replacement": "gemini-2.5-flash"},
-    "gemini-1.5-pro": {"replacement": "gemini-2.5-pro"},
-    "gemini-1.5-pro-latest": {"replacement": "gemini-2.5-pro"},
-    "gemini-2.0-flash": {"replacement": "gemini-2.5-flash"},
-    "gemini-2.0-flash-exp": {"replacement": "gemini-2.5-flash"},
-    "gemini-2.0-flash-thinking-exp": {"replacement": "gemini-2.5-flash"},
-    "grok-beta": {
-        "replacement": "grok-4.3",
-        "note": "Grok 4.x family available (2026)",
-    },
-    "grok-2-latest": {"replacement": "grok-4.3"},
-    "grok-3-latest": {
-        "replacement": "grok-4.3",
-        "note": "Grok 4.x family available (2026)",
-    },
-    "grok-3-mini-latest": {"replacement": "grok-build-0.1"},
-    "claude-3-haiku-20240307": {"replacement": "claude-haiku-4-5-20251001"},
-    "claude-3-sonnet-20240229": {"replacement": "claude-sonnet-4-6"},
-    "claude-3-opus-20240229": {"replacement": "claude-opus-4-8"},
-    "claude-haiku-3-5": {"replacement": "claude-haiku-4-5-20251001"},
-    "claude-sonnet-3-5": {"replacement": "claude-sonnet-4-6"},
-    "claude-sonnet-3-7": {"replacement": "claude-sonnet-4-6"},
-    "claude-opus-4-5": {"replacement": "claude-opus-4-8"},
-    "claude-opus-4-7": {"replacement": "claude-opus-4-8"},
-    "pplx-7b-online": {"replacement": "sonar"},
-    "pplx-70b-online": {"replacement": "sonar-pro"},
-    "sonar-small-online": {"replacement": "sonar"},
-    "sonar-medium-online": {"replacement": "sonar-pro"},
-    "mistral-small": {"replacement": "mistral-small-latest"},
-    "mistral-medium": {
-        "replacement": "mistral-large-latest",
-        "note": "mistral-medium tier retired",
-    },
-    "mistral-7b-instruct": {"replacement": "mistral-small-latest"},
-    "mixtral-8x7b-instruct": {"replacement": "mistral-large-latest"},
-    "mixtral-8x22b-instruct": {"replacement": "mistral-large-latest"},
-    "magistral-medium-latest": {
-        "replacement": "mistral-medium-3-5",
-        "note": "deprecated 5/22/2026, retires 7/31/2026",
-    },
-    "magistral-medium-2509": {
-        "replacement": "mistral-medium-3-5",
-        "note": "deprecated 5/22/2026, retires 7/31/2026",
-    },
-    "magistral-small-latest": {
-        "replacement": "mistral-small-latest",
-        "note": "deprecated 4/30/2026, retires 7/31/2026",
-    },
-    "magistral-small-2509": {
-        "replacement": "mistral-small-latest",
-        "note": "deprecated 4/30/2026, retires 7/31/2026",
-    },
-}
-
-_NEWER_AVAILABLE_FALLBACK: dict[str, dict] = {
-    "gpt-5.4": {
-        "newer": "gpt-5.5",
-        "note": "gpt-5.5 ($5/$30 MTok) available; gpt-5.4 still best value for most use cases",
-    },
-    "claude-sonnet-4-6": {
-        "newer": "claude-opus-4-8",
-        "note": "claude-opus-4-8 offers adaptive thinking (always on); sonnet-4-6 remains better value at $3/$15 MTok",
-    },
-}
-
-_REGISTRY_DATE_FALLBACK = datetime.date(2026, 6, 22)
-_STALE_NOTICE_DAYS_FALLBACK = 60
-_STALE_WARNING_DAYS_FALLBACK = 120
-
 # ---------------------------------------------------------------------------
 # Load from configs/model_registry.yaml
 # ---------------------------------------------------------------------------
 
 
 def _load_registry():
+    """Load the model registry from the packaged configs/model_registry.yaml.
+
+    Raises PackagedConfigError rather than falling back to duplicate tables in
+    Python (audit finding 14) — see ci_core.config_helpers.load_packaged_yaml.
+    Model names and deprecation dates move constantly, which is precisely why
+    keeping a second copy in lockstep was the wrong trade.
+    """
     yaml_path = Path(__file__).parent.parent / "configs" / "model_registry.yaml"
-    if not yaml_path.exists():
-        return (
-            _SUPERSEDED_FALLBACK,
-            _NEWER_AVAILABLE_FALLBACK,
-            _REGISTRY_DATE_FALLBACK,
-            _STALE_NOTICE_DAYS_FALLBACK,
-            _STALE_WARNING_DAYS_FALLBACK,
-        )
+    data = load_packaged_yaml(yaml_path)
+
+    def _normalise(raw, label):
+        """Convert YAML dict-of-dicts to {model_id: {replacement, note}} form."""
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise PackagedConfigError(f"{yaml_path}: {label!r} must be a mapping")
+        return {
+            str(model_id): dict(info)
+            for model_id, info in raw.items()
+            if isinstance(info, dict)
+        }
+
+    superseded = _normalise(data.get("superseded"), "superseded")
+    newer_available = _normalise(data.get("newer_available"), "newer_available")
+
+    reg_date_raw = data.get("registry_date")
+    if not reg_date_raw:
+        raise PackagedConfigError(f"{yaml_path}: missing 'registry_date'")
     try:
-        with open(yaml_path, encoding="utf-8") as f:
-            data = _yaml.safe_load(f) or {}
-
-        def _normalise(raw):
-            """Convert YAML dict-of-dicts to {model_id: {replacement, note}} form."""
-            result = {}
-            for model_id, info in (raw or {}).items():
-                if isinstance(info, dict):
-                    result[str(model_id)] = {k: v for k, v in info.items()}
-            return result
-
-        superseded = _normalise(data.get("superseded"))
-        newer_available = _normalise(data.get("newer_available"))
-        reg_date_raw = data.get("registry_date", _REGISTRY_DATE_FALLBACK.isoformat())
         reg_date = datetime.date.fromisoformat(str(reg_date_raw))
-        notice_days = int(data.get("stale_notice_days", _STALE_NOTICE_DAYS_FALLBACK))
-        warning_days = int(data.get("stale_warning_days", _STALE_WARNING_DAYS_FALLBACK))
-        return superseded, newer_available, reg_date, notice_days, warning_days
-    except Exception as exc:
-        log.warning(
-            "Could not load configs/model_registry.yaml (%s) — using built-in defaults",
-            exc,
+    except ValueError as exc:
+        raise PackagedConfigError(
+            f"{yaml_path}: registry_date {reg_date_raw!r} is not an ISO date"
+        ) from exc
+
+    notice_days = int(data.get("stale_notice_days", 60))
+    warning_days = int(data.get("stale_warning_days", 120))
+    if notice_days > warning_days:
+        raise PackagedConfigError(
+            f"{yaml_path}: stale_notice_days ({notice_days}) must not exceed "
+            f"stale_warning_days ({warning_days})"
         )
-        return (
-            _SUPERSEDED_FALLBACK,
-            _NEWER_AVAILABLE_FALLBACK,
-            _REGISTRY_DATE_FALLBACK,
-            _STALE_NOTICE_DAYS_FALLBACK,
-            _STALE_WARNING_DAYS_FALLBACK,
-        )
+    return superseded, newer_available, reg_date, notice_days, warning_days
 
 
 (

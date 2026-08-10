@@ -6,65 +6,51 @@ using token counts so the table stays consistent.
 
 Pricing is loaded from configs/pricing.yaml at import time so model additions
 and price changes require only a YAML edit, not a code change.  The hardcoded
-_PRICING_FALLBACK is used only when the YAML file cannot be loaded.
+The YAML is the single source of truth; there is no duplicate table in Python.
 """
 
 import logging
 from pathlib import Path
 
-import yaml as _yaml
+import yaml as _yaml  # noqa: F401
+
+from ci_core.config_helpers import PackagedConfigError, load_packaged_yaml
 
 log = logging.getLogger(__name__)
 
 # Hardcoded fallback — used only when configs/pricing.yaml is missing or unreadable.
-_PRICING_FALLBACK: dict[str, tuple[float, float]] = {
-    "gpt-5.5": (5.00, 30.00),
-    "gpt-5.4": (2.50, 15.00),
-    "gpt-5.4-mini": (0.75, 4.50),
-    "gemini-3.5-flash": (1.50, 9.00),
-    "gemini-2.5-pro": (1.25, 10.00),
-    "gemini-2.5-flash": (0.30, 2.50),
-    "gemini-2.5-flash-lite": (0.10, 0.40),
-    "mistral-large-latest": (3.00, 9.00),
-    "mistral-medium-3-5": (2.00, 6.00),
-    "mistral-small-latest": (0.10, 0.30),
-    "sonar-reasoning-pro": (2.00, 8.00),
-    "sonar-pro": (1.00, 8.00),
-    "sonar": (0.50, 1.50),
-    "sonar-deep-research": (2.00, 8.00),
-    "grok-4.20-0309-reasoning": (1.25, 2.50),
-    "grok-4.20-0309-non-reasoning": (1.25, 2.50),
-    "grok-4.3": (1.25, 2.50),
-    "grok-build-0.1": (0.30, 1.00),
-    "claude-fable-5": (10.00, 50.00),
-    "claude-opus-4-8": (5.00, 25.00),
-    "claude-sonnet-4-6": (3.00, 15.00),
-    "claude-haiku-4-5-20251001": (1.00, 5.00),
-}
-_UNKNOWN_PRICE_FALLBACK = (2.50, 10.00)
 
 
 def _load_pricing():
-    """Load pricing from configs/pricing.yaml; fall back to hardcoded table."""
+    """Load pricing from the packaged configs/pricing.yaml.
+
+    Raises PackagedConfigError if the file is missing, unparseable, or does not
+    contain a usable pricing table. There is deliberately no hardcoded fallback:
+    the duplicate table this replaced had to be edited in lockstep with the YAML
+    on the config surface that changes most often, and in the only state it
+    could ever have fired — a broken install — silently serving stale prices is
+    worse than saying so.
+    """
     yaml_path = Path(__file__).parent.parent / "configs" / "pricing.yaml"
-    if not yaml_path.exists():
-        return _PRICING_FALLBACK, _UNKNOWN_PRICE_FALLBACK
-    try:
-        with open(yaml_path, encoding="utf-8") as f:
-            data = _yaml.safe_load(f) or {}
-        raw = data.get("models", {})
-        pricing = {}
-        for model_id, pair in raw.items():
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                pricing[str(model_id)] = (float(pair[0]), float(pair[1]))
-        unknown_raw = data.get("unknown_price", list(_UNKNOWN_PRICE_FALLBACK))
-        unknown = (float(unknown_raw[0]), float(unknown_raw[1]))
-        return pricing, unknown
-    except Exception as exc:
-        log.warning(
-            "Could not load configs/pricing.yaml (%s) — using built-in defaults", exc
+    data = load_packaged_yaml(yaml_path)
+
+    pricing = {}
+    for model_id, pair in (data.get("models") or {}).items():
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+            raise PackagedConfigError(
+                f"{yaml_path}: models.{model_id} must be a [prompt, completion] "
+                f"pair, got {pair!r}"
+            )
+        pricing[str(model_id)] = (float(pair[0]), float(pair[1]))
+    if not pricing:
+        raise PackagedConfigError(f"{yaml_path}: 'models' is empty or missing")
+
+    unknown_raw = data.get("unknown_price")
+    if not (isinstance(unknown_raw, (list, tuple)) and len(unknown_raw) == 2):
+        raise PackagedConfigError(
+            f"{yaml_path}: 'unknown_price' must be a [prompt, completion] pair"
         )
-        return _PRICING_FALLBACK, _UNKNOWN_PRICE_FALLBACK
+    return pricing, (float(unknown_raw[0]), float(unknown_raw[1]))
 
 
 _PRICING, _UNKNOWN_PRICE = _load_pricing()

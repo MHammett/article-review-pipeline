@@ -12,6 +12,7 @@ configs, cost presets — deliberately stay in ``ci_article_review.config_loader
 """
 
 import os
+from pathlib import Path
 
 import yaml
 
@@ -116,3 +117,41 @@ def normalize_model_configs(models_raw):
             result[adapter] = normalized
         # None or unexpected type — omit silently; adapter will use its built-in default.
     return result
+
+
+class PackagedConfigError(RuntimeError):
+    """A YAML file shipped inside the package is missing or unreadable."""
+
+
+def load_packaged_yaml(path):
+    """Load a config YAML that ships inside the package, or raise.
+
+    These files (`pricing.yaml`, `timeouts.yaml`, `model_registry.yaml`,
+    `presets.yaml`) are packaged data resolved relative to their own module, so
+    they are present in every working install. Each used to have a duplicate
+    hardcoded copy in Python as a fallback, kept in sync by a parity test — four
+    pairs, every edit made twice, on the config surface that changes most often
+    (provider pricing and model names move constantly).
+
+    The fallbacks guarded a state that cannot occur while the package works, and
+    in that state degrading silently is worse than failing: the user gets quietly
+    stale pricing instead of a message telling them the install is broken. So
+    this raises, and the duplicates are gone.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise PackagedConfigError(
+            f"Packaged config file is missing: {path}\n"
+            "This ships inside the package, so its absence means a broken or "
+            "partial install. Re-run `uv sync` (or reinstall the package)."
+        )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception as exc:
+        raise PackagedConfigError(
+            f"Packaged config file could not be parsed: {path}\n{exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise PackagedConfigError(f"Packaged config file is not a YAML mapping: {path}")
+    return data

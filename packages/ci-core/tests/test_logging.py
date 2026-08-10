@@ -7,6 +7,19 @@ capture_logs() is used only for the middleware handler-context test.
 
 from __future__ import annotations
 
+import pytest
+
+# ci_core.config/.db/.models/.logging moved behind the `persistence` extra
+# (audit finding 13): they have no production consumer, and making them
+# mandatory meant every CLI user installed an async PostgreSQL driver and an
+# ASGI web framework for a tool that never serves HTTP. Skip cleanly when the
+# extra is absent; CI installs it, so coverage is unchanged there.
+pytest.importorskip(
+    "structlog",
+    reason="ci-core[persistence] not installed — uv sync --extra persistence",
+)
+
+
 import json
 import logging
 
