@@ -100,7 +100,14 @@ Queries each provider's live models API and reports what's available — so you 
 uv run ci-review --draft path/to/handoff.md --publication your_publication_name
 ```
 
-Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` argument.
+`ci-setup` copies `handoff_templates/draft_submission.template.md` into your
+working directory. Fill it in and pass it as the `--draft` argument.
+
+A complete worked example — a real published article with every section filled
+out — ships alongside it at
+`handoff_templates/examples/draft_submission.filled-example.md`. Read it to see
+what a good PRE-DRAFT ANALYSIS looks like; do not edit it as your starting
+point.
 
 **6. Publish an approved draft:**
 

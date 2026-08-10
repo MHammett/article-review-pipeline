@@ -1,6 +1,6 @@
 GENERATE DRAFT SUBMISSION HANDOFF
 Use this prompt in any LLM chat (Claude, ChatGPT, Gemini, etc.) to produce a
-properly-structured draft_submission.md for the article review pipeline.
+properly-structured draft submission handoff for the article review pipeline.
 
 Copy everything between the dashed lines and paste it as a single message.
 Replace the bracketed fields. The model will output a complete handoff document

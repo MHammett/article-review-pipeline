@@ -482,3 +482,82 @@ def test_docs_do_not_use_the_bare_script_invocation_form():
         "Docs use the bare script form, which has not been runnable from the "
         "repo root since the src/ layout landed:\n  " + "\n  ".join(sorted(offenders))
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. CLI invocation style in strings the CODE prints
+# ---------------------------------------------------------------------------
+#
+# The guards above scan documentation. They cannot see the commands the tools
+# print at runtime, and that blind spot cost real breakage: `ci-setup` — the
+# very first thing a new user runs — printed its "run the pipeline" command with
+# a bash line-continuation backslash (which splits the command on Windows
+# cmd.exe, the documented primary platform) and in the `python -m` form that
+# PR #51 standardised away and PR #53 removed from the handoff templates. It
+# survived both cleanups because nothing checks printed strings.
+#
+# Audit finding 9. The premise of every guard in this file is that these
+# mistakes are mechanically detectable; a string in a print() is exactly as
+# detectable as one in a markdown file.
+
+_USER_FACING_MODULES = ("setup.py", "check.py", "discover.py", "pipeline.py")
+
+_PRINT_LITERAL = re.compile(r"print\(\s*(?:f?)(['\"])(.*?)\1", re.S)
+
+
+def _user_facing_sources():
+    src = REPO_ROOT / "packages" / "ci-article-review" / "src" / "ci_article_review"
+    for name in _USER_FACING_MODULES:
+        path = src / name
+        if path.is_file():
+            yield path
+
+
+def _printed_strings(path):
+    """Every string literal passed directly to print() in `path`."""
+    text = path.read_text(encoding="utf-8")
+    return [m.group(2) for m in _PRINT_LITERAL.finditer(text)]
+
+
+def test_printed_commands_do_not_use_the_module_invocation_form():
+    """Printed commands use `uv run ci-foo`, like the docs do."""
+    by_target = {target: name for name, target in _declared_console_scripts().items()}
+
+    offenders = []
+    for path in _user_facing_sources():
+        for literal in _printed_strings(path):
+            for package, module in set(_MODULE_FORM_REF.findall(literal)):
+                script = by_target.get(f"{package}.{module}:main")
+                if script:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT).as_posix()}: "
+                        f"python -m {package}.{module} → use `uv run {script}`"
+                    )
+
+    assert not offenders, (
+        "Code prints the module invocation form where a console script exists:\n  "
+        + "\n  ".join(sorted(offenders))
+    )
+
+
+def test_printed_commands_do_not_use_bash_line_continuations():
+    """A trailing backslash splits the command on Windows cmd.exe.
+
+    The README warns about this explicitly. Windows is the documented primary
+    platform, so a printed command that only works in bash is a broken
+    instruction, not a cosmetic issue.
+    """
+    offenders = []
+    for path in _user_facing_sources():
+        for literal in _printed_strings(path):
+            # A literal ending in an escaped backslash is a shell continuation.
+            if literal.rstrip().endswith("\\\\"):
+                offenders.append(
+                    f"{path.relative_to(REPO_ROOT).as_posix()}: {literal.strip()!r}"
+                )
+
+    assert not offenders, (
+        "Printed commands use a bash line-continuation backslash, which splits "
+        "the command on Windows cmd.exe. Keep the command on one line:\n  "
+        + "\n  ".join(sorted(offenders))
+    )
