@@ -74,7 +74,17 @@ api_keys:
   languagetool:
     username: your_email@example.com
     api_key: your_languagetool_key
+
+  # Optional — authenticates Wayback Machine "Save Page Now" submissions for
+  # resolved citations that aren't archived yet
+  archive_org:
+    access_key: your_access_key_here
+    secret_key: your_secret_key_here
 ```
+
+**`archive_org`** is optional. The pipeline submits unarchived citation URLs to archive.org either way; credentials just switch it from the unauthenticated capture endpoint to the authenticated SPN2 endpoint, which has higher rate limits. Get a key pair at <https://archive.org/account/s3.php>. See [CITATIONS.md](CITATIONS.md#wayback-machine-behavior) for what the submission actually does.
+
+Note that the `mistral` key does double duty: besides its review passes, it powers the citation relevance check that gates the "verified" confidence tier. Without it, citations are fetched and checksummed but not relevance-confirmed — see [CITATIONS.md](CITATIONS.md#confidence-tiers).
 
 Instead of putting keys directly in the YAML, you can use environment variables:
 
@@ -398,7 +408,9 @@ pipeline:
   wayback_snapshot_stale_days: 180  # snapshots older than this are flagged [STALE]
 ```
 
-**`wayback_snapshot_stale_days`** controls when a Wayback Machine snapshot is considered stale. At 180 days (default), a snapshot from more than six months ago triggers a `[STALE]` flag and a manual re-archive recommendation. Lower this for publications with high source-freshness standards (e.g., 90 days for breaking-news adjacent pieces).
+**`wayback_snapshot_stale_days`** controls when a Wayback Machine snapshot is considered stale. At 180 days (default), a snapshot from more than six months ago triggers a `[STALE]` flag and a manual re-archive recommendation. Lower this for publications with high source-freshness standards (e.g., 90 days for breaking-news adjacent pieces). It applies to both draft link validation and resolved citation URLs.
+
+Archiving is not check-only: resolved citation URLs that aren't archived yet are submitted to archive.org's Save Page Now, and a 403 on a direct fetch falls back to reading an archived snapshot. Both are covered in [CITATIONS.md](CITATIONS.md#wayback-machine-behavior).
 
 ---
 
@@ -406,7 +418,7 @@ pipeline:
 
 The `cost_preset` setting is the easiest way to control quality vs cost. It sets model variants, reasoning flags, and thoroughness level as a bundle. You set one value instead of configuring six providers separately.
 
-Preset model assignments live in [`configs/presets.yaml`](../configs/presets.yaml). When providers release new models, edit that file to update the model names — no code change needed.
+Preset model assignments live in [`configs/presets.yaml`](../packages/ci-article-review/src/ci_article_review/configs/presets.yaml). When providers release new models, edit that file to update the model names — no code change needed.
 
 **When `cost_preset` is set:**
 - It overrides model names and reasoning flags for all configured providers
