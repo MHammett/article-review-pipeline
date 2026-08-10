@@ -22,7 +22,12 @@ _GOOD_ARTICLE = "\n".join(
 
 _HANDOFF_WITH_META = {
     "title": "A Well-Constructed Article About Important Things",
-    "seo": {"meta_description": "A description under 160 characters."},
+    "seo": {
+        "meta_description": (
+            "A description of the article that is long enough to work as a real "
+            "search snippet, which means comfortably over seventy characters."
+        )
+    },
 }
 
 

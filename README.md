@@ -237,7 +237,7 @@ Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required —
 | `--publish-live` | Publish live instead of as a WordPress draft |
 | `--config-dir DIR` | Config directory (default `configs`) |
 | `--cost-preset PRESET` | Override `cost_preset` for this run: `economy` / `standard` / `balanced` / `thorough` / `maximum`. Doesn't modify `user.yaml`. |
-| `--no-seo-suggestions` | Skip the [SEO suggestion pass](docs/CONFIGURATION.md#seo-suggestions) for this run — one cheap model call proposing the whole SEO METADATA block (focus keyword candidates, meta description, OG title, OG description, schema type). Permanent off: `seo_rules.suggestions: false`. |
+| `--no-seo-suggestions` | Skip both SEO model calls for this run — the [metadata suggestions](docs/CONFIGURATION.md#seo-suggestions) (focus keyword candidates, meta description, OG title, OG description, schema type) and the [structure review](docs/CONFIGURATION.md#seo-structure-review). Deterministic on-page checks still run. Permanent off: `seo_rules.suggestions` / `seo_rules.content_review`. |
 | `--verbose`, `-v` | DEBUG logging |
 
 **Calibration flags** (for measuring/tuning timeouts — see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#timeouts-are-automatic-sliding-scale)):
@@ -322,6 +322,7 @@ content-intelligence/
 │   │   │   │   ├── links.py           URL extraction, HTTP status check, Wayback archive check
 │   │   │   │   ├── seo.py             title length, heading structure, meta description
 │   │   │   │   ├── seo_suggest.py     proposes the whole SEO METADATA block (advisory)
+│   │   │   │   ├── seo_content.py     structure review from a search reader's side
 │   │   │   │   └── webpage.py         webpage fetch/extraction helpers
 │   │   │   │
 │   │   │   ├── prompts/               system prompts for each review domain

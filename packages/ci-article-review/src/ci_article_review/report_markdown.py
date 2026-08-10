@@ -313,6 +313,9 @@ def _render_seo_suggestions(pre_analysis):
         for c in candidates:
             rationale = f" — {c['rationale']}" if c.get("rationale") else ""
             lines.append(f"- **{c['keyword']}**{rationale}")
+            usage = _keyword_usage_line(c.get("usage"))
+            if usage:
+                lines.append(f"  - {usage}")
         lines.append("")
 
     fields = suggestions.get("fields") or {}
@@ -324,6 +327,73 @@ def _render_seo_suggestions(pre_analysis):
             if field:
                 lines.extend(_render_seo_field(field))
 
+    return lines
+
+
+def _keyword_usage_line(usage):
+    """Where a candidate phrase actually appears in the article.
+
+    A mechanical scan, not a judgement — and the reason keyword candidates
+    surface at draft stage at all. A phrase the article never uses is the
+    finding a revision pass most needs to see.
+    """
+    if not usage:
+        return ""
+    if not usage.get("body_count"):
+        return (
+            "**The article never uses this phrase.** Either work it in where it "
+            "fits naturally, or pick a candidate the piece already speaks to."
+        )
+
+    where = []
+    if usage.get("in_title"):
+        where.append("the title")
+    if usage.get("in_opening"):
+        where.append("the opening")
+    headings = usage.get("in_headings") or []
+    if headings:
+        where.append(f"{len(headings)} heading(s)")
+    placement = ", ".join(where) if where else "the body only"
+    return f"Appears {usage['body_count']}x — in {placement}."
+
+
+def _render_seo_content_review(pre_analysis):
+    """Render the structural findings from the search-reader review pass."""
+    content_review = (pre_analysis or {}).get("seo", {}).get("content_review")
+    if not content_review:
+        return []
+
+    lines = ["## SEO Structure Review", ""]
+    if content_review.get("status") != "ok":
+        lines.append(
+            f"_Not available this run: "
+            f"{content_review.get('reason', 'unknown reason')}._"
+        )
+        lines.append("")
+        return lines
+
+    findings = content_review.get("findings") or []
+    if not findings:
+        lines.append(
+            "_Nothing flagged — headings, opening, and title all read as "
+            "delivering what a search reader arrived for._"
+        )
+        lines.append("")
+        return lines
+
+    lines.append(
+        "_How the article reads to someone who just arrived from a search "
+        "result. Structure only — the review sections above cover argument, "
+        "completeness, and voice._"
+    )
+    lines.append("")
+    for finding in findings:
+        target = f': "{finding["target"]}"' if finding.get("target") else ""
+        lines.append(f"- **{finding['type']}**{target}")
+        lines.append(f"  - {finding['problem']}")
+        if finding.get("suggestion"):
+            lines.append(f"  - Suggested: {finding['suggestion']}")
+    lines.append("")
     return lines
 
 
@@ -451,5 +521,6 @@ def render_report_markdown(report):
     lines.extend(_render_section_8(report.get("section_8_additional", [])))
     lines.extend(_render_section_9(report.get("section_9_citations", [])))
     lines.extend(_render_seo_suggestions(report.get("pre_analysis", {})))
+    lines.extend(_render_seo_content_review(report.get("pre_analysis", {})))
 
     return "\n".join(lines).rstrip() + "\n"

@@ -591,6 +591,82 @@ class TestSeoSuggestions:
         assert "SEO Suggestions" not in md
 
 
+class TestSeoKeywordUsage:
+    def _render(self, usage):
+        suggestions = {
+            "status": "ok",
+            "keyword_candidates": [
+                {"keyword": "interconnection queue", "rationale": "why", "usage": usage}
+            ],
+            "fields": {},
+        }
+        return render_report_markdown(
+            _base_report(pre_analysis={"seo": {"suggestions": suggestions}})
+        )
+
+    def test_unused_phrase_is_called_out(self):
+        md = self._render(
+            {"in_title": False, "in_headings": [], "in_opening": False, "body_count": 0}
+        )
+        assert "never uses this phrase" in md
+
+    def test_used_phrase_reports_where(self):
+        md = self._render(
+            {
+                "in_title": True,
+                "in_headings": ["## A heading"],
+                "in_opening": True,
+                "body_count": 6,
+            }
+        )
+        assert "Appears 6x" in md
+        assert "the title" in md
+        assert "the opening" in md
+        assert "1 heading(s)" in md
+
+    def test_unscanned_candidate_renders_without_a_usage_line(self):
+        md = self._render(None)
+        assert "interconnection queue" in md
+        assert "Appears" not in md
+
+
+class TestSeoContentReview:
+    _FINDING = {
+        "type": "heading",
+        "target": "The Bigger Picture",
+        "problem": "Could sit above any section of any article.",
+        "suggestion": "How a queue position becomes a five-year wait",
+    }
+
+    def _render(self, content_review):
+        return render_report_markdown(
+            _base_report(pre_analysis={"seo": {"content_review": content_review}})
+        )
+
+    def test_findings_rendered_with_suggestions(self):
+        md = self._render({"status": "ok", "findings": [self._FINDING]})
+        assert "## SEO Structure Review" in md
+        assert "The Bigger Picture" in md
+        assert "Could sit above any section of any article." in md
+        assert "How a queue position becomes a five-year wait" in md
+
+    def test_clean_article_says_so_rather_than_going_blank(self):
+        md = self._render({"status": "ok", "findings": []})
+        assert "## SEO Structure Review" in md
+        assert "Nothing flagged" in md
+
+    def test_scope_is_stated_so_it_is_not_read_as_a_full_review(self):
+        md = self._render({"status": "ok", "findings": [self._FINDING]})
+        assert "Structure only" in md
+
+    def test_unavailable_reason_is_shown(self):
+        md = self._render({"status": "failed", "reason": "call failed: 503"})
+        assert "call failed: 503" in md
+
+    def test_absent_when_the_pass_did_not_run(self):
+        assert "SEO Structure Review" not in render_report_markdown(_base_report())
+
+
 class TestEmptyReport:
     def test_no_crash_on_all_empty_sections(self):
         md = render_report_markdown(_base_report())

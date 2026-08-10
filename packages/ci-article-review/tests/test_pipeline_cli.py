@@ -296,6 +296,58 @@ class TestSeoSuggestionPassReachedFromDraftRun:
                 )
         return mock_generate
 
+    def test_content_review_is_invoked_too(self):
+        from contextlib import ExitStack
+
+        import ci_article_review.pipeline as pipeline
+
+        config = {
+            "api_keys": {"mistral": {"api_key": "k"}},
+            "pipeline": {"link_validation": False, "grammar_pass": False},
+            "publication": {},
+            "delta": {},
+            "ensemble": {},
+            "models": {},
+        }
+        with ExitStack() as stack:
+            for target, kwargs in (
+                ("load_user_config", {"return_value": {"pipeline": {}}}),
+                ("load_publication_config", {"return_value": {}}),
+                ("merge_configs", {"return_value": config}),
+                ("check_model_currency", {"return_value": self._CURRENCY}),
+                ("_build_assignments", {"return_value": []}),
+                ("_build_custom_assignments", {"return_value": ([], {})}),
+            ):
+                stack.enter_context(
+                    patch(f"ci_article_review.pipeline.{target}", **kwargs)
+                )
+            suggestions = {"status": "ok", "keyword_candidates": [], "fields": {}}
+            stack.enter_context(
+                patch(
+                    "ci_article_review.pipeline.seo_suggest.generate",
+                    return_value=(suggestions, None),
+                )
+            )
+            mock_review = stack.enter_context(
+                patch(
+                    "ci_article_review.pipeline.seo_content.review",
+                    return_value=({"status": "ok", "findings": []}, None),
+                )
+            )
+            with pytest.raises(SystemExit):
+                pipeline.run_draft_pipeline(None, "myblog", handoff=dict(self._HANDOFF))
+
+        mock_review.assert_called_once()
+        # The suggestion output feeds it the search intent to judge against.
+        assert mock_review.call_args.kwargs["suggestions"] is suggestions
+
+    def test_cli_override_disables_both_seo_calls(self):
+        # --no-seo-suggestions is about not paying for the SEO extras, not
+        # about one of the two.
+        kwargs = self._run(seo_suggestions=False).call_args.kwargs
+        assert kwargs["pub_config"]["seo_rules"]["suggestions"] is False
+        assert kwargs["pub_config"]["seo_rules"]["content_review"] is False
+
     def test_pass_is_invoked_with_the_pipeline_context(self):
         mock_generate = self._run()
         mock_generate.assert_called_once()

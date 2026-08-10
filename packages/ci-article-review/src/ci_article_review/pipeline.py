@@ -69,6 +69,7 @@ from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from .analysis import readability as readability_analysis
 from .analysis import seo as seo_analysis
+from .analysis import seo_content
 from .analysis import seo_suggest
 from ci_core.llm import cost as cost_analysis
 from .analysis.webpage import build_handoff_from_url
@@ -634,15 +635,18 @@ def run_draft_pipeline(
         # CLI override for this run only — does not modify the publication
         # config on disk. Mirrors --cost-preset above. Assigned rather than
         # setdefault'd because a bare `seo_rules:` line in YAML parses to None,
-        # not to an empty dict.
+        # not to an empty dict. Covers both SEO model calls: the flag is about
+        # not paying for the SEO extras, not about one of the two.
         pub_config["seo_rules"] = {**(pub_config.get("seo_rules") or {})}
         pub_config["seo_rules"]["suggestions"] = False
+        pub_config["seo_rules"]["content_review"] = False
 
     pre_analysis["seo"] = seo_analysis.analyze(
         corrected_draft,
         handoff,
         seo_rules=pub_config.get("seo_rules"),
         mode=seo_analysis.DRAFT_MODE,
+        site_url=(pub_config.get("wordpress") or {}).get("site_url"),
     )
     seo_issues = pre_analysis["seo"]["issues"]
     if seo_issues:
@@ -667,7 +671,26 @@ def run_draft_pipeline(
         api_keys=api_keys,
         seo_result=pre_analysis["seo"],
     )
-    seo_analysis.apply_suggestions(pre_analysis["seo"], seo_suggestion_result)
+    seo_analysis.apply_suggestions(
+        pre_analysis["seo"],
+        seo_suggestion_result,
+        text=corrected_draft,
+        title=article_title,
+    )
+
+    # SEO content review — a second cheap call judging the article's structure
+    # from a search reader's side (heading descriptiveness, whether the opening
+    # delivers, title promise vs delivery). Separate from the suggestion call
+    # because it answers a different question and is separately disableable;
+    # it takes the keyword candidates as the search intent to judge against.
+    seo_content_result, seo_content_call = seo_content.review(
+        corrected_draft,
+        handoff=handoff,
+        pub_config=pub_config,
+        api_keys=api_keys,
+        suggestions=seo_suggestion_result,
+    )
+    pre_analysis["seo"]["content_review"] = seo_content_result
 
     # Sliding-scale timeouts: size the per-model timeout from the draft length, the
     # model, and the reasoning effort. A timeout_seconds set explicitly in user.yaml
@@ -1090,11 +1113,12 @@ def run_draft_pipeline(
     else:
         report["section_9_citations"] = []
 
-    # The SEO suggestion call happened back in pre-analysis, before this list
-    # existed. Fold its cost in here so it lands in cost_summary under its own
-    # pass name rather than going untracked.
-    if seo_suggestion_call is not None:
-        api_call_log.append(seo_suggestion_call)
+    # The SEO calls happened back in pre-analysis, before this list existed.
+    # Fold their cost in here so each lands in cost_summary under its own pass
+    # name rather than going untracked.
+    for seo_call in (seo_suggestion_call, seo_content_call):
+        if seo_call is not None:
+            api_call_log.append(seo_call)
 
     # Cost tracking
     cost_summary = cost_analysis.calculate(api_call_log)
@@ -1153,6 +1177,54 @@ def run_draft_pipeline(
 # ---------------------------------------------------------------------------
 
 
+def _keyword_usage_summary(usage):
+    """One-line "where this phrase actually appears" summary, or "" if unscanned.
+
+    The absent case is the one worth reading, so it gets said outright rather
+    than implied by three "no"s.
+    """
+    if not usage:
+        return ""
+    if not usage.get("body_count"):
+        return "NOT USED anywhere in the article"
+
+    where = []
+    if usage.get("in_title"):
+        where.append("title")
+    if usage.get("in_opening"):
+        where.append("opening")
+    headings = usage.get("in_headings") or []
+    if headings:
+        where.append(f"{len(headings)} heading(s)")
+    placement = ", ".join(where) if where else "body only"
+    return f"{usage['body_count']}x — {placement}"
+
+
+def _print_seo_content_review(content_review):
+    """Console rendering of the structural findings, under the suggestions."""
+    if not content_review:
+        return
+    if content_review.get("status") != "ok":
+        print(
+            f"SEO structure review: unavailable — "
+            f"{content_review.get('reason', 'unknown reason')}"
+        )
+        return
+
+    findings = content_review.get("findings") or []
+    if not findings:
+        print("SEO structure review: nothing flagged")
+        return
+
+    print(f"SEO structure review ({len(findings)} finding(s)):")
+    for f in findings:
+        target = f' "{f["target"]}"' if f.get("target") else ""
+        print(f"  [{f['type']}]{target}")
+        print(f"    {f['problem']}")
+        if f.get("suggestion"):
+            print(f"    → {f['suggestion']}")
+
+
 def _print_seo_suggestions(suggestions):
     """Console rendering of the SEO suggestion block, under the SEO issues.
 
@@ -1178,6 +1250,9 @@ def _print_seo_suggestions(suggestions):
         for i, c in enumerate(candidates, 1):
             rationale = f" — {c['rationale']}" if c.get("rationale") else ""
             print(f"    {i}. {c['keyword']}{rationale}")
+            usage = _keyword_usage_summary(c.get("usage"))
+            if usage:
+                print(f"       in article: {usage}")
 
     fields = suggestions.get("fields") or {}
     for name in seo_suggest.FIELD_ORDER:
@@ -1347,6 +1422,7 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             else:
                 print("SEO: no issues")
             _print_seo_suggestions(seo.get("suggestions"))
+            _print_seo_content_review(seo.get("content_review"))
         links = pre.get("links", [])
         if links:
             broken = [lk for lk in links if not lk.get("ok")]
