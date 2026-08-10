@@ -338,6 +338,10 @@ def test_all_relative_markdown_links_resolve():
 
 _CONSOLE_SCRIPT_REF = re.compile(r"\buv run (ci-[a-z0-9-]+)")
 _MODULE_FORM_REF = re.compile(r"\bpython -m (ci_[a-z_]+)\.([a-z_]+)")
+# The bare form (`python pipeline.py`) predates the src/ layout and never runs
+# from the repo root. It is matched separately from the module form because it
+# names the file, not the import path, so there is no package to key on.
+_BARE_SCRIPT_REF = re.compile(r"\bpython ([a-z_]+)\.py\b")
 _SCRIPTS_SECTION = re.compile(r"^\[project\.scripts\]\s*$(.*?)(?=^\[|\Z)", re.M | re.S)
 _SCRIPT_ENTRY = re.compile(r"^([\w-]+)\s*=\s*[\"']([\w.]+):(\w+)[\"']", re.M)
 
@@ -407,4 +411,37 @@ def test_docs_do_not_reintroduce_the_module_invocation_form():
     assert not offenders, (
         "Docs use the module invocation form where a console script exists:\n  "
         + "\n  ".join(sorted(offenders))
+    )
+
+
+def test_docs_do_not_use_the_bare_script_invocation_form():
+    """No `python pipeline.py` anywhere in markdown.
+
+    Separate from the module-form guard, which keys on the import path and so
+    cannot see this. The bare form is the older mistake of the two: it survived
+    in handoff_templates/ after the docs were swept, where it reached users as
+    an instruction the chat model relays back to them.
+
+    Keyed on the module basenames that have console scripts, so unrelated
+    filenames in prose (`conftest.py`) do not trip it.
+    """
+    runnable = {}
+    for name, target in _declared_console_scripts().items():
+        module_stem = target.split(":")[0].rsplit(".", 1)[-1]
+        runnable[module_stem] = name
+
+    offenders = []
+    for md_path in _markdown_files():
+        text = md_path.read_text(encoding="utf-8")
+        for stem in set(_BARE_SCRIPT_REF.findall(text)):
+            script = runnable.get(stem)
+            if script:
+                offenders.append(
+                    f"{md_path.relative_to(REPO_ROOT).as_posix()}: "
+                    f"python {stem}.py → use `uv run {script}`"
+                )
+
+    assert not offenders, (
+        "Docs use the bare script form, which has not been runnable from the "
+        "repo root since the src/ layout landed:\n  " + "\n  ".join(sorted(offenders))
     )

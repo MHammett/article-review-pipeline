@@ -105,9 +105,9 @@ AFTER GENERATING: save the metadata block as your-article-metadata.md
 (overwriting the prior round's version) and, if using the two-file workflow,
 save the revised draft as your-article-draft.md. Run:
 
-    python pipeline.py --raw-draft your-article-draft.md --metadata your-article-metadata.md --publication your_publication_name
+    uv run ci-review --raw-draft your-article-draft.md --metadata your-article-metadata.md --publication your_publication_name
 
 Or, if you used the single-file format (draft included in this same
 response), save the whole thing as your-article-handoff.md and run:
 
-    python pipeline.py --draft handoff_templates/your-article-handoff.md --publication your_publication_name
+    uv run ci-review --draft handoff_templates/your-article-handoff.md --publication your_publication_name
