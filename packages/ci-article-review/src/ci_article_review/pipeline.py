@@ -960,16 +960,20 @@ def run_draft_pipeline(
         log.error("All review model calls failed. Aborting.")
         sys.exit(1)
 
-    prior_report = hist.load_prior_report(HISTORY_ROOT, article_title, run_number)
+    prior_report, prior_report_path = hist.load_prior_report(
+        HISTORY_ROOT, article_title, before_ts=run_start_ts
+    )
     if prior_report is None and run_number > 1:
         log.warning(
-            f"No prior report found for '{article_title}' at run {run_number - 1} — "
-            "continuity tracking (claim/structure delta, consensus-flag carryover) is "
-            "being skipped for this run, same as a first run. If this article was "
-            "actually reviewed before, check that the handoff's 'Article:' title "
-            "matches the prior run exactly and that 'Pipeline run:' was incremented "
-            "correctly from the previous round."
+            f"No earlier report found for '{article_title}', but the handoff declares "
+            f"run {run_number} — continuity tracking (claim/structure delta, "
+            "consensus-flag carryover) is being skipped for this run, same as a first "
+            "run. If this article was actually reviewed before, check that the "
+            "handoff's 'Article:' title matches the prior run exactly — history is "
+            "kept per article title."
         )
+    elif prior_report is not None:
+        log.info(f"Comparing against prior run: {Path(prior_report_path).name}")
 
     # Tag ensemble config with thoroughness for the report
     ensemble_cfg_tagged = {**ensemble_cfg, "thoroughness": thoroughness}
@@ -985,6 +989,7 @@ def run_draft_pipeline(
         ensemble_cfg=ensemble_cfg_tagged,
         api_call_log=api_call_log,
         prior_report=prior_report,
+        prior_report_path=prior_report_path,
         primary_claim=handoff.get("primary_claim", ""),
     )
 
@@ -1351,6 +1356,9 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     delta = report.get("delta")
     if delta:
         print("\nDelta from prior run:")
+        compared = (delta.get("compared_against") or {}).get("report")
+        if compared:
+            print(f"  Compared against: {compared}")
         print(f"  Word change: {delta['word_change_pct']}%")
         print(
             f"  Resolved consensus flags: {delta['resolved_consensus_count']}/{delta['prior_consensus_count']}"

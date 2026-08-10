@@ -4,8 +4,8 @@ Cross-run analytics over pipeline_history/.
 Every pipeline run writes a full report JSON via history.save_run(), but until
 this module the only code that ever read that history back was
 history.load_prior_report() — and that only fetches the single immediately-
-prior run for one article, for delta-tracking. Nothing aggregated across runs,
-across articles, or over time.
+preceding run for one article, for delta-tracking. Nothing aggregated across
+runs, across articles, or over time.
 
 This module scans all run_*_report.json files under a history root and
 reports on trends that only become visible across many runs:

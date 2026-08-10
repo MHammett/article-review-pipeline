@@ -38,6 +38,10 @@ _WINDOWS_RESERVED = {
     "lpt9",
 }
 
+# Saved report filenames: run_<n>_<YYYYmmdd_HHMMSS>_report.json, plus the
+# untimestamped run_<n>_report.json shape written by early versions.
+_REPORT_NAME_RE = re.compile(r"^run_(?P<run>\d+)_((?P<ts>\d{8}_\d{6})_)?report\.json$")
+
 
 def _slug(title):
     slug = title.lower()
@@ -49,7 +53,7 @@ def _slug(title):
     return slug
 
 
-def _run_dir(history_root, article_title, run_number):
+def _run_dir(history_root, article_title):
     slug = _slug(article_title)
     path = Path(history_root) / slug
     path.mkdir(parents=True, exist_ok=True)
@@ -64,7 +68,7 @@ def save_run(
     ts_str = run_ts.strftime("%Y%m%d_%H%M%S")
 
     try:
-        d = _run_dir(history_root, article_title, run_number)
+        d = _run_dir(history_root, article_title)
     except OSError as e:
         log.error(f"Cannot create history directory: {e}")
         return {"report_path": None, "corrections_path": None, "markdown_path": None}
@@ -110,24 +114,93 @@ def save_run(
     }
 
 
-def load_prior_report(history_root, article_title, run_number):
-    if run_number <= 1:
+def _report_timestamp(path):
+    """Best-effort execution time of a saved report, as an aware UTC datetime.
+
+    ``save_run`` embeds a sortable ``%Y%m%d_%H%M%S`` UTC stamp in the filename,
+    which is the cheapest and most direct answer. Reports predating that naming
+    are just ``run_N_report.json``, so fall back to the report's own
+    ``generated`` field and finally to the file's mtime.
+    """
+    m = _REPORT_NAME_RE.match(path.name)
+    if m and m.group("ts"):
+        try:
+            return datetime.strptime(m.group("ts"), "%Y%m%d_%H%M%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            pass
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            generated = json.load(f).get("generated")
+    except (OSError, json.JSONDecodeError):
+        generated = None
+    if generated:
+        try:
+            ts = datetime.fromisoformat(generated)
+            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def find_prior_report_path(history_root, article_title, before_ts=None):
+    """Path of the most recent execution preceding ``before_ts``, or None.
+
+    Selection is by actual execution time, not by declared run number. The run
+    number comes from the handoff document's ``Pipeline run:`` field, which is
+    author-declared metadata rather than an execution counter: running the same
+    handoff twice writes two ``run_N_*`` reports at the same N. Picking
+    ``run_number - 1`` made the second of those compare itself against the
+    previous *article version* instead of against the identical run that just
+    preceded it, reporting large edits where nothing had been edited.
+    """
+    try:
+        d = _run_dir(history_root, article_title)
+    except OSError as e:
+        log.warning(f"Cannot read history directory: {e}")
         return None
-    d = _run_dir(history_root, article_title, run_number)
-    matches = sorted(d.glob(f"run_{run_number - 1}_*_report.json"))
-    if not matches:
+
+    candidates = []
+    for path in d.glob("run_*_report.json"):
+        if not _REPORT_NAME_RE.match(path.name):
+            continue
+        ts = _report_timestamp(path)
+        if before_ts is not None and ts >= before_ts:
+            continue
+        candidates.append((ts, path.name, path))
+
+    if not candidates:
         return None
-    prior_path = matches[-1]
+    # Filename breaks ties so two reports sharing a timestamp resolve
+    # deterministically rather than by directory iteration order.
+    return max(candidates)[2]
+
+
+def load_prior_report(history_root, article_title, before_ts=None):
+    """Return ``(report, path)`` for the run preceding ``before_ts``.
+
+    ``(None, None)`` when this article has no earlier report — the first-run
+    case — or when the file it found could not be read.
+    """
+    prior_path = find_prior_report_path(history_root, article_title, before_ts)
+    if prior_path is None:
+        return None, None
     try:
         with open(prior_path, encoding="utf-8") as f:
-            return json.load(f)
+            return json.load(f), prior_path
     except (OSError, json.JSONDecodeError) as e:
         log.warning(f"Could not load prior report from {prior_path}: {e}")
-        return None
+        return None, None
 
 
 def append_disposition(history_root, article_title, entry):
-    d = _run_dir(history_root, article_title, 1)
+    d = _run_dir(history_root, article_title)
     disp_path = d / "disposition.log"
     with open(disp_path, "a", encoding="utf-8") as f:
         timestamp = datetime.now(timezone.utc).isoformat()
