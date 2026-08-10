@@ -1,0 +1,423 @@
+{
+  "api_call_log": [
+    {
+      "char_count": 329,
+      "effort": "none",
+      "elapsed_seconds": "<volatile>",
+      "error": null,
+      "failed": false,
+      "headroom_seconds": "<volatile>",
+      "model": "gemini-test-model [grounded]",
+      "pass": "gemini:fact_check",
+      "status": "ok",
+      "timeout_budget_seconds": "<volatile>",
+      "tokens": {
+        "completion": 200,
+        "prompt": 1000
+      },
+      "truncated": false
+    },
+    {
+      "char_count": 329,
+      "effort": "none",
+      "elapsed_seconds": "<volatile>",
+      "error": null,
+      "failed": false,
+      "headroom_seconds": "<volatile>",
+      "model": "mistral-test-model",
+      "pass": "mistral:argument_integrity",
+      "status": "ok",
+      "timeout_budget_seconds": "<volatile>",
+      "tokens": {
+        "completion": 200,
+        "prompt": 1000
+      },
+      "truncated": false
+    },
+    {
+      "char_count": 329,
+      "effort": "none",
+      "elapsed_seconds": "<volatile>",
+      "error": null,
+      "failed": false,
+      "headroom_seconds": "<volatile>",
+      "model": "mistral-test-model",
+      "pass": "mistral:red_team",
+      "status": "ok",
+      "timeout_budget_seconds": "<volatile>",
+      "tokens": {
+        "completion": 200,
+        "prompt": 1000
+      },
+      "truncated": false
+    },
+    {
+      "char_count": 329,
+      "effort": "none",
+      "elapsed_seconds": "<volatile>",
+      "error": null,
+      "failed": false,
+      "headroom_seconds": "<volatile>",
+      "model": "openai-test-model",
+      "pass": "openai:completeness",
+      "status": "ok",
+      "timeout_budget_seconds": "<volatile>",
+      "tokens": {
+        "completion": 200,
+        "prompt": 1000
+      },
+      "truncated": false
+    },
+    {
+      "char_count": 329,
+      "effort": "none",
+      "elapsed_seconds": "<volatile>",
+      "error": null,
+      "failed": false,
+      "headroom_seconds": "<volatile>",
+      "model": "openai-test-model",
+      "pass": "openai:voice_style",
+      "status": "ok",
+      "timeout_budget_seconds": "<volatile>",
+      "tokens": {
+        "completion": 200,
+        "prompt": 1000
+      },
+      "truncated": false
+    }
+  ],
+  "article_title": "A Grid Piece With A Sufficiently Long Title",
+  "contradictions": [],
+  "corrected_draft": "# A Grid Piece With A Sufficiently Long Title\n\nIt is important to note that the grid is complex. The 2019 figure was 33 percent. The grid served 41 percent of load from nuclear.\n\n## Cooling\n\nCooling draws 3 million gallons annually. Local officials were not consulted. See https://example.org/source-one for the underlying data.\n",
+  "cost_summary": {
+    "by_pass": [
+      {
+        "input_usd": 0.0025,
+        "model": "gemini-test-model [grounded]",
+        "output_usd": 0.002,
+        "pass": "gemini:fact_check",
+        "total_usd": 0.0045
+      },
+      {
+        "input_usd": 0.0025,
+        "model": "mistral-test-model",
+        "output_usd": 0.002,
+        "pass": "mistral:argument_integrity",
+        "total_usd": 0.0045
+      },
+      {
+        "input_usd": 0.0025,
+        "model": "mistral-test-model",
+        "output_usd": 0.002,
+        "pass": "mistral:red_team",
+        "total_usd": 0.0045
+      },
+      {
+        "input_usd": 0.0025,
+        "model": "openai-test-model",
+        "output_usd": 0.002,
+        "pass": "openai:completeness",
+        "total_usd": 0.0045
+      },
+      {
+        "input_usd": 0.0025,
+        "model": "openai-test-model",
+        "output_usd": 0.002,
+        "pass": "openai:voice_style",
+        "total_usd": 0.0045
+      }
+    ],
+    "pricing_known": false,
+    "total_input_usd": 0.0125,
+    "total_output_usd": 0.01,
+    "total_usd": 0.0225
+  },
+  "delta": null,
+  "ensemble": {
+    "assignments": [
+      "gemini:fact_check",
+      "mistral:argument_integrity",
+      "mistral:red_team",
+      "openai:completeness",
+      "openai:voice_style"
+    ],
+    "consensus_threshold": 2.0,
+    "thoroughness": "standard"
+  },
+  "generated": "<volatile>",
+  "lt_corrections_applied": [],
+  "lt_failed": true,
+  "lt_skipped": true,
+  "model_currency": {
+    "notices": [],
+    "registry_age_days": "<volatile>",
+    "registry_date": "<volatile>",
+    "registry_stale": false,
+    "registry_warning": false,
+    "warnings": []
+  },
+  "model_failures": [],
+  "pre_analysis": {
+    "links": [],
+    "readability": {
+      "avg_sentence_length": 7.3,
+      "avg_syllables_per_word": 1.51,
+      "flesch_kincaid_grade": 5.1,
+      "flesch_reading_ease": 71.7,
+      "longest_paragraph_words": 22,
+      "paragraph_count": 4,
+      "reading_level": "Fairly Easy",
+      "sentence_count": 7,
+      "word_count": 51
+    },
+    "seo": {
+      "content_review": {
+        "reason": "test",
+        "status": "skipped"
+      },
+      "h1_count": 1,
+      "h2_count": 1,
+      "h3_count": 0,
+      "has_meta_description": false,
+      "issues": [
+        {
+          "detail": "51 words \u2014 recommended \u2265300 for indexability",
+          "type": "thin_content"
+        },
+        {
+          "detail": "None supplied \u2014 the draft handoff (Template A) has no SEO section, so this is expected at draft stage. It becomes required in the publication handoff (Template C, SEO METADATA).",
+          "type": "no_meta_description"
+        }
+      ],
+      "mode": "draft",
+      "suggestions": {
+        "reason": "test",
+        "status": "skipped"
+      },
+      "title": "A Grid Piece With A Sufficiently Long Title",
+      "title_length": 43,
+      "word_count": 51
+    }
+  },
+  "primary_claim": "Geography determines the answer.",
+  "publication": "testpub",
+  "run_number": 1,
+  "section_1_consensus": [
+    {
+      "flags": [
+        {
+          "attack_vector": "The figure is stale.",
+          "domain": "red_team",
+          "passage": "The 2019 figure was 33 percent.",
+          "source_model": "mistral",
+          "supporting_evidence_for_attack": "A newer table exists.",
+          "type": "most_vulnerable_claim"
+        },
+        {
+          "claim": "The 2019 figure was 33 percent.",
+          "confidence": "medium",
+          "current_value": "38 percent as of 2025",
+          "domain": "fact_check",
+          "source": "https://example.org/updated-table",
+          "source_model": "gemini",
+          "type": "outdated"
+        }
+      ],
+      "languagetool_also_flagged": false,
+      "models": [
+        "gemini:fact_check",
+        "mistral:red_team"
+      ],
+      "passage": "The 2019 figure was 33 percent.",
+      "weight_sum": 2.6
+    },
+    {
+      "flags": [
+        {
+          "audience_affected": "planning staff",
+          "domain": "completeness",
+          "passage_reference": "The grid is complex.",
+          "source_model": "openai",
+          "steelman_considered": "Out of scope? No \u2014 it drives the claim.",
+          "what_is_missing": "No mention of transmission constraints."
+        },
+        {
+          "audience_segment": "utility analysts",
+          "domain": "red_team",
+          "passage": "The grid is complex.",
+          "risk": "Reads as condescending to practitioners.",
+          "source_model": "mistral",
+          "type": "highest_audience_risk"
+        }
+      ],
+      "languagetool_also_flagged": false,
+      "models": [
+        "mistral:red_team",
+        "openai:completeness"
+      ],
+      "passage": "The grid is complex.",
+      "weight_sum": 2.3
+    },
+    {
+      "flags": [
+        {
+          "domain": "argument_integrity",
+          "logical_problem": "Asserts complexity without supporting the inference.",
+          "passage": "It is important to note that the grid is complex.",
+          "source_model": "mistral",
+          "steelman_considered": "Read as preamble, it still carries weight.",
+          "why_it_survived": "The conclusion depends on it."
+        },
+        {
+          "domain": "voice_style",
+          "passage": "It is important to note that the grid is complex.",
+          "problem": "Filler opener with no content.",
+          "source_model": "openai",
+          "steelman_considered": "Could be signposting; it is not.",
+          "suggested_rewrite": "The grid is complex."
+        }
+      ],
+      "languagetool_also_flagged": false,
+      "models": [
+        "mistral:argument_integrity",
+        "openai:voice_style"
+      ],
+      "passage": "It is important to note that the grid is complex.",
+      "weight_sum": 2.4
+    }
+  ],
+  "section_2_fact_check": {
+    "_sources": {
+      "gemini": {
+        "grounding": true,
+        "weight": 1.5
+      }
+    },
+    "additional_observations": [],
+    "confirmed": [
+      {
+        "claim": "The grid served 41 percent of load from nuclear.",
+        "confidence": "high",
+        "source": "EIA State Profile, https://example.org/eia-profile"
+      }
+    ],
+    "contradicted": [],
+    "outdated": [
+      {
+        "claim": "The 2019 figure was 33 percent.",
+        "confidence": "medium",
+        "current_value": "38 percent as of 2025",
+        "source": "https://example.org/updated-table"
+      }
+    ],
+    "primary_source_needed": [
+      {
+        "best_candidate_source": "https://example.org/water-report",
+        "claim": "Cooling draws 3 million gallons annually."
+      }
+    ],
+    "unverifiable": [
+      {
+        "checked": "county board minutes",
+        "claim": "Local officials were not consulted.",
+        "reason": "no public record found"
+      }
+    ]
+  },
+  "section_3_voice": [
+    {
+      "passage": "It is important to note that the grid is complex.",
+      "problem": "Filler opener with no content.",
+      "source_model": "openai",
+      "steelman_considered": "Could be signposting; it is not.",
+      "suggested_rewrite": "The grid is complex."
+    }
+  ],
+  "section_4_argument": [
+    {
+      "logical_problem": "Asserts complexity without supporting the inference.",
+      "passage": "It is important to note that the grid is complex.",
+      "source_model": "mistral",
+      "steelman_considered": "Read as preamble, it still carries weight.",
+      "why_it_survived": "The conclusion depends on it."
+    }
+  ],
+  "section_5_completeness": [
+    {
+      "audience_affected": "planning staff",
+      "passage_reference": "The grid is complex.",
+      "source_model": "openai",
+      "steelman_considered": "Out of scope? No \u2014 it drives the claim.",
+      "what_is_missing": "No mention of transmission constraints."
+    }
+  ],
+  "section_6_red_team": {
+    "additional_observations": [],
+    "highest_audience_risk": {
+      "audience_segment": "utility analysts",
+      "passage": "The grid is complex.",
+      "risk": "Reads as condescending to practitioners."
+    },
+    "highest_credibility_risk": {
+      "attack_vector": "Demand the record.",
+      "passage": "Local officials were not consulted.",
+      "risk": "Unsourced negative claim about named parties."
+    },
+    "most_vulnerable_claim": {
+      "attack_vector": "The figure is stale.",
+      "passage": "The 2019 figure was 33 percent.",
+      "supporting_evidence_for_attack": "A newer table exists."
+    }
+  },
+  "section_7_low_confidence": [
+    {
+      "domain": "voice_style",
+      "observation": "Borderline stock phrase.",
+      "passage": "This is a critical juncture.",
+      "source_model": "openai"
+    }
+  ],
+  "section_8_additional": [],
+  "section_9_citations": [
+    {
+      "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+      "checksum_basis": "extracted_text",
+      "claim": "Cooling draws 3 million gallons annually.",
+      "resolved": true,
+      "source_name": "fact-check model",
+      "url": "https://example.org/resolved",
+      "verification": "checksum",
+      "wayback": {
+        "archived": true,
+        "snapshot_age_days": 10
+      }
+    },
+    {
+      "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+      "checksum_basis": "extracted_text",
+      "claim": "Local officials were not consulted.",
+      "resolved": true,
+      "source_name": "fact-check model",
+      "url": "https://example.org/resolved",
+      "verification": "checksum",
+      "wayback": {
+        "archived": true,
+        "snapshot_age_days": 10
+      }
+    },
+    {
+      "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+      "checksum_basis": "extracted_text",
+      "claim": "The 2019 figure was 33 percent.",
+      "resolved": true,
+      "source_name": "fact-check model",
+      "url": "https://example.org/resolved",
+      "verification": "checksum",
+      "wayback": {
+        "archived": true,
+        "snapshot_age_days": 10
+      }
+    }
+  ],
+  "truncated_results": []
+}
