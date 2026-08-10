@@ -335,6 +335,57 @@ class TestSection9Citations:
         assert "capacity auction" in pointer_section.lower()
         assert "The bridge cost $4 million." not in pointer_section
 
+    def test_unverifiable_rendered_separately_from_mismatch(self):
+        """ "We could not read the source" and "the source does not support the
+        claim" are different findings. A citation we never managed to read must
+        never appear as evidence against its source, and must not silently
+        vanish from the report either.
+        """
+        report = _base_report(
+            section_9_citations=[
+                {
+                    "claim": "ICNIRP sets a 200 microtesla reference level.",
+                    "resolved": True,
+                    "url": "https://www.icnirp.org/gdl.pdf",
+                    "verification": "unverifiable",
+                    "content_kind": "pdf",
+                    "note": "no text could be extracted from the PDF",
+                    "wayback": {"archived": True},
+                },
+                {
+                    "claim": "The plan was approved in 2021.",
+                    "resolved": False,
+                    "verification": "content_mismatch",
+                    "note": "content verification found it does not support",
+                },
+            ]
+        )
+        md = render_report_markdown(report)
+
+        assert "### Could not be verified" in md
+        assert "could not be verified" in md.lower()
+
+        unverifiable_section = md.split("### Could not be verified")[1].split("###")[0]
+        assert "ICNIRP" in unverifiable_section
+        assert "does not support" not in unverifiable_section
+        # The mismatch stays in its own bucket.
+        assert "The plan was approved in 2021." not in unverifiable_section
+
+    def test_unverifiable_counted_in_summary_line(self):
+        report = _base_report(
+            section_9_citations=[
+                {
+                    "claim": "c",
+                    "resolved": True,
+                    "verification": "unverifiable",
+                    "note": "n",
+                }
+            ]
+        )
+        md = render_report_markdown(report)
+
+        assert "1 could not be verified" in md
+
     def test_content_drift_called_out_above_the_tiers(self):
         """A source that changed since it was last checksummed gets its own
         block — buried in the verified entry's key/value bullets it would read

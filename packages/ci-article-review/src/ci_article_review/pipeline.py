@@ -1036,12 +1036,17 @@ def run_draft_pipeline(
             pointer_count = sum(
                 1 for r in citation_results if r.get("verification") == "pointer"
             )
+            unverifiable_count = sum(
+                1 for r in citation_results if r.get("verification") == "unverifiable"
+            )
             log.info(
-                "Citations: %d claim(s), %d verified, %d pointer-only, %d unresolved",
+                "Citations: %d claim(s), %d verified, %d pointer-only, "
+                "%d could not be verified, %d unresolved",
                 len(claims),
                 verified_count,
                 pointer_count,
-                len(claims) - verified_count - pointer_count,
+                unverifiable_count,
+                len(claims) - verified_count - pointer_count - unverifiable_count,
             )
         else:
             citation_results = []
@@ -1401,6 +1406,7 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         resolved = [c for c in citations if c.get("resolved")]
         verified = [c for c in resolved if c.get("verification") == "checksum"]
         pointer = [c for c in resolved if c.get("verification") == "pointer"]
+        unverifiable = [c for c in resolved if c.get("verification") == "unverifiable"]
         not_archived = [
             c for c in resolved if c.get("wayback", {}).get("archived") is False
         ]
@@ -1415,7 +1421,8 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         print(
             f"\nSection 9 — Citations: {len(citations)} claim(s) — "
             f"{len(verified)} verified, {len(pointer)} pointer-only "
-            f"(not independently verified), {len(citations) - len(resolved)} unresolved"
+            f"(not independently verified), {len(unverifiable)} could not be verified, "
+            f"{len(citations) - len(resolved)} unresolved"
         )
         if submitted:
             print(

@@ -14,8 +14,9 @@ dependencies = [
 # Vertex AI provider for the Gemini adapter (google.auth token flow).
 # Not needed when using Gemini via AI Studio (API-key auth).
 vertex = ["google-auth>=2.0"]
-# Best-quality main-content extraction for --url mode; falls back to a built-in
-# HTMLParser extractor when absent.
+# Retained for back-compat: trafilatura is now a required ci-core dependency
+# (citation verification depends on extraction quality), so this extra is
+# already satisfied by a plain install.
 url = ["trafilatura>=1.6"]
 # Convenience: all optional extras at once.
 all = ["google-auth>=2.0", "trafilatura>=1.6"]

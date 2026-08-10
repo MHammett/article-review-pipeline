@@ -855,12 +855,15 @@ If you want the richer author-intent context, use a `--draft` handoff instead.
 - **SSRF guard.** Only public hosts are fetched. The same check used for link
   validation (`analysis/links.py`) rejects loopback, private, link-local, and
   cloud-metadata (`169.254.169.254`) addresses *before* any request is made.
-- **Extraction.** If [`trafilatura`](https://trafilatura.readthedocs.io/) is
-  installed it's used for main-content extraction (`pip install trafilatura`).
-  Otherwise a built-in heuristic strips `<script>`/`<style>`/`<nav>`/`<header>`/
-  `<footer>`/`<aside>`, prefers the `<article>` or `<main>` element, and keeps
-  `<h1>`–`<h3>` as markdown headings (the SEO and structure checks key off
-  heading markup).
+- **Extraction.** [`trafilatura`](https://trafilatura.readthedocs.io/) is used
+  for main-content extraction. It is a required dependency (`ci_core.extract`),
+  shared with citation verification, which depends on extraction quality for
+  correctness. If it is somehow unavailable, a built-in heuristic strips
+  `<script>`/`<style>`/`<nav>`/`<header>`/`<footer>`/`<aside>`, prefers the
+  `<article>` or `<main>` element, and keeps `<h1>`–`<h3>` as markdown headings
+  (the SEO and structure checks key off heading markup). The fallback is
+  markedly weaker on pages with no `<article>`/`<main>` region, where it can
+  return navigation chrome instead of body text.
 - **Thin-extraction warning.** If fewer than ~200 words are extracted, the run
   warns loudly — usually a paywall, a JavaScript-rendered page, or a bot-block —
   and proceeds on whatever content was recovered.
