@@ -279,3 +279,32 @@ def _run_minimal_pipeline(citation_sources):
             "pub",
             handoff={"title": "T", "draft": "Body text here.", "run_number": 1},
         )
+
+
+class TestMarkdownSourceUrls:
+    """Models write markdown links; the bare-URL regex swallowed the syntax.
+
+    A real run produced `[www.cbc.ca](https://www.cbc.ca)` in a source field,
+    and the fetch went out against a hostname of literally "[www.cbc.ca]".
+    """
+
+    def test_a_markdown_link_yields_its_target(self):
+        got = pipeline._extract_source_url("See [www.cbc.ca](https://www.cbc.ca/story)")
+        assert got == "https://www.cbc.ca/story"
+
+    def test_the_real_malformed_case_from_the_run(self):
+        got = pipeline._extract_source_url("[www.cbc.ca](https://www.cbc.ca)")
+        assert got == "https://www.cbc.ca"
+        assert "[" not in got and "]" not in got
+
+    def test_a_bare_url_still_works(self):
+        got = pipeline._extract_source_url("EIA Profile, https://www.eia.gov/state/")
+        assert got == "https://www.eia.gov/state/"
+
+    def test_trailing_sentence_punctuation_is_stripped(self):
+        assert pipeline._extract_source_url("see https://x.example/a.") == (
+            "https://x.example/a"
+        )
+
+    def test_no_url_returns_none(self):
+        assert pipeline._extract_source_url("EIA State Energy Profile, 2024") is None
