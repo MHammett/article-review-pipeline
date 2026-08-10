@@ -46,6 +46,7 @@ thoroughness preset for that model.
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +557,7 @@ def build_report(
     api_call_log,
     prior_report=None,
     primary_claim="",
+    prior_report_path=None,
 ):
     """Merge ensemble results into a structured report.
 
@@ -619,7 +621,13 @@ def build_report(
 
     # Delta from prior run
     delta = (
-        _compute_delta(corrected_draft, prior_report, consensus_flags, primary_claim)
+        _compute_delta(
+            corrected_draft,
+            prior_report,
+            consensus_flags,
+            primary_claim,
+            prior_report_path=prior_report_path,
+        )
         if prior_report
         else None
     )
@@ -681,7 +689,13 @@ def _normalize_claim(claim):
     return " ".join((claim or "").split()).strip().lower()
 
 
-def _compute_delta(current_draft, prior_report, current_consensus, current_claim=""):
+def _compute_delta(
+    current_draft,
+    prior_report,
+    current_consensus,
+    current_claim="",
+    prior_report_path=None,
+):
     import difflib
 
     if not prior_report:
@@ -720,8 +734,18 @@ def _compute_delta(current_draft, prior_report, current_consensus, current_claim
         current_draft
     )
 
+    # Which execution this delta was measured against. Run numbers are
+    # author-declared and repeat across re-runs of the same handoff, so the
+    # numbers alone don't identify what was compared — record the file.
+    compared_against = {
+        "report": Path(prior_report_path).name if prior_report_path else None,
+        "run_number": prior_report.get("run_number"),
+        "generated": prior_report.get("generated"),
+    }
+
     return {
         "word_change_pct": word_change_pct,
+        "compared_against": compared_against,
         "prior_consensus_count": len(prior_passages),
         "current_consensus_count": len(current_passages),
         "resolved_consensus_count": len(prior_passages - current_passages),

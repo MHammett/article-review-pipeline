@@ -386,6 +386,9 @@ def render_report_markdown(report):
     delta = report.get("delta")
     if delta:
         lines.append("## Delta From Prior Run")
+        compared = (delta.get("compared_against") or {}).get("report")
+        if compared:
+            lines.append(f"- Compared against: `{compared}`")
         lines.append(f"- Word change: {delta.get('word_change_pct')}%")
         lines.append(
             f"- Resolved consensus flags: {delta.get('resolved_consensus_count')}/{delta.get('prior_consensus_count')}"
