@@ -3,6 +3,7 @@ import hashlib
 import importlib
 import logging
 import secrets
+import threading
 
 
 from ci_core.http import UnsafeURLError, is_public_host, safe_get
@@ -100,6 +101,16 @@ ADAPTER_MAP = {
 
 #: Bound on concurrent claim resolutions so we don't open dozens of sockets at once.
 _MAX_PARALLEL = 8
+
+#: Bound on concurrent relevance-verification model calls, well below
+#: _MAX_PARALLEL. Claim resolution is network-bound and 8-way parallelism is
+#: right for fetching, but every fetched claim now also makes a mistral-small
+#: call — a real run made 106 of them and took 8 HTTP 429s, each costing a 10s
+#: retry. That bound was set when this path made two calls per run, before
+#: `confirmed` claims and grounded-URL fallback multiplied the volume.
+#: Fetching stays at 8; only the model calls queue.
+_MAX_VERIFY_PARALLEL = 3
+_VERIFY_SEMAPHORE = threading.Semaphore(_MAX_VERIFY_PARALLEL)
 
 #: Bound on concurrent Wayback *submissions*, kept well below _MAX_PARALLEL.
 #: archive.org's Save Page Now API does a real page capture (slow, rate-limited),
@@ -409,12 +420,15 @@ def _verify_relevance(claim, content, api_keys):
     user_prompt = _build_verification_prompt(claim, excerpt)
 
     try:
-        result = mistral.call(
-            _VERIFICATION_SYSTEM_PROMPT,
-            user_prompt,
-            api_key,
-            model=_VERIFICATION_MODEL,
-        )
+        # Throttled: the fetches around this run 8-wide, but the provider
+        # rate-limits the model call. See _MAX_VERIFY_PARALLEL.
+        with _VERIFY_SEMAPHORE:
+            result = mistral.call(
+                _VERIFICATION_SYSTEM_PROMPT,
+                user_prompt,
+                api_key,
+                model=_VERIFICATION_MODEL,
+            )
     except Exception as e:
         log.warning(
             f"Citation relevance verification raised for claim '{claim[:50]}': {e}"

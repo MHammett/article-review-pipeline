@@ -260,3 +260,70 @@ class TestFetchedTextIsSanitisedBeforePersistence:
     def test_length_is_still_bounded(self):
         summary = resolver._safe_summary("x " * 5000)
         assert len(summary) < 600
+
+
+class TestVerificationCallsAreThrottled:
+    """A real run made 106 verification calls and took 8 HTTP 429s.
+
+    Claim resolution is 8-way parallel because it is network-bound, but each
+    resolved claim now also makes a model call, and the provider rate-limits
+    those. The bound was set when this path made two calls per run — before
+    `confirmed` claims and grounded-URL fallback multiplied the volume.
+    """
+
+    def test_model_calls_are_bounded_below_fetch_parallelism(self):
+        assert resolver._MAX_VERIFY_PARALLEL < resolver._MAX_PARALLEL
+
+    def test_the_semaphore_actually_wraps_the_model_call(self):
+        """Guards against the semaphore being defined but never acquired."""
+        import inspect
+
+        src = inspect.getsource(resolver._verify_relevance)
+        assert "_VERIFY_SEMAPHORE" in src, "verification call is not throttled"
+
+    def test_concurrent_verifications_never_exceed_the_bound(self):
+        import threading
+
+        peak = {"n": 0}
+        live = {"n": 0}
+        lock = threading.Lock()
+
+        def fake_call(*a, **kw):
+            with lock:
+                live["n"] += 1
+                peak["n"] = max(peak["n"], live["n"])
+            try:
+                import time
+
+                time.sleep(0.02)
+                return {
+                    "failed": False,
+                    "data": {"verdict": "not_addressed", "reason": "r"},
+                    "model": "m",
+                    "tokens": {},
+                    "elapsed_seconds": 0.02,
+                }
+            finally:
+                with lock:
+                    live["n"] -= 1
+
+        with patch(
+            "ci_article_review.adapters.citation.resolver.mistral.call",
+            side_effect=fake_call,
+        ):
+            threads = [
+                threading.Thread(
+                    target=resolver._verify_relevance,
+                    args=("c", _SUPPORTING_PAGE, {"mistral": {"api_key": "k"}}),
+                )
+                for _ in range(12)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert peak["n"] <= resolver._MAX_VERIFY_PARALLEL, (
+            f"peaked at {peak['n']} concurrent model calls, "
+            f"bound is {resolver._MAX_VERIFY_PARALLEL}"
+        )

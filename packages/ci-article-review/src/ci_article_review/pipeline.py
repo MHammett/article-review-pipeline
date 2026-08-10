@@ -323,11 +323,26 @@ def _build_user_prompt(draft: str, handoff: dict) -> str:
 # than a bare URL.
 _SOURCE_URL_RE = re.compile(r"https?://\S+")
 
+#: Models frequently emit the source as a markdown link rather than a bare URL.
+#: A real run produced `[www.cbc.ca](https://www.cbc.ca)`, and the bare-URL
+#: regex captured the whole construct — the fetch then failed against a
+#: hostname of literally "[www.cbc.ca]". Take the link target when we see one.
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*(https?://[^\s)]+)\s*\)")
+
 
 def _extract_source_url(source_field: str) -> str | None:
-    """Pull an embedded URL out of a fact-check item's "source" field, if any."""
+    """Pull an embedded URL out of a fact-check item's "source" field, if any.
+
+    The field is free text — models write "Publisher, Title, https://..." or a
+    markdown link, or occasionally both. Markdown is checked first because its
+    target is unambiguous, where the bare-URL pattern would swallow the
+    surrounding syntax.
+    """
     if not source_field:
         return None
+    m = _MARKDOWN_LINK_RE.search(source_field)
+    if m:
+        return m.group(1).rstrip(".,;:\"'")
     m = _SOURCE_URL_RE.search(source_field)
     if not m:
         return None

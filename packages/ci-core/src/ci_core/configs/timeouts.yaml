@@ -57,7 +57,7 @@ size_multipliers:
 # Grounded models (gemini, sonar) carry a high base because their search latency
 # is large and variable by domain, and isn't captured by a reasoning-effort knob.
 model_multipliers:
-  grok:               0.8
+  grok:               1.2
   gpt-5.4:            1.0
   gpt-5.5:            1.3
   mistral-small:      0.8
