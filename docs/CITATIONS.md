@@ -52,6 +52,35 @@ This is worth more attention than an ordinary unresolved entry. An ordinary one 
 
 ---
 
+## Content drift
+
+The checksum recorded on a verified citation isn't only a fingerprint of what was fetched — it's comparable across runs. Before resolution starts, the pipeline builds a URL → prior-checksum index from every report under `pipeline_history/`: every run, every article, since the same primary sources (EPA eGRID, EIA state profiles) get cited across many articles for one publication. When a citation resolves and its URL is already in that index with a different checksum, the entry gains a `content_changed_since` field recording the prior checksum, and which run of which article last saw it.
+
+It surfaces as its own block above the tiers in the readable report, and in the console summary:
+
+```
+############################################################
+WARNING: 2 verified source(s) have changed content since a prior run checksummed them:
+  https://www.eia.gov/electricity/state/illinois/
+    Last matched in run 3 of 'grid-reliability-piece' on 2026-01-04T09:12:00
+Claims previously verified against these sources may need re-checking.
+############################################################
+```
+
+**What a mismatch proves:** that the bytes at that URL are not the bytes that were there the last time this pipeline fetched it. That's all. It does not say what changed, how much, or whether it matters.
+
+The change may be a substantive revision — a figure restated, a methodology note added, a table replaced with updated annual data — which is exactly what you want to know about a source a previously-published claim rests on. Or it may be a rotating ad slot, a "last updated" timestamp, a session token in the markup, or a randomized nav element. A SHA-256 over full page content cannot tell those apart, and this feature does not try to. Treat a flag as *go look at the page*, not as *the source changed its story*.
+
+**What it never does:** block. A mismatch does not fail resolution, does not demote the entry out of its tier, and does not change `resolved`. A citation flagged for drift is still a verified citation; the flag is a note for the human reviewer sitting alongside it.
+
+**Scope: the verified tier only.** Drift is computed for `verification: "checksum"` entries and compared only against prior entries that were themselves at that tier. Pointer-only citations are excluded in both directions. Their checksum is taken over whatever the adapter returned as content, which for a portal pointer is usually nothing at all or a static blurb — so a mismatch there would be measuring the adapter, not the source. Excluding them from the index also matters: a URL first cited pointer-only and later fetched for real would otherwise flag as "changed" on the strength of the tiers differing. Entries from reports predating the `verification` field are skipped for the same reason — their tier can't be established, so no comparison from them is trustworthy.
+
+Content-mismatch entries (`verification: "content_mismatch"`) are not drift-flagged either. They've already left the verified tier carrying a stronger signal, and stacking a second one on top adds noise, not information.
+
+There's no drift check on a first run against an empty or missing `pipeline_history/`, and none for a URL never cited before — no prior checksum means nothing to compare.
+
+---
+
 ## Wayback Machine behavior
 
 Every resolved citation URL is checked against the Wayback Machine, and the pipeline actively works to get sources archived rather than only reporting on them.

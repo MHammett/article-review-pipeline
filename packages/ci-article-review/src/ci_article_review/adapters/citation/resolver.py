@@ -9,6 +9,9 @@ from ci_core.http import DEFAULT_HEADERS
 
 from ci_core import redact
 from ci_core.llm.adapters import mistral
+
+from ci_article_review import history_analytics
+
 from . import wayback
 
 log = logging.getLogger(__name__)
@@ -66,6 +69,86 @@ def _load_adapter(adapter_name):
 
 def sha256_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def build_checksum_index(history_root=None):
+    """url -> most recent prior {checksum, article_slug, run_number, generated}.
+
+    Scans every report under ``history_root`` (any article, any run — sources
+    like EPA eGRID or EIA state profiles get cited across many different
+    articles for the same publication) once per pipeline run, so resolving
+    individual claims can do an O(1) dict lookup instead of re-scanning
+    history on every claim.
+
+    Only ``verification: "checksum"`` entries are indexed. A pointer-only
+    entry's checksum is taken over whatever the adapter returned as content —
+    usually nothing at all — so indexing those would mean a URL first cited
+    pointer-only and later fetched for real reads as "changed" every time,
+    which is a property of the two tiers differing, not of the page moving.
+    Reports predating the ``verification`` field are skipped for the same
+    reason: their tier can't be established, so no comparison is trustworthy.
+    """
+    if history_root is None:
+        history_root = history_analytics.HISTORY_ROOT
+
+    index = {}
+    for entry in history_analytics.load_reports(history_root):
+        citations = entry["report"].get("section_9_citations") or []
+        for c in citations:
+            url = c.get("url")
+            checksum = c.get("checksum")
+            if not url or not checksum or c.get("verification") != "checksum":
+                continue
+            index[url] = {
+                "checksum": checksum,
+                "article_slug": entry["slug"],
+                "run_number": entry["report"].get("run_number"),
+                "generated": entry["report"].get("generated"),
+            }
+    return index
+
+
+def _check_drift(result, checksum_index):
+    """If ``result``'s URL was checksummed in a prior run with a different
+    value, annotate the resolution with a ``content_changed_since`` field.
+
+    Only applies to the ``checksum`` tier — that's the only tier where the
+    checksum is taken over content actually retrieved as evidence, so it's
+    the only tier where a difference says something about the source.
+
+    A source legitimately changing over time (an annual data report's yearly
+    update, but also a rotating ad slot or a rendered timestamp) isn't itself
+    an error — this is a signal to surface to a human reviewer, not a
+    resolution failure, so it never raises or blocks.
+    """
+    if result.get("verification") != "checksum":
+        return result
+
+    url = result.get("url")
+    checksum = result.get("checksum")
+    if not url or not checksum:
+        return result
+
+    prior = checksum_index.get(url)
+    if prior is None or prior["checksum"] == checksum:
+        return result
+
+    prior_run = prior["run_number"]
+    prior_article = prior["article_slug"]
+    prior_date = prior["generated"]
+    when = f" on {prior_date}" if prior_date else ""
+    result["content_changed_since"] = {
+        "prior_checksum": prior["checksum"],
+        "prior_run": prior_run,
+        "prior_article": prior_article,
+        "prior_date": prior_date,
+        "note": (
+            "This source's content differs from the last time it was "
+            f"checksummed (run {prior_run} of '{prior_article}'{when}). "
+            "A claim previously verified against it may need re-checking."
+        ),
+    }
+    return result
 
 
 def _wayback_fallback_content(url, timeout):
@@ -157,7 +240,9 @@ def _verify_relevance(claim, content, api_keys):
     }, call_log_entry
 
 
-def _resolve_known_url(claim, known_url, api_keys=None, call_log=None, timeout=15):
+def _resolve_known_url(
+    claim, known_url, api_keys=None, call_log=None, checksum_index=None, timeout=15
+):
     """Resolve a claim whose source URL is already known (e.g. supplied by the
     fact-check model itself), bypassing the narrow adapter matching entirely.
 
@@ -171,6 +256,7 @@ def _resolve_known_url(claim, known_url, api_keys=None, call_log=None, timeout=1
     strongest "checksum" verification tier — see that function's docstring
     for why a loaded URL alone isn't proof the claim is supported.
     """
+    checksum_index = checksum_index if checksum_index is not None else {}
     verified_via = "direct"
     try:
         resp = requests.get(known_url, timeout=timeout, headers=DEFAULT_HEADERS)
@@ -222,7 +308,7 @@ def _resolve_known_url(claim, known_url, api_keys=None, call_log=None, timeout=1
         # gracefully to the pre-existing (unverified-relevance) behavior
         # rather than blocking resolution, but leave a clear note.
         result["relevance_check"] = verdict_info["reason"]
-        return result
+        return _check_drift(result, checksum_index)
 
     result["relevance_verdict"] = verdict_info["verdict"]
     result["relevance_reason"] = verdict_info["reason"]
@@ -238,10 +324,17 @@ def _resolve_known_url(claim, known_url, api_keys=None, call_log=None, timeout=1
             f"({verdict_info['verdict']}): {verdict_info['reason']}"
         )
 
-    return result
+    return _check_drift(result, checksum_index)
 
 
-def _resolve_one(claim, citation_sources, known_url=None, api_keys=None, call_log=None):
+def _resolve_one(
+    claim,
+    citation_sources,
+    known_url=None,
+    api_keys=None,
+    call_log=None,
+    checksum_index=None,
+):
     """Resolve a single claim against the configured sources, in order.
 
     If ``known_url`` is given (a source URL the fact-check model already
@@ -253,9 +346,15 @@ def _resolve_one(claim, citation_sources, known_url=None, api_keys=None, call_lo
     ``verification: "pointer"`` so the report does not imply the claim was
     checksummed against retrieved data.
     """
+    checksum_index = checksum_index if checksum_index is not None else {}
+
     if known_url:
         return _resolve_known_url(
-            claim, known_url, api_keys=api_keys, call_log=call_log
+            claim,
+            known_url,
+            api_keys=api_keys,
+            call_log=call_log,
+            checksum_index=checksum_index,
         )
 
     for source_config in citation_sources:
@@ -270,16 +369,19 @@ def _resolve_one(claim, citation_sources, known_url=None, api_keys=None, call_lo
                 resolved_url = result.get("url")
                 wb = wayback.check(resolved_url) if resolved_url else {"archived": None}
                 pointer_only = bool(result.get("pointer_only"))
-                return {
-                    "claim": claim,
-                    "source_name": source_name,
-                    "url": resolved_url,
-                    "content_summary": result.get("summary"),
-                    "checksum": sha256_checksum(result.get("content", "")),
-                    "resolved": True,
-                    "verification": "pointer" if pointer_only else "checksum",
-                    "wayback": wb,
-                }
+                return _check_drift(
+                    {
+                        "claim": claim,
+                        "source_name": source_name,
+                        "url": resolved_url,
+                        "content_summary": result.get("summary"),
+                        "checksum": sha256_checksum(result.get("content", "")),
+                        "resolved": True,
+                        "verification": "pointer" if pointer_only else "checksum",
+                        "wayback": wb,
+                    },
+                    checksum_index,
+                )
         except Exception as e:
             log.warning(
                 f"Citation adapter {adapter_name} failed for claim '{claim[:50]}': {e}"
@@ -350,7 +452,11 @@ def _normalize_claim_entry(entry):
 
 
 def resolve_citations(
-    claims, citation_sources, api_keys=None, verification_call_log=None
+    claims,
+    citation_sources,
+    api_keys=None,
+    verification_call_log=None,
+    history_root=None,
 ):
     """
     For each claim, resolve a primary source. If the claim entry carries a
@@ -376,6 +482,14 @@ def resolve_citations(
     submissions; without it, submission falls back to the unauthenticated
     trigger endpoint.
 
+    Before resolving, a URL -> prior-checksum index is built once from
+    ``history_root`` (every run, every article) so each citation resolved at
+    the ``checksum`` tier can be compared against the last time that URL was
+    checksummed — see ``build_checksum_index`` / ``_check_drift``. Passing no
+    ``history_root`` skips the comparison entirely rather than defaulting to
+    the on-disk history, so a caller that doesn't opt in never pays for a
+    history scan.
+
     Returns a list of resolution results in the original claim order.
     """
     if not claims:
@@ -383,13 +497,20 @@ def resolve_citations(
 
     normalized = [_normalize_claim_entry(entry) for entry in claims]
     call_log = verification_call_log if verification_call_log is not None else []
+    checksum_index = build_checksum_index(history_root) if history_root else {}
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(len(normalized), _MAX_PARALLEL)
     ) as pool:
         futures = {
             pool.submit(
-                _resolve_one, claim, citation_sources, known_url, api_keys, call_log
+                _resolve_one,
+                claim,
+                citation_sources,
+                known_url,
+                api_keys,
+                call_log,
+                checksum_index,
             ): idx
             for idx, (claim, known_url) in enumerate(normalized)
         }
