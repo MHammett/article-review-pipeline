@@ -27,6 +27,7 @@ ci-check = "ci_article_review.check:main"
 ci-discover = "ci_article_review.discover:main"
 ci-review = "ci_article_review.pipeline:main"
 ci-history-report = "ci_article_review.history_analytics:main"
+ci-voice-patterns = "ci_article_review.voice_pattern_report:main"
 
 [tool.uv.sources]
 ci-core = { workspace = true }

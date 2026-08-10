@@ -65,13 +65,13 @@ uv sync
 **1. Run setup:**
 
 ```powershell
-uv run python -m ci_article_review.setup
+uv run ci-setup
 ```
 
 This creates `configs/`, copies the example templates, prompts for your publication name, and prints exactly what to fill in next. Run it with `--publication NAME` to skip the interactive prompt:
 
 ```powershell
-uv run python -m ci_article_review.setup --publication dnacom
+uv run ci-setup --publication dnacom
 ```
 
 **2. Fill in `configs/user.yaml`** with your API keys and model selection. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for account setup instructions per provider. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full config reference.
@@ -81,7 +81,7 @@ uv run python -m ci_article_review.setup --publication dnacom
 **4. Verify your setup:**
 
 ```powershell
-uv run python -m ci_article_review.check --publication your_publication_name
+uv run ci-check --publication your_publication_name
 ```
 
 Makes one minimal call to each configured service and reports pass/fail with specific error messages before you run a real article through.
@@ -89,7 +89,7 @@ Makes one minimal call to each configured service and reports pass/fail with spe
 **Check for newer models** (optional, run any time):
 
 ```powershell
-uv run python -m ci_article_review.discover
+uv run ci-discover
 ```
 
 Queries each provider's live models API and reports what's available — so you always know when a newer model exists without reading every provider's changelog. Compares against your configured models and flags anything newer.
@@ -97,7 +97,7 @@ Queries each provider's live models API and reports what's available — so you 
 **5. Run the pipeline:**
 
 ```powershell
-uv run python -m ci_article_review.pipeline --draft path/to/handoff.md --publication your_publication_name
+uv run ci-review --draft path/to/handoff.md --publication your_publication_name
 ```
 
 Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` argument.
@@ -105,15 +105,15 @@ Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` ar
 **6. Publish an approved draft:**
 
 ```powershell
-uv run python -m ci_article_review.pipeline --publish path/to/publication_handoff.md --publication your_publication_name
+uv run ci-review --publish path/to/publication_handoff.md --publication your_publication_name
 ```
 
 Always saves as a WordPress draft unless you add `--publish-live`.
 
 **Analyze an existing web page:**
 
-```
-python pipeline.py --url https://example.com/some-published-post --publication your_publication_name
+```powershell
+uv run ci-review --url https://example.com/some-published-post --publication your_publication_name
 ```
 
 Instead of a local handoff file, this fetches the page, extracts the main
@@ -154,7 +154,7 @@ Readable review (paste into chat): pipeline_history/my-article/run_1_20260809_14
 5. **Re-run:**
 
    ```powershell
-   uv run python -m ci_article_review.pipeline --raw-draft revised_draft.md --metadata metadata.md --publication your_publication_name
+   uv run ci-review --raw-draft revised_draft.md --metadata metadata.md --publication your_publication_name
    ```
 
    The run number increments and the report gains a **Delta From Prior Run** block — word change, how many prior consensus flags you resolved, how many new ones appeared, and whether the primary claim or heading structure moved.
@@ -189,12 +189,39 @@ What it reports:
 
 It reads `pipeline_history/` fresh every time — no database, no index. Reports missing a field are treated as "not enough history" rather than an error, since the report schema has grown over time.
 
+### Recurring voice patterns
+
+The review pipeline flags AI-speak in `section_3_voice` fresh on every run, so the same tic gets caught and re-litigated article after article. `ci-voice-patterns` reads the same `pipeline_history/` files and reports the patterns that keep recurring — the ones that have earned a permanent `style_rules.banned_words` / `banned_phrases` entry instead:
+
+```powershell
+uv run ci-voice-patterns --publication NAME --config configs/NAME.yaml
+```
+
+| Flag | Purpose |
+|---|---|
+| `--history-root DIR` | Directory containing per-article run history (default `pipeline_history`) |
+| `--publication NAME` | Scope to reports whose `publication` field matches this value |
+| `--config PATH` | Publication config YAML to read existing `style_rules.banned_words`/`banned_phrases` from, so already-banned patterns are excluded (read-only, never modified) |
+| `--min-articles N` | Minimum distinct articles a pattern must appear in to be reported (default 3) |
+| `--similarity-threshold N` | Normalized-text similarity ratio (0-1) for two findings to count as the same pattern (default 0.82) |
+| `--json` | Print the raw result as JSON instead of the console summary |
+| `--verbose`, `-v` | DEBUG logging |
+
+What it reports:
+
+- **Recurring flagged passages** — candidate `banned_phrases` entries: the actual passage text that keeps getting flagged across articles.
+- **Recurring voice problems** — the same critique showing up repeatedly, which points at a pattern worth reviewing even when the wording differs each time.
+
+Both are clustered with a normalized-text `difflib` similarity check rather than any NLP/ML clustering — the goal is surfacing obvious repeats, not perfect semantic dedup. A pattern must appear in at least `--min-articles` *distinct* articles to qualify, so one model flagging the same phrase twice in a single draft isn't cross-article evidence.
+
+It is a suggestion report only. Nothing is written to `pipeline_history/` or to any publication config — a human decides whether each candidate actually becomes a rule.
+
 ---
 
 ## Command-line options
 
 ```powershell
-uv run python -m ci_article_review.pipeline --draft HANDOFF --publication NAME [options]
+uv run ci-review --draft HANDOFF --publication NAME [options]
 ```
 
 Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required — they are mutually exclusive.
@@ -223,7 +250,7 @@ Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required —
 Example — measure one model/domain's true latency cheaply:
 
 ```powershell
-uv run python -m ci_article_review.pipeline --draft handoff.md --publication mypub --cost-preset maximum --only-model openai --only-domain fact_check --no-timeout
+uv run ci-review --draft handoff.md --publication mypub --cost-preset maximum --only-model openai --only-domain fact_check --no-timeout
 ```
 
 > On Windows `cmd.exe`, keep the whole command on one line — backslash line-continuation is a bash feature and will split the command.
@@ -271,6 +298,7 @@ content-intelligence/
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
+│   │   │   ├── voice_pattern_report.py  recurring voice patterns across articles (ci-voice-patterns)
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs

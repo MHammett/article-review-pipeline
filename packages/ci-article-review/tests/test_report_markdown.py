@@ -386,6 +386,54 @@ class TestSection9Citations:
 
         assert "1 could not be verified" in md
 
+    def test_content_drift_called_out_above_the_tiers(self):
+        """A source that changed since it was last checksummed gets its own
+        block — buried in the verified entry's key/value bullets it would read
+        as just another field."""
+        report = _base_report(
+            section_9_citations=[
+                {
+                    "claim": "The bridge cost $4 million.",
+                    "resolved": True,
+                    "source_name": "County Budget",
+                    "url": "https://example.gov/budget.pdf",
+                    "verification": "checksum",
+                    "wayback": {"archived": True},
+                    "content_changed_since": {
+                        "prior_checksum": "abc123",
+                        "prior_run": 4,
+                        "prior_article": "prior-article",
+                        "prior_date": "2026-01-01T00:00:00",
+                        "note": "changed",
+                    },
+                },
+            ]
+        )
+        md = render_report_markdown(report)
+        assert "### ⚠ Content changed since prior checksum (1)" in md
+
+        drift_section = md.split("### ⚠ Content changed")[1].split("### Verified")[0]
+        assert "https://example.gov/budget.pdf" in drift_section
+        assert "run 4 of 'prior-article' on 2026-01-01T00:00:00" in drift_section
+        assert "may need re-checking" in drift_section
+        # The entry still renders in its tier; it is not moved out of Verified.
+        assert "The bridge cost $4 million." in md.split("### Verified")[1]
+
+    def test_no_drift_block_when_nothing_changed(self):
+        report = _base_report(
+            section_9_citations=[
+                {
+                    "claim": "The bridge cost $4 million.",
+                    "resolved": True,
+                    "url": "https://example.gov/budget.pdf",
+                    "verification": "checksum",
+                },
+            ]
+        )
+        assert "Content changed since prior checksum" not in render_report_markdown(
+            report
+        )
+
 
 class TestEmptyReport:
     def test_no_crash_on_all_empty_sections(self):

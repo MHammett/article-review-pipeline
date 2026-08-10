@@ -71,8 +71,6 @@ uv run style-profile-bootstrap \
   --style canonical
 ```
 
-The equivalent module form is `uv run python -m ci_style_profile.bootstrap`.
-
 ## CLI Reference
 
 ```
