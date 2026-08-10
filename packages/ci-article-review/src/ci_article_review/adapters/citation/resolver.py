@@ -225,14 +225,23 @@ def _check_drift(result, checksum_index):
 
 
 def _wayback_fallback_content(url, timeout):
-    """After a direct 403, try archive.org's snapshot as the content source.
+    """When the origin won't (or can't) serve the page, read archive.org's
+    snapshot as the content source instead.
 
-    archive.org serves its own cached copy, so a site blocking our fetch
-    doesn't block the archived one. A single attempt, no retry loop. Returns
-    the snapshot's ``(url, text, kind)`` on success, or None if there's no
-    snapshot or the snapshot itself doesn't resolve. The snapshot body goes
-    through the same extraction as a direct fetch — a Wayback page is HTML
-    (with archive.org's own banner chrome on top), so it needs it even more.
+    archive.org serves its own cached copy, so a site blocking our fetch — or
+    a host we never reached at all — doesn't block the archived one. Which
+    failures qualify is decided by ``wayback.fallback_reason_for_exception``:
+    blocks (401/403/429) and unreachable origins (timeouts, DNS/connection
+    errors) do; a 404 (genuinely gone) and a 5xx (the origin's own problem)
+    deliberately do not. A single attempt, no retry loop. Returns
+    the snapshot's ``(url, text, kind, wayback_result)`` on success, or None if
+    there's no snapshot or the snapshot itself doesn't resolve. The snapshot
+    body goes through the same extraction as a direct fetch — a Wayback page is
+    HTML (with archive.org's own banner chrome on top), so it needs it even more.
+
+    The availability result is handed back so the caller can reuse it instead
+    of asking archive.org the same question twice, and so the snapshot's own
+    staleness flags land on the citation that was satisfied by it.
     """
     wb = wayback.check(url, timeout=timeout)
     snapshot_url = wb.get("snapshot_url")
@@ -244,7 +253,7 @@ def _wayback_fallback_content(url, timeout):
     except Exception:
         return None
     text, kind = _extract_fetched(resp, snapshot_url)
-    return snapshot_url, text, kind
+    return snapshot_url, text, kind, wb
 
 
 def _verify_relevance(claim, content, api_keys):
@@ -326,10 +335,14 @@ def _resolve_known_url(
     """Resolve a claim whose source URL is already known (e.g. supplied by the
     fact-check model itself), bypassing the narrow adapter matching entirely.
 
-    A direct 403 (but not a 404 or 5xx — see ``_wayback_fallback_content``'s
-    scoping) triggers a single fallback attempt against a Wayback snapshot of
-    the same URL, so a claim isn't reported unresolved just because the origin
-    site blocks automated fetches.
+    A fetch the origin refused (401/403/429) or that never reached it at all
+    (timeout, DNS/connection error) — but not a 404 or 5xx, see
+    ``_wayback_fallback_content``'s scoping — triggers a single fallback
+    attempt against a Wayback snapshot of the same URL, so a claim isn't
+    reported unresolved just because the origin site blocks automated fetches
+    or happened to be unreachable during this run. The result records
+    ``verified_via`` and ``origin_failure`` so a citation read from the archive
+    is never mistaken for one read from the live source.
 
     The fetched body is reduced to readable text (main-article extraction for
     HTML, pypdf for PDFs) before anything else touches it — see
@@ -344,15 +357,17 @@ def _resolve_known_url(
     """
     checksum_index = checksum_index if checksum_index is not None else {}
     verified_via = "direct"
+    fallback_reason = None
+    wb = None
     try:
         resp = requests.get(known_url, timeout=timeout, headers=DEFAULT_HEADERS)
         resp.raise_for_status()
         content, content_kind = _extract_fetched(resp, known_url)
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else None
-        fallback = (
-            _wayback_fallback_content(known_url, timeout) if status == 403 else None
-        )
+    except Exception as e:
+        # One except for both shapes of failure: wayback.fallback_reason_for_exception
+        # dispatches an HTTPError on its status and everything else on its type.
+        reason = wayback.fallback_reason_for_exception(e)
+        fallback = _wayback_fallback_content(known_url, timeout) if reason else None
         if fallback is None:
             log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
             return {
@@ -361,18 +376,13 @@ def _resolve_known_url(
                 "resolved": False,
                 "note": f"Known source URL could not be fetched: {e}",
             }
-        _, content, content_kind = fallback
+        _, content, content_kind, wb = fallback
         verified_via = "wayback_fallback"
-    except Exception as e:
-        log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
-        return {
-            "claim": claim,
-            "url": known_url,
-            "resolved": False,
-            "note": f"Known source URL could not be fetched: {e}",
-        }
+        fallback_reason = reason
 
-    wb = wayback.check(known_url)
+    # The fallback path already asked archive.org; don't ask twice.
+    if wb is None:
+        wb = wayback.check(known_url)
     result = {
         "claim": claim,
         "source_name": "fact-check model",
@@ -388,6 +398,31 @@ def _resolve_known_url(
         "checksum_basis": "extracted_text",
         "wayback": wb,
     }
+
+    if verified_via == "wayback_fallback":
+        # The content behind this citation came from archive.org, not the live
+        # source. Everything below (checksum, relevance verdict) is true of the
+        # snapshot, so say so — the tier alone would read as a clean fetch. A
+        # stale snapshot stays flagged as stale in `wayback`; it is not silently
+        # promoted to current just because it satisfied this run.
+        #
+        # This goes in its own field rather than `note`, which every branch
+        # below is entitled to overwrite with something more specific. The
+        # provenance is true regardless of how the rest of the resolution goes,
+        # so it must not be the thing that gets dropped.
+        result["origin_failure"] = fallback_reason
+        label = wayback.FALLBACK_REASON_LABELS.get(fallback_reason, fallback_reason)
+        age = wb.get("snapshot_age_days")
+        staleness = (
+            f" That snapshot is {age} days old and flagged stale."
+            if wb.get("snapshot_stale")
+            else ""
+        )
+        result["archive_provenance"] = (
+            f"Content was read from an archive.org snapshot, not the live source "
+            f"({label}). The checksum and any relevance verdict describe the "
+            f"archived copy.{staleness}"
+        )
 
     if extract.looks_like_access_wall(content):
         # A CAPTCHA/paywall interstitial served as HTTP 200. It extracts into
