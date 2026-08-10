@@ -7,7 +7,7 @@ import requests
 
 from ci_core.http import DEFAULT_HEADERS
 
-from ci_core import redact
+from ci_core import extract
 from ci_core.llm.adapters import mistral
 
 from ci_article_review import history_analytics
@@ -20,6 +20,40 @@ log = logging.getLogger(__name__)
 #: the citation instead of letting it through at checksum-level confidence.
 _SUPPORTING_VERDICTS = {"supports"}
 _KNOWN_VERDICTS = {"supports", "contradicts", "not_addressed", "inconclusive"}
+
+#: Below this many characters, "extracted text" is a cookie banner or a bot
+#: wall, not a document. Verifying against it produces a confident-sounding
+#: verdict from nothing, which is the exact failure this guard exists to stop.
+_MIN_VERIFIABLE_CHARS = 200
+
+#: Notes for the "we fetched it but could not read it" case, keyed by the kind
+#: of document we failed on. Each one has to make clear that the source was not
+#: judged — an honest "unverified" is fine, a wrong "does not support" is not.
+_UNVERIFIABLE_NOTES = {
+    "pdf": (
+        "Source URL fetched and checksummed, but no text could be extracted from "
+        "the PDF (scanned image with no text layer, password-protected, or pypdf "
+        "not installed). Relevance was NOT assessed — this is not evidence the "
+        "source fails to support the claim. Verify manually before citing."
+    ),
+    "html": (
+        "Source URL fetched and checksummed, but no article text could be "
+        "extracted (JavaScript-rendered page, paywall, or bot-block). Relevance "
+        "was NOT assessed — this is not evidence the source fails to support the "
+        "claim. Verify manually before citing."
+    ),
+    "access_wall": (
+        "Source URL returned a bot-check, CAPTCHA, or paywall interstitial rather "
+        "than the document itself, so the real content was never seen. Relevance "
+        "was NOT assessed — this is not evidence the source fails to support the "
+        "claim. Verify manually before citing."
+    ),
+    "default": (
+        "Source URL fetched and checksummed, but produced no readable text. "
+        "Relevance was NOT assessed — this is not evidence the source fails to "
+        "support the claim. Verify manually before citing."
+    ),
+}
 
 #: Cheap/fast model used for the relevance check — this runs once per known_url
 #: citation, so it deliberately avoids a heavyweight reasoning model.
@@ -71,6 +105,27 @@ def sha256_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _extract_fetched(resp, url):
+    """Reduce a fetched response to readable text for checksum + verification.
+
+    Passing ``resp.text`` straight through was the cause of near-total citation
+    rejection: the first 4000 characters of any real page are doctype, <head>,
+    meta/script/link tags and nav, so the verifier was asked whether markup
+    supported a claim and correctly said no. Raw PDF bytes were worse — binary
+    handed to a text model.
+
+    Returns ``(text, kind)``; an empty ``text`` means the body could not be
+    read, which the caller must report as unverifiable rather than as a
+    content mismatch.
+    """
+    return extract.extract_response_text(
+        resp.content,
+        content_type=resp.headers.get("Content-Type"),
+        url=url,
+        encoding=resp.encoding or "utf-8",
+    )
+
+
 def build_checksum_index(history_root=None):
     """url -> most recent prior {checksum, article_slug, run_number, generated}.
 
@@ -87,6 +142,11 @@ def build_checksum_index(history_root=None):
     which is a property of the two tiers differing, not of the page moving.
     Reports predating the ``verification`` field are skipped for the same
     reason: their tier can't be established, so no comparison is trustworthy.
+
+    ``checksum_basis`` is carried through for the same reason again. A
+    ``known_url`` checksum used to be taken over the raw response body and is
+    now taken over the extracted article text, so comparing across that change
+    would report every previously-cited source as changed. See ``_check_drift``.
     """
     if history_root is None:
         history_root = history_analytics.HISTORY_ROOT
@@ -101,6 +161,7 @@ def build_checksum_index(history_root=None):
                 continue
             index[url] = {
                 "checksum": checksum,
+                "checksum_basis": c.get("checksum_basis"),
                 "article_slug": entry["slug"],
                 "run_number": entry["report"].get("run_number"),
                 "generated": entry["report"].get("generated"),
@@ -129,8 +190,20 @@ def _check_drift(result, checksum_index):
     if not url or not checksum:
         return result
 
-    prior = checksum_index.get(url)
+    # `or {}` honours the "never raises" contract above: _resolve_known_url and
+    # _resolve_one both default checksum_index to None, so a direct call that
+    # reaches the checksum tier would otherwise fail on .get().
+    prior = (checksum_index or {}).get(url)
     if prior is None or prior["checksum"] == checksum:
+        return result
+
+    if prior.get("checksum_basis") != result.get("checksum_basis"):
+        # The two checksums were taken over different things, so a difference
+        # says nothing about the source. known_url checksums moved from the raw
+        # response body to the extracted article text; without this guard the
+        # first run after that change reports every previously-cited source as
+        # changed. Suppression is self-healing — once a URL is re-checksummed
+        # on the new basis, later runs compare normally.
         return result
 
     prior_run = prior["run_number"]
@@ -156,8 +229,10 @@ def _wayback_fallback_content(url, timeout):
 
     archive.org serves its own cached copy, so a site blocking our fetch
     doesn't block the archived one. A single attempt, no retry loop. Returns
-    the snapshot's (url, text) on success, or None if there's no snapshot or
-    the snapshot itself doesn't resolve.
+    the snapshot's ``(url, text, kind)`` on success, or None if there's no
+    snapshot or the snapshot itself doesn't resolve. The snapshot body goes
+    through the same extraction as a direct fetch — a Wayback page is HTML
+    (with archive.org's own banner chrome on top), so it needs it even more.
     """
     wb = wayback.check(url, timeout=timeout)
     snapshot_url = wb.get("snapshot_url")
@@ -168,7 +243,8 @@ def _wayback_fallback_content(url, timeout):
         resp.raise_for_status()
     except Exception:
         return None
-    return snapshot_url, resp.text
+    text, kind = _extract_fetched(resp, snapshot_url)
+    return snapshot_url, text, kind
 
 
 def _verify_relevance(claim, content, api_keys):
@@ -194,7 +270,11 @@ def _verify_relevance(claim, content, api_keys):
             "reason": "relevance check skipped: no mistral API key configured",
         }, None
 
-    excerpt = redact.truncate_excerpt(content, head=4000, tail=1000)
+    # Centre the excerpt on the passage most likely to address the claim.
+    # Blind head+tail truncation cuts the supporting sentence out of any long
+    # document — the limit table in a 60-page guidelines PDF is never in the
+    # first 4000 characters.
+    excerpt = extract.select_excerpt(content, claim, head=4000, tail=1000)
     user_prompt = f'Claim: "{claim}"\n\nPage content:\n{excerpt}'
 
     try:
@@ -251,17 +331,23 @@ def _resolve_known_url(
     the same URL, so a claim isn't reported unresolved just because the origin
     site blocks automated fetches.
 
-    After a successful fetch, the content is passed through
-    ``_verify_relevance`` before the citation is allowed to carry the
-    strongest "checksum" verification tier — see that function's docstring
-    for why a loaded URL alone isn't proof the claim is supported.
+    The fetched body is reduced to readable text (main-article extraction for
+    HTML, pypdf for PDFs) before anything else touches it — see
+    ``_extract_fetched``. If nothing readable comes out, the citation is marked
+    ``unverifiable`` rather than run through verification, because a verdict
+    derived from markup or binary asserts something false about the source.
+
+    Otherwise the extracted text is passed through ``_verify_relevance`` before
+    the citation is allowed to carry the strongest "checksum" verification tier
+    — see that function's docstring for why a loaded URL alone isn't proof the
+    claim is supported.
     """
     checksum_index = checksum_index if checksum_index is not None else {}
     verified_via = "direct"
     try:
         resp = requests.get(known_url, timeout=timeout, headers=DEFAULT_HEADERS)
         resp.raise_for_status()
-        content = resp.text
+        content, content_kind = _extract_fetched(resp, known_url)
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else None
         fallback = (
@@ -275,7 +361,7 @@ def _resolve_known_url(
                 "resolved": False,
                 "note": f"Known source URL could not be fetched: {e}",
             }
-        _, content = fallback
+        _, content, content_kind = fallback
         verified_via = "wayback_fallback"
     except Exception as e:
         log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
@@ -296,18 +382,49 @@ def _resolve_known_url(
         "resolved": True,
         "verification": "checksum",
         "verified_via": verified_via,
+        "content_kind": content_kind,
+        # The checksum covers the extracted text, not the raw response body.
+        # Recorded so drift comparison never spans a change of basis.
+        "checksum_basis": "extracted_text",
         "wayback": wb,
     }
+
+    if extract.looks_like_access_wall(content):
+        # A CAPTCHA/paywall interstitial served as HTTP 200. It extracts into
+        # clean prose, so only this check stops the verifier from reading the
+        # blocking notice and reporting that the *source* fails the claim.
+        result["verification"] = "unverifiable"
+        result["content_kind"] = "access_wall"
+        result["note"] = _UNVERIFIABLE_NOTES["access_wall"]
+        return _check_drift(result, checksum_index)
+
+    if len(content.strip()) < _MIN_VERIFIABLE_CHARS:
+        # We fetched a real document but could not read it: a PDF with no text
+        # layer (or no pypdf installed), a JS-only render, a bot wall. Say that
+        # — do NOT run verification and report "does not support the claim",
+        # which asserts something false about a source we never read.
+        result["verification"] = "unverifiable"
+        result["note"] = _UNVERIFIABLE_NOTES.get(
+            content_kind, _UNVERIFIABLE_NOTES["default"]
+        )
+        return _check_drift(result, checksum_index)
 
     verdict_info, verification_call_log = _verify_relevance(claim, content, api_keys)
     if call_log is not None and verification_call_log is not None:
         call_log.append(verification_call_log)
 
     if not verdict_info["checked"]:
-        # Verification didn't run or couldn't be interpreted — degrade
-        # gracefully to the pre-existing (unverified-relevance) behavior
-        # rather than blocking resolution, but leave a clear note.
+        # The check itself didn't run or couldn't be interpreted (no API key,
+        # call failure, unparseable verdict). We read the page but formed no
+        # opinion on it, so this is "could not assess", not "checksum-verified"
+        # and emphatically not "does not support".
+        result["verification"] = "unverifiable"
         result["relevance_check"] = verdict_info["reason"]
+        result["note"] = (
+            "Source URL fetched and checksummed, but relevance could not be "
+            f"assessed: {verdict_info['reason']}. This is NOT evidence the source "
+            "fails to support the claim — verify manually before citing."
+        )
         return _check_drift(result, checksum_index)
 
     result["relevance_verdict"] = verdict_info["verdict"]
@@ -319,9 +436,9 @@ def _resolve_known_url(
         result["resolved"] = False
         result["verification"] = "content_mismatch"
         result["note"] = (
-            f"Source URL loaded and checksummed, but content verification found "
-            f"it does not support this specific claim "
-            f"({verdict_info['verdict']}): {verdict_info['reason']}"
+            f"Source URL loaded, and its extracted article text was read and "
+            f"checked, but content verification found it does not support this "
+            f"specific claim ({verdict_info['verdict']}): {verdict_info['reason']}"
         )
 
     return _check_drift(result, checksum_index)
@@ -375,6 +492,11 @@ def _resolve_one(
                         "source_name": source_name,
                         "url": resolved_url,
                         "content_summary": result.get("summary"),
+                        # No checksum_basis: adapter content is whatever the
+                        # adapter returned and that has not changed, so these
+                        # stay comparable against every prior run. Only the
+                        # known_url path, whose basis moved from the raw
+                        # response body to extracted text, carries a label.
                         "checksum": sha256_checksum(result.get("content", "")),
                         "resolved": True,
                         "verification": "pointer" if pointer_only else "checksum",

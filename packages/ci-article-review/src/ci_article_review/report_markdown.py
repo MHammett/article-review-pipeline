@@ -200,11 +200,13 @@ def _render_section_9(citations):
 
     verified = [c for c in citations if c.get("verification") == "checksum"]
     pointer = [c for c in citations if c.get("verification") == "pointer"]
+    unverifiable = [c for c in citations if c.get("verification") == "unverifiable"]
     unresolved = [c for c in citations if not c.get("resolved")]
 
     lines.append(
         f"{len(verified)} verified, {len(pointer)} pointer-only "
-        f"(not independently verified), {len(unresolved)} unresolved "
+        f"(not independently verified), {len(unverifiable)} could not be verified, "
+        f"{len(unresolved)} unresolved "
         f"— {len(citations)} claim(s) total"
     )
     lines.append("")
@@ -240,6 +242,17 @@ def _render_section_9(citations):
             "verified — confirm manually before citing)"
         )
         for c in pointer:
+            lines.append(f'- "{c.get("claim", "")}"')
+            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+                lines.append(kv)
+        lines.append("")
+
+    if unverifiable:
+        lines.append(
+            "### Could not be verified (source fetched, but its content could NOT "
+            "be read or assessed — this is NOT a finding against the source)"
+        )
+        for c in unverifiable:
             lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)

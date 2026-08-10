@@ -15,6 +15,22 @@ dependencies = [
     # set of timeout/encoding/error-body semantics across all six providers.
     "requests>=2.31.0,<3.0",
     "pyyaml>=6.0,<7.0",
+    # ci_core.extract — text extraction from PDF citation sources. Many of the
+    # primary documents this pipeline verifies against (ICNIRP guidelines, NIOSH
+    # reports, EPA rules) are PDFs, so this is required rather than an extra:
+    # pypdf is pure Python with no compiled dependencies, and without it every
+    # PDF source degrades to unverifiable.
+    "pypdf>=4.0",
+    # Main-content extraction. Previously an optional extra of ci-article-review
+    # (--url mode fell back to a heuristic parser when it was absent), but
+    # citation verification now depends on extraction quality for correctness,
+    # not just for output polish: on pages with no <article>/<main> the built-in
+    # fallback returns nav and footer chrome, and the verifier then reports that
+    # a source does not support a claim it was never actually shown. Measured on
+    # the failing citation set, trafilatura recovers real body text (e.g. EPA
+    # Green Book county tables) where the fallback returns menus. The fallback
+    # stays as a safety net.
+    "trafilatura>=1.6",
 ]
 
 [project.optional-dependencies]

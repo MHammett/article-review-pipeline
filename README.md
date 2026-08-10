@@ -7,7 +7,8 @@ per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
 - **ci-core** (`ci_core`) — the shared foundation both application packages build on.
   It owns the LLM layer (`ci_core.llm`: the six streaming provider adapters, SSE
   handling, robust JSON extraction, cost estimation, the sliding-scale timeout model,
-  and the model registry), outbound HTTP identity (`ci_core.http`), secret redaction
+  and the model registry), outbound HTTP identity (`ci_core.http`), response-body
+  text extraction (`ci_core.extract`), secret redaction
   (`ci_core.redact`), and the shared config helpers (`ci_core.config_helpers`). The
   provider/model reference data those read — `pricing.yaml`, `timeouts.yaml`,
   `model_registry.yaml` — lives in `ci_core/configs/` alongside its loaders.
@@ -120,13 +121,10 @@ article text (stripping nav/header/footer boilerplate), and runs the same
 multi-model review on it — useful for an in-depth analysis of your own published
 articles or a third-party piece.
 
-For best extraction quality, install the optional `trafilatura` extra:
-
-```
-pip install trafilatura
-```
-
-Without it, a built-in heuristic extractor is used. URL mode only fetches
+Main-content extraction uses [`trafilatura`](https://trafilatura.readthedocs.io/),
+which is installed as a standard dependency (citation verification depends on
+extraction quality, so it is no longer optional). A built-in heuristic extractor
+remains as a fallback. URL mode only fetches
 public hosts (an SSRF guard blocks private/loopback/cloud-metadata addresses)
 and infers only the title and body — it cannot supply an author's
 `primary_claim`, target audience, or pre-draft analysis (see
@@ -344,6 +342,7 @@ content-intelligence/
 │   │   │   │   ├── cost.py            token-based cost estimation
 │   │   │   │   ├── timeout_model.py   sliding-scale timeout from size × model × effort
 │   │   │   │   └── model_registry.py  current/superseded model detection
+│   │   │   ├── extract.py        HTML/PDF -> readable text, claim-centred excerpts
 │   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
 │   │   │   ├── redact.py         scrubs API keys from error output before logging
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
