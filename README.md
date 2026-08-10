@@ -205,6 +205,8 @@ What it reports:
 - **Cost** — total spend, average per run, and recent-versus-baseline direction (`increasing` / `decreasing` / `flat`, at a 15% relative threshold). Direction only — cost has no "better" way to editorialize.
 - **Quality trends** — Flesch-Kincaid grade, SEO issue count, and broken link count, both globally (recent vs. baseline average) and per article across its own revision history (first run vs. latest, as `improved` / `worsened` / `unchanged`).
 
+- **Per-pass contribution** — for each `model:domain` pass: how often it ran, what it cost, how many of its findings reached consensus, and how many of those *only* it raised. This is the data for deciding whether every call in a `maximum` run earns its keep. Read it to form a hypothesis and confirm with `--only-model` / `--only-domain`; a pass with many sole-source findings scores badly on cost-per-hit and may still be the most valuable one you have.
+
 It reads `pipeline_history/` fresh every time — no database, no index. Reports missing a field are treated as "not enough history" rather than an error, since the report schema has grown over time.
 
 ### Recurring voice patterns
@@ -394,6 +396,7 @@ content-intelligence/
 ├── pipeline_history/             run reports, readable reviews, and daily pipeline logs
 │                                 (gitignored, local only)
 └── docs/                         extended documentation
+    ├── ARCHITECTURE.md           pass structure, data flow, design rationale
     ├── PROVIDERS.md              account setup for every service
     ├── CONFIGURATION.md          full config reference, thoroughness, ensemble weights
     ├── CITATIONS.md              Section 9 confidence tiers and archiving behavior
@@ -405,6 +408,8 @@ content-intelligence/
 ---
 
 ## Documentation
+
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — How the pipeline works as a whole: the pass structure, what flows between passes, why consolidation is weighted the way it is, the review→revise→re-run loop end to end, and the extension points. Start here to understand the design rather than the configuration.
 
 - **[docs/PROVIDERS.md](docs/PROVIDERS.md)** — Account setup and API keys for every service: OpenAI, Gemini (AI Studio + Vertex AI), Mistral, Perplexity, Grok, Claude, LanguageTool, WordPress.
 

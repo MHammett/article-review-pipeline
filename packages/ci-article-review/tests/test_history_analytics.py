@@ -457,3 +457,104 @@ class TestBuildHistoryReport:
         captured = capsys.readouterr()
         assert "DEGRADED" in captured.out
         assert "perplexity" in captured.out
+
+
+class TestPassContribution:
+    """Audit findings 10 and 16 — the data needed before retuning presets.
+
+    Both findings were deliberately left unimplemented in the audit because
+    changing the ensemble blind is exactly the wrong move. This derives the
+    answer from reports already on disk.
+    """
+
+    def _entry(self, *, api_log, by_pass, consensus):
+        return {
+            "slug": "a",
+            "report": {
+                "api_call_log": api_log,
+                "cost_summary": {"by_pass": by_pass},
+                "section_1_consensus": consensus,
+            },
+        }
+
+    def test_counts_calls_failures_and_cost(self):
+        entries = [
+            self._entry(
+                api_log=[
+                    {"pass": "gemini:fact_check", "failed": False},
+                    {"pass": "grok:red_team", "failed": True},
+                ],
+                by_pass=[
+                    {"pass": "gemini:fact_check", "total_usd": 0.10},
+                    {"pass": "grok:red_team", "total_usd": 0.05},
+                ],
+                consensus=[],
+            )
+        ]
+        by_name = {s["pass"]: s for s in ha.pass_contribution(entries)}
+        assert by_name["gemini:fact_check"]["calls"] == 1
+        assert by_name["grok:red_team"]["failures"] == 1
+        assert by_name["gemini:fact_check"]["total_usd"] == 0.10
+
+    def test_separates_sole_source_from_corroborated_findings(self):
+        """A pass seeing what nothing else sees is the opposite of redundant."""
+        entries = [
+            self._entry(
+                api_log=[{"pass": "grok:red_team", "failed": False}],
+                by_pass=[{"pass": "grok:red_team", "total_usd": 0.05}],
+                consensus=[
+                    {"passage": "p1", "models": ["grok:red_team"]},
+                    {
+                        "passage": "p2",
+                        "models": ["grok:red_team", "claude:red_team"],
+                    },
+                ],
+            )
+        ]
+        by_name = {s["pass"]: s for s in ha.pass_contribution(entries)}
+        grok = by_name["grok:red_team"]
+        assert grok["consensus_hits"] == 2
+        assert grok["sole_source"] == 1
+        assert grok["corroborated"] == 1
+
+    def test_cost_per_consensus_hit_is_the_sorting_signal(self):
+        entries = [
+            self._entry(
+                api_log=[],
+                by_pass=[{"pass": "expensive:d", "total_usd": 1.0}],
+                consensus=[{"passage": "p", "models": ["expensive:d", "cheap:d"]}],
+            )
+        ]
+        by_name = {s["pass"]: s for s in ha.pass_contribution(entries)}
+        assert by_name["expensive:d"]["usd_per_consensus_hit"] == 1.0
+
+    def test_a_pass_that_never_reaches_consensus_is_reported_not_hidden(self):
+        """Cost with zero hits is the loudest result this can produce."""
+        entries = [
+            self._entry(
+                api_log=[{"pass": "perplexity:voice_style", "failed": False}],
+                by_pass=[{"pass": "perplexity:voice_style", "total_usd": 0.20}],
+                consensus=[],
+            )
+        ]
+        result = ha.pass_contribution(entries)
+        (entry,) = [s for s in result if s["pass"] == "perplexity:voice_style"]
+        assert entry["consensus_hits"] == 0
+        assert entry["usd_per_consensus_hit"] is None
+        assert entry["total_usd"] == 0.20
+
+    def test_accumulates_across_runs(self):
+        e = self._entry(
+            api_log=[{"pass": "a:b", "failed": False}],
+            by_pass=[{"pass": "a:b", "total_usd": 0.10}],
+            consensus=[{"passage": "p", "models": ["a:b"]}],
+        )
+        result = ha.pass_contribution([e, e, e])
+        (entry,) = result
+        assert entry["calls"] == 3
+        assert entry["total_usd"] == 0.30
+        assert entry["consensus_hits"] == 3
+
+    def test_reports_missing_these_fields_do_not_raise(self):
+        """The report schema has grown over time; old reports lack these keys."""
+        assert ha.pass_contribution([{"slug": "a", "report": {}}]) == []
