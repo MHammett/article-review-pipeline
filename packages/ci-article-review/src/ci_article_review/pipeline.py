@@ -69,6 +69,7 @@ from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from .analysis import readability as readability_analysis
 from .analysis import seo as seo_analysis
+from .analysis import seo_suggest
 from ci_core.llm import cost as cost_analysis
 from .analysis.webpage import build_handoff_from_url
 
@@ -460,6 +461,7 @@ def run_draft_pipeline(
     only_model=None,
     only_domain=None,
     handoff=None,
+    seo_suggestions=None,
 ):
     """Run the full draft review pipeline.
 
@@ -467,6 +469,10 @@ def run_draft_pipeline(
     parsed here. URL mode (and tests) may instead pass a pre-built ``handoff``
     dict — must contain at least ``title`` and ``draft`` — in which case the
     file read/parse step is skipped and the rest of the pipeline is shared.
+
+    ``seo_suggestions=False`` suppresses the SEO suggestion call for this run
+    only, overriding the publication config's ``seo_rules.suggestions``. None
+    (the default) leaves the decision to the config.
     """
     t_start = time.monotonic()
 
@@ -624,10 +630,19 @@ def run_draft_pipeline(
     else:
         pre_analysis["links"] = []
 
+    if seo_suggestions is False:
+        # CLI override for this run only — does not modify the publication
+        # config on disk. Mirrors --cost-preset above. Assigned rather than
+        # setdefault'd because a bare `seo_rules:` line in YAML parses to None,
+        # not to an empty dict.
+        pub_config["seo_rules"] = {**(pub_config.get("seo_rules") or {})}
+        pub_config["seo_rules"]["suggestions"] = False
+
     pre_analysis["seo"] = seo_analysis.analyze(
         corrected_draft,
         handoff,
         seo_rules=pub_config.get("seo_rules"),
+        mode=seo_analysis.DRAFT_MODE,
     )
     seo_issues = pre_analysis["seo"]["issues"]
     if seo_issues:
@@ -638,6 +653,21 @@ def run_draft_pipeline(
         )
     else:
         log.info("SEO: no issues detected")
+
+    # SEO suggestions — one cheap model call proposing focus keywords, a meta
+    # description, and (when the title is over the ceiling) an OG title. Runs
+    # here, at draft time, so the output feeds the chat revision round-trip and
+    # can be regenerated each pass. Advisory only: nothing is written to any
+    # config, handoff, or WordPress metadata. Its cost entry joins api_call_log
+    # further down, once that list exists.
+    seo_suggestion_result, seo_suggestion_call = seo_suggest.generate(
+        corrected_draft,
+        handoff=handoff,
+        pub_config=pub_config,
+        api_keys=api_keys,
+        seo_result=pre_analysis["seo"],
+    )
+    seo_analysis.apply_suggestions(pre_analysis["seo"], seo_suggestion_result)
 
     # Sliding-scale timeouts: size the per-model timeout from the draft length, the
     # model, and the reasoning effort. A timeout_seconds set explicitly in user.yaml
@@ -1055,6 +1085,12 @@ def run_draft_pipeline(
     else:
         report["section_9_citations"] = []
 
+    # The SEO suggestion call happened back in pre-analysis, before this list
+    # existed. Fold its cost in here so it lands in cost_summary under its own
+    # pass name rather than going untracked.
+    if seo_suggestion_call is not None:
+        api_call_log.append(seo_suggestion_call)
+
     # Cost tracking
     cost_summary = cost_analysis.calculate(api_call_log)
     report["cost_summary"] = cost_summary
@@ -1110,6 +1146,59 @@ def run_draft_pipeline(
 # ---------------------------------------------------------------------------
 # Summary printer
 # ---------------------------------------------------------------------------
+
+
+def _print_seo_suggestions(suggestions):
+    """Console rendering of the SEO suggestion block, under the SEO issues.
+
+    Prints the unavailable reason too, rather than nothing: a run whose
+    suggestions silently vanished looks identical to one where the pass was
+    never wired up.
+    """
+    if not suggestions:
+        return
+
+    status = suggestions.get("status")
+    if status != "ok":
+        print(
+            f"SEO suggestions: unavailable — {suggestions.get('reason', 'unknown reason')}"
+        )
+        return
+
+    print("SEO suggestions (advisory — none of this is applied automatically):")
+
+    candidates = suggestions.get("keyword_candidates") or []
+    if candidates:
+        print("  Focus keyword candidates — choose one yourself:")
+        for i, c in enumerate(candidates, 1):
+            rationale = f" — {c['rationale']}" if c.get("rationale") else ""
+            print(f"    {i}. {c['keyword']}{rationale}")
+
+    meta = suggestions.get("meta_description")
+    if meta:
+        over = (
+            " — OVER LIMIT, trim before use"
+            if suggestions.get("meta_description_over_limit")
+            else ""
+        )
+        print(
+            f"  Meta description ({suggestions.get('meta_description_chars')}/"
+            f"{suggestions.get('meta_description_limit')} chars){over}:"
+        )
+        print(f"    {meta}")
+
+    og_title = suggestions.get("og_title")
+    if og_title:
+        over = (
+            " — OVER LIMIT, trim before use"
+            if suggestions.get("og_title_over_limit")
+            else ""
+        )
+        print(
+            f"  OG title ({suggestions.get('og_title_chars')}/"
+            f"{suggestions.get('og_title_limit')} chars){over}:"
+        )
+        print(f"    {og_title}")
 
 
 def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=None):
@@ -1248,6 +1337,7 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
                     print(f"  [{iss['type']}] {iss['detail']}")
             else:
                 print("SEO: no issues")
+            _print_seo_suggestions(seo.get("suggestions"))
         links = pre.get("links", [])
         if links:
             broken = [lk for lk in links if not lk.get("ok")]
@@ -1509,8 +1599,63 @@ def _print_next_step(markdown_path):
 # ---------------------------------------------------------------------------
 
 
+def _suggest_seo_for_publish(pub_handoff, pub_config, api_keys):
+    """Offer SEO suggestions at publish time for fields the handoff left empty.
+
+    Draft time is where the suggestion pass earns its keep — it's free to
+    regenerate each round and it feeds the revision loop. This is the safety
+    net for a handoff that reached Template C with SEO METADATA still on its
+    "derive from primary claim" placeholders (``_parse_seo_block`` drops those,
+    so they arrive here as absent rather than as literal text).
+
+    Only runs when something is actually missing, so a fully-filled handoff
+    pays for no call. Printed before the WordPress checklist so the author can
+    decline the push, paste a value into the handoff, and re-run: the values
+    are NOT applied to the post.
+    """
+    seo_meta = pub_handoff.get("seo") or {}
+    if seo_meta.get("focus_keyword") and seo_meta.get("meta_description"):
+        return
+
+    seo_result = seo_analysis.analyze(
+        pub_handoff["final_draft"],
+        pub_handoff,
+        seo_rules=pub_config.get("seo_rules"),
+        mode=seo_analysis.PUBLISH_MODE,
+    )
+    suggestions, _ = seo_suggest.generate(
+        pub_handoff["final_draft"],
+        handoff=pub_handoff,
+        pub_config=pub_config,
+        api_keys=api_keys,
+        seo_result=seo_result,
+    )
+    if not suggestions or suggestions.get("status") != "ok":
+        return
+
+    missing = [
+        label
+        for label, key in (
+            ("focus keyword", "focus_keyword"),
+            ("meta description", "meta_description"),
+        )
+        if not seo_meta.get(key)
+    ]
+    print(
+        f"\nThis handoff's SEO METADATA has no {' and no '.join(missing)}. "
+        "Suggestions follow — they are NOT applied to the post. To use one, "
+        "cancel the push, paste it into the handoff's SEO METADATA block, and "
+        "re-run."
+    )
+    _print_seo_suggestions(suggestions)
+
+
 def run_publish_pipeline(
-    handoff_path, publication_name, publish_live=False, config_dir="configs"
+    handoff_path,
+    publication_name,
+    publish_live=False,
+    config_dir="configs",
+    seo_suggestions=None,
 ):
     log.info(f"Loading configs (publication={publication_name})")
     user_config = load_user_config(config_dir)
@@ -1533,6 +1678,9 @@ def run_publish_pipeline(
         sys.exit(1)
 
     from .adapters.cms import wordpress as wp
+
+    if seo_suggestions is not False:
+        _suggest_seo_for_publish(pub_handoff, pub_config, config["api_keys"])
 
     confirmed = wp.print_checklist_and_confirm()
     if not confirmed:
@@ -1641,6 +1789,14 @@ def build_parser():
         help="Override cost_preset from user.yaml for this run only (useful for calibration sweeps)",
     )
     parser.add_argument(
+        "--no-seo-suggestions",
+        action="store_true",
+        help="Skip the SEO suggestion pass (one cheap model call proposing focus "
+        "keyword candidates, a meta description, and an OG title) for this run. "
+        "Set seo_rules.suggestions: false in the publication config to disable it "
+        "permanently.",
+    )
+    parser.add_argument(
         "--no-timeout",
         action="store_true",
         help="Calibration: disable timeout truncation so true completion times are measured",
@@ -1712,6 +1868,7 @@ def main():
                 no_timeout=args.no_timeout,
                 only_model=args.only_model,
                 only_domain=args.only_domain,
+                seo_suggestions=False if args.no_seo_suggestions else None,
             )
         elif args.url:
             handoff = build_handoff_from_url(args.url)
@@ -1723,6 +1880,7 @@ def main():
                 no_timeout=args.no_timeout,
                 only_model=args.only_model,
                 only_domain=args.only_domain,
+                seo_suggestions=False if args.no_seo_suggestions else None,
                 handoff=handoff,
             )
         elif args.raw_draft:
@@ -1744,6 +1902,7 @@ def main():
                 no_timeout=args.no_timeout,
                 only_model=args.only_model,
                 only_domain=args.only_domain,
+                seo_suggestions=False if args.no_seo_suggestions else None,
                 handoff=handoff,
             )
         elif args.publish:
@@ -1752,6 +1911,7 @@ def main():
                 args.publication,
                 publish_live=args.publish_live,
                 config_dir=args.config_dir,
+                seo_suggestions=False if args.no_seo_suggestions else None,
             )
     except (FileNotFoundError, ValueError) as e:
         log.error(str(e))

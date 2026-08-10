@@ -769,6 +769,8 @@ Open `configs/your_publication_name.yaml`. Key fields:
 | `seo_rules.title_max_chars` | SEO title length ceiling (default 60) |
 | `seo_rules.title_min_chars` | SEO title length floor (default 20) |
 | `seo_rules.min_article_words` | Minimum word count before thin-content warning (default 300) |
+| `seo_rules.meta_description_max_chars` | Ceiling for the suggested meta description (default 155) |
+| `seo_rules.suggestions` | Whether to run the SEO suggestion pass (default `true`) |
 | `wordpress.site_url` | `https://yoursite.com` |
 | `wordpress.username` | Your WordPress login username |
 | `wordpress.application_password` | The application password from your WordPress profile |
@@ -781,6 +783,61 @@ seo_rules:
   title_min_chars: 20
   min_article_words: 500    # longer minimum for long-form-only publication
 ```
+
+---
+
+### SEO suggestions
+
+The pre-analysis SEO pass reports what's missing. The suggestion pass proposes
+values for it: **3–5 focus keyword candidates** with a one-line rationale each,
+a **draft meta description** under `seo_rules.meta_description_max_chars`, and —
+only when the article title exceeds `seo_rules.title_max_chars` — a shorter
+**OG title**.
+
+It runs during a `--draft` review, not at publish time, so the output feeds the
+[revision round-trip](../packages/ci-article-review/src/ci_article_review/handoff_templates/revise_after_review_prompt.md)
+and can be regenerated for free on every pass. Seeing the intended keyword this
+early is also the point at which you can notice that the article never actually
+uses the phrase it should rank for. It appears in three places: the console
+summary under `SEO issues`, an `## SEO Suggestions` section at the end of
+`run_N_<timestamp>_review.md`, and `pre_analysis.seo.suggestions` in the report
+JSON.
+
+At publish time it runs only as a backstop: if a publication handoff reaches
+`--publish` with SEO METADATA still missing a focus keyword or meta description
+(including the template's `derive from primary claim` placeholders, which the
+parser drops), suggestions print before the WordPress confirmation prompt so you
+can cancel, fill the handoff in, and re-run.
+
+**Nothing here is applied automatically** — not to a config, not to a handoff,
+not to WordPress. Keyword choice is a strategic decision about what you want to
+rank for, so the candidates are yours to pick from.
+
+**Cost and failure behavior.** One call to a small fast model
+(`mistral-small-latest`, the same model the citation relevance verifier uses),
+roughly $0.0002 per run, tracked in the report's `cost_summary` under the
+`seo_suggestions` pass. It needs a Mistral API key; without one it is skipped
+with that reason stated. A failed call is logged and the run continues — a
+suggestion never fails a review.
+
+**Turning it off:**
+
+```yaml
+seo_rules:
+  suggestions: false        # no suggestion call on any run
+```
+
+Or for a single run, without editing the config:
+
+```bash
+uv run ci-review --draft handoff.md --publication your_publication_name --no-seo-suggestions
+```
+
+With the pass off, the `no_meta_description` finding still appears — it just
+states where a meta description becomes due (the publication handoff's SEO
+METADATA block) rather than offering a draft of one.
+
+---
 
 You can use an environment variable for the application password:
 

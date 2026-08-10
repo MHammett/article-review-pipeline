@@ -269,6 +269,82 @@ def _render_section_9(citations):
     return lines
 
 
+def _render_seo_suggestions(pre_analysis):
+    """Render the SEO suggestion block, if the pass produced one.
+
+    This section exists to reach the chat revision round-trip (see
+    ``handoff_templates/revise_after_review_prompt.md``), so it is written for
+    a model as much as for a person — hence the explicit instruction not to
+    treat any of it as decided. Keyword choice is the author's call, and a
+    revision pass that quietly picks one would be making it for them.
+
+    Returns [] when no suggestion pass ran, so reports predating this section
+    (and runs with the pass disabled) render exactly as they did before.
+    """
+    suggestions = (pre_analysis or {}).get("seo", {}).get("suggestions")
+    if not suggestions:
+        return []
+
+    lines = ["## SEO Suggestions", ""]
+    if suggestions.get("status") != "ok":
+        lines.append(
+            f"_Not available this run: {suggestions.get('reason', 'unknown reason')}._"
+        )
+        lines.append("")
+        return lines
+
+    lines.append(
+        "_Proposed, not decided. Nothing here has been written to any config, "
+        "handoff, or WordPress metadata. Do not select a focus keyword on the "
+        "author's behalf — that is a strategic choice about what to rank for._"
+    )
+    lines.append("")
+
+    candidates = suggestions.get("keyword_candidates") or []
+    if candidates:
+        lines.append("### Focus keyword candidates")
+        for c in candidates:
+            rationale = f" — {c['rationale']}" if c.get("rationale") else ""
+            lines.append(f"- **{c['keyword']}**{rationale}")
+        lines.append("")
+
+    meta = suggestions.get("meta_description")
+    if meta:
+        over = (
+            " — **over the limit, trim before use**"
+            if suggestions.get("meta_description_over_limit")
+            else ""
+        )
+        lines.append(
+            f"### Draft meta description "
+            f"({suggestions.get('meta_description_chars')}/"
+            f"{suggestions.get('meta_description_limit')} chars){over}"
+        )
+        lines.append(f"> {meta}")
+        lines.append("")
+
+    og_title = suggestions.get("og_title")
+    if og_title:
+        over = (
+            " — **over the limit, trim before use**"
+            if suggestions.get("og_title_over_limit")
+            else ""
+        )
+        lines.append(
+            f"### Suggested OG title "
+            f"({suggestions.get('og_title_chars')}/"
+            f"{suggestions.get('og_title_limit')} chars){over}"
+        )
+        lines.append(
+            "_The article title is over this publication's ceiling; OG title is "
+            "the field for a shorter one._"
+        )
+        lines.append(f"> {og_title}")
+        lines.append("")
+
+    return lines
+
+
 def render_report_markdown(report):
     """Render a review report dict into a readable markdown document.
 
@@ -347,5 +423,6 @@ def render_report_markdown(report):
     lines.extend(_render_section_7(report.get("section_7_low_confidence", [])))
     lines.extend(_render_section_8(report.get("section_8_additional", [])))
     lines.extend(_render_section_9(report.get("section_9_citations", [])))
+    lines.extend(_render_seo_suggestions(report.get("pre_analysis", {})))
 
     return "\n".join(lines).rstrip() + "\n"

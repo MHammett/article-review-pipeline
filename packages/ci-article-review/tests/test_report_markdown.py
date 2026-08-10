@@ -435,6 +435,77 @@ class TestSection9Citations:
         )
 
 
+class TestSeoSuggestions:
+    _OK = {
+        "status": "ok",
+        "model": "mistral-small-latest",
+        "keyword_candidates": [
+            {"keyword": "interconnection queue", "rationale": "what officials search"},
+            {"keyword": "grid capacity", "rationale": "broader intent"},
+        ],
+        "meta_description": "Queues, not generation, decide the timeline.",
+        "meta_description_chars": 44,
+        "meta_description_limit": 155,
+        "meta_description_over_limit": False,
+    }
+
+    def _render(self, suggestions):
+        return render_report_markdown(
+            _base_report(pre_analysis={"seo": {"suggestions": suggestions}})
+        )
+
+    def test_candidates_and_description_rendered(self):
+        md = self._render(self._OK)
+        assert "## SEO Suggestions" in md
+        assert "interconnection queue" in md
+        assert "what officials search" in md
+        assert "Queues, not generation, decide the timeline." in md
+        assert "44/155 chars" in md
+
+    def test_states_that_nothing_was_applied(self):
+        # This section is pasted into a chat model that is about to revise the
+        # article — it must not read as a decision already made.
+        md = self._render(self._OK)
+        assert "not decided" in md
+        assert "Do not select a focus keyword" in md
+
+    def test_over_limit_description_is_marked(self):
+        md = self._render(
+            {
+                **self._OK,
+                "meta_description_chars": 200,
+                "meta_description_over_limit": True,
+            }
+        )
+        assert "over the limit" in md
+
+    def test_og_title_rendered_when_present(self):
+        md = self._render(
+            {
+                **self._OK,
+                "og_title": "A Shorter Title",
+                "og_title_chars": 15,
+                "og_title_limit": 60,
+                "og_title_over_limit": False,
+            }
+        )
+        assert "Suggested OG title" in md
+        assert "A Shorter Title" in md
+
+    def test_unavailable_reason_is_shown(self):
+        md = self._render({"status": "failed", "reason": "call failed: 503"})
+        assert "## SEO Suggestions" in md
+        assert "call failed: 503" in md
+
+    def test_absent_when_no_suggestion_pass_ran(self):
+        md = render_report_markdown(_base_report(pre_analysis={"seo": {}}))
+        assert "SEO Suggestions" not in md
+
+    def test_absent_for_reports_predating_the_pass(self):
+        md = render_report_markdown(_base_report())
+        assert "SEO Suggestions" not in md
+
+
 class TestEmptyReport:
     def test_no_crash_on_all_empty_sections(self):
         md = render_report_markdown(_base_report())
