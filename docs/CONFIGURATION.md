@@ -21,7 +21,7 @@ The first two are gitignored and have example templates you copy (`user.example.
 The fastest way to scaffold configs is the built-in setup command, which also verifies dependencies:
 
 ```powershell
-uv run python -m ci_article_review.setup --publication your_publication_name
+uv run ci-setup --publication your_publication_name
 ```
 
 This creates `configs/`, copies both example templates, and prints exactly what to fill in.
@@ -674,12 +674,12 @@ pipeline:
 
 ### Live model discovery
 
-Run `discover.py` any time you want to check whether newer models are available from any provider — without reading every provider's changelog yourself. The script calls each provider's live models API using your existing API keys.
+Run model discovery any time you want to check whether newer models are available from any provider — without reading every provider's changelog yourself. It calls each provider's live models API using your existing API keys.
 
-```
-python discover.py
-python discover.py --provider openai
-python discover.py --provider gemini --provider claude
+```powershell
+uv run ci-discover
+uv run ci-discover --provider openai
+uv run ci-discover --provider gemini --provider claude
 ```
 
 **Example output:**
@@ -717,7 +717,7 @@ Anthropic / Claude  (configured: claude-opus-4-8)
 
 **After discovery, to update your configured model:**
 1. Edit `models:` in `configs/user.yaml` (or update the `cost_preset` which sets models automatically)
-2. Run `python check.py --publication your_pub` to verify the new model responds
+2. Run `uv run ci-check --publication your_pub` to verify the new model responds
 3. Optionally add the old model to `superseded:` in [`model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml)
 
 ---
@@ -816,8 +816,8 @@ A re-run is recommended when **any** of these is true: word change exceeds the t
 Instead of a local handoff document, you can point the pipeline at an already
 published web page:
 
-```
-python pipeline.py --url https://example.com/some-post --publication your_publication_name
+```powershell
+uv run ci-review --url https://example.com/some-post --publication your_publication_name
 ```
 
 `--url` is mutually exclusive with `--draft` and `--publish`, and still requires

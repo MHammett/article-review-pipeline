@@ -1,6 +1,12 @@
 # Troubleshooting
 
-Run `python check.py --publication your_publication_name` first. It makes one minimal call to each configured service and tells you exactly what's wrong before you waste a full pipeline run diagnosing it.
+Run the check command first:
+
+```powershell
+uv run ci-check --publication your_publication_name
+```
+
+It makes one minimal call to each configured service and tells you exactly what's wrong before you waste a full pipeline run diagnosing it.
 
 ---
 
@@ -26,13 +32,13 @@ No models passed credential and enabled checks. Make sure at least one model has
 ## Gemini / Google
 
 **Gemini returns 503 (capacity)**  
-AI Studio draws from a shared capacity pool that fills up at peak hours. The pipeline retries once automatically. If 503s are a consistent pattern, switch to Vertex AI. See [PROVIDERS.md](PROVIDERS.md#option-b--vertex-ai-reserved-capacity-no-503s) for setup. Your fact-check pass routes automatically once you update `user.yaml` — `check.py` will confirm.
+AI Studio draws from a shared capacity pool that fills up at peak hours. The pipeline retries once automatically. If 503s are a consistent pattern, switch to Vertex AI. See [PROVIDERS.md](PROVIDERS.md#option-b--vertex-ai-reserved-capacity-no-503s) for setup. Your fact-check pass routes automatically once you update `user.yaml` — the check command will confirm.
 
 **Vertex AI: `No such file or directory` on credentials_file**  
 The path in `credentials_file` doesn't point to the downloaded service account JSON. Move the file and update the path, or remove the key and use Application Default Credentials (`gcloud auth application-default login`) instead.
 
 **Vertex AI: `'parts'` or `KeyError` in response**  
-`gemini-2.5-flash` is a thinking model that returns internal reasoning traces before the actual output. The pipeline filters these out automatically. If you see this in the pipeline adapter (not just `check.py`), update to the latest version.
+`gemini-2.5-flash` is a thinking model that returns internal reasoning traces before the actual output. The pipeline filters these out automatically. If you see this in the pipeline adapter (not just the check command), update to the latest version.
 
 **Vertex AI: `403 Permission denied`**  
 The service account doesn't have the **Agent Platform User** role on the project, or the Agent Platform API isn't enabled. Check IAM in the GCP console and verify the API is enabled at https://console.cloud.google.com/apis/library/aiplatform.googleapis.com.
@@ -159,10 +165,10 @@ One of your configured model IDs has been superseded by a newer model. The old m
 **Model registry staleness notice**  
 The built-in model registry hasn't been updated in 60+ days. Provider APIs change frequently. Re-check [PROVIDERS.md](PROVIDERS.md) against current provider documentation, update `superseded:` / `newer_available:` in [`ci-core`'s `model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml), and bump `registry_date:` to today. This resets the staleness clock. No code change is needed — the pipeline reloads the YAML each run.
 
-**`discover.py` shows no models for a provider**  
-Check that the provider's API key is valid (run `check.py` first). For Gemini configured via Vertex AI, model listing is not supported — check https://ai.google.dev/models manually. For Perplexity, model listing isn't available from their API; the script shows a static documented list.
+**Model discovery shows no models for a provider**  
+Check that the provider's API key is valid (run the check command first). For Gemini configured via Vertex AI, model listing is not supported — check https://ai.google.dev/models manually. For Perplexity, model listing isn't available from their API; the script shows a static documented list.
 
-**`discover.py` shows NEW models but `check.py` fails with 404 on the new model**  
+**Model discovery shows NEW models but the check command fails with 404 on the new model**  
 The new model exists in the provider's catalog but may require a different API access tier, may be in preview, or the model ID in the discovery list may not match exactly what the API accepts for inference. Check the provider's documentation for the exact model ID and any access requirements.
 
 **Link validation takes a long time**  
@@ -199,7 +205,7 @@ The source URL fetched and checksummed fine, but the relevance check found the p
 Expected on the same run. Save Page Now captures run asynchronously on archive.org's side and can take seconds to minutes; the pipeline submits and moves on without polling. A later run's availability check picks up the snapshot. If submissions are failing outright rather than pending, you're likely hitting unauthenticated rate limits — configure `api_keys.archive_org` ([CONFIGURATION.md](CONFIGURATION.md#api-keys)).
 
 **Custom domain prompt_file not found**  
-The `prompt_file` path in `custom_domains` must be relative to your project root or an absolute path. Run `check.py` to verify paths resolve before a full pipeline run. If the file doesn't exist, the custom domain is silently skipped with a warning in `pipeline_<YYYYMMDD>.log`.
+The `prompt_file` path in `custom_domains` must be relative to your project root or an absolute path. Run the check command to verify paths resolve before a full pipeline run. If the file doesn't exist, the custom domain is silently skipped with a warning in `pipeline_<YYYYMMDD>.log`.
 
 **Fact-check CONTRADICTIONS banner in summary**  
 Two or more models reviewed the same claim and disagreed — one marked it confirmed, another marked it outdated or contradicted. This is expected when models have different training data cutoffs or search grounding. Manually verify the claim against a primary source before publishing. The contradiction is saved in the report under the `contradictions` key.
