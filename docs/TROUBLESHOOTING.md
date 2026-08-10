@@ -48,7 +48,7 @@ Verify you are using the project **ID** (like `my-project-123`), not the display
 Rate limit or insufficient credits. Add credits at https://platform.openai.com/account/billing. The pipeline retries once after a delay.
 
 **OpenAI web search not working**  
-The Responses API with `web_search_preview` falls back silently to standard chat completions if it errors. Check `pipeline.log` in `pipeline_history/` for the specific error. If the Responses API isn't available on your account tier, remove `web_search: true` from the model config.
+The Responses API with `web_search_preview` falls back silently to standard chat completions if it errors. Check `pipeline_<YYYYMMDD>.log` in `pipeline_history/` for the specific error. If the Responses API isn't available on your account tier, remove `web_search: true` from the model config.
 
 ---
 
@@ -184,10 +184,22 @@ The most recent Wayback snapshot is more than `wayback_snapshot_stale_days` old 
 The cited URL is itself a `web.archive.org` snapshot. The pipeline recognizes this from the URL's embedded timestamp (it does not look for an archive *of* an archive), reports the snapshot's own age, and flags it `archive link STALE (Nd)` if older than the stale threshold. Whether the archive link actually resolves is the normal HTTP status check — `OK` means it works, `BROKEN` means the snapshot URL itself is dead.
 
 **Section 9 — Citations shows 0 resolved**  
-Either: (a) no `citation_sources` are configured in your publication config, (b) no claims from the fact-check results matched the source adapters' keyword rules, or (c) the API keys for those sources aren't set (e.g., `FRED_API_KEY` env var). Check `pipeline.log` for "Citation adapter … failed" messages.
+Either: (a) no `citation_sources` are configured in your publication config, (b) no claims from the fact-check results matched the source adapters' keyword rules, or (c) the API keys for those sources aren't set (e.g., `FRED_API_KEY` env var). Check `pipeline_<YYYYMMDD>.log` for "Citation adapter … failed" messages. Note that `topic_match` deliberately suppresses keyword hits occurring in credential phrases ("credentials in air quality analysis"), so some claims a human would match land unresolved on purpose — see [CITATIONS.md](CITATIONS.md#pointer-only--verification-pointer).
+
+**Section 9 — everything comes back "pointer-only"**  
+Pointer-only is what the `epa`, `ferc`, `fhwa`, `icc`, `ilga`, and `pjm` adapters return by design — they name a portal, they don't retrieve or check the data. Only `census`, `crossref`, `eia`, `fred`, and fact-check-supplied `known_url` citations can reach the verified tier. If you expected verified results, check that a data-fetching adapter is listed in `citation_sources` and that its API key is set.
+
+**A "verified" citation carries a `relevance_check` note**  
+The content-relevance model call that normally gates the verified tier didn't run — usually no `mistral` API key configured, otherwise a call failure or an unparseable verdict. The entry was fetched and checksummed but *not* relevance-confirmed, and the note says which. This is a deliberate graceful degradation, not an error, but treat those entries as fetch-only until a key is configured.
+
+**Section 9 — `content_mismatch`**  
+The source URL fetched and checksummed fine, but the relevance check found the page does not support the claim. The entry records a `contradicts`, `not_addressed`, or `inconclusive` verdict plus a one-sentence reason, and appears under *Unresolved* in the readable report. Worth more attention than an ordinary unresolved entry — `contradicts` in particular is a signal about the claim itself, not just about the citation.
+
+**Wayback submissions don't show up as archived**  
+Expected on the same run. Save Page Now captures run asynchronously on archive.org's side and can take seconds to minutes; the pipeline submits and moves on without polling. A later run's availability check picks up the snapshot. If submissions are failing outright rather than pending, you're likely hitting unauthenticated rate limits — configure `api_keys.archive_org` ([CONFIGURATION.md](CONFIGURATION.md#api-keys)).
 
 **Custom domain prompt_file not found**  
-The `prompt_file` path in `custom_domains` must be relative to your project root or an absolute path. Run `check.py` to verify paths resolve before a full pipeline run. If the file doesn't exist, the custom domain is silently skipped with a warning in `pipeline.log`.
+The `prompt_file` path in `custom_domains` must be relative to your project root or an absolute path. Run `check.py` to verify paths resolve before a full pipeline run. If the file doesn't exist, the custom domain is silently skipped with a warning in `pipeline_<YYYYMMDD>.log`.
 
 **Fact-check CONTRADICTIONS banner in summary**  
 Two or more models reviewed the same claim and disagreed — one marked it confirmed, another marked it outdated or contradicted. This is expected when models have different training data cutoffs or search grounding. Manually verify the claim against a primary source before publishing. The contradiction is saved in the report under the `contradictions` key.

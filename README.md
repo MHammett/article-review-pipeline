@@ -4,8 +4,14 @@ Content Intelligence is a [uv](https://docs.astral.sh/uv/) workspace of tools fo
 producing and reviewing written content. Code lives under `packages/`, one package
 per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
 
-- **ci-core** (`ci_core`) — shared library: LLM adapters, config, persistence, and
-  cross-package utilities the other packages build on.
+- **ci-core** (`ci_core`) — shared library. What it actually provides to the other
+  packages today is `ci_core.http` (the platform `USER_AGENT` and `DEFAULT_HEADERS`,
+  imported by ci-article-review's link, webpage, and citation fetchers). It also
+  contains an async LLM adapter layer (`ci_core.llm`), settings (`ci_core.config`),
+  and SQLAlchemy persistence (`ci_core.db`, `ci_core.models`, driven by `alembic/`) —
+  those are implemented and tested but not yet wired into any package's runtime path.
+  ci-article-review still uses its own provider adapters under
+  `adapters/review/` and its own YAML config loader.
 - **ci-article-review** (`ci_article_review`) — the article-review pipeline: runs a
   drafted or already-published article through grammar correction and ensemble
   multi-model AI review, then publishes to WordPress on approval. The mature package.
@@ -122,17 +128,80 @@ and infers only the title and body — it cannot supply an author's
 
 ---
 
+## The revision loop
+
+The pipeline is built for a round trip between this tool and whatever chat model you drafted with. Each run writes two files side by side in `pipeline_history/<article-slug>/`:
+
+- `run_N_<timestamp>_report.json` — the full machine-readable report
+- `run_N_<timestamp>_review.md` — the same findings rendered as readable prose, SECTION 1 through SECTION 9
+
+The markdown one is the artifact you actually work from. The end of every run prints its path:
+
+```
+Readable review (paste into chat): pipeline_history/my-article/run_1_20260809_143022_review.md
+```
+
+**The loop:**
+
+1. **Run the pipeline** on your draft handoff (`--draft`) or a plain draft file (`--raw-draft`).
+2. **Open the `review.md`.** Read it directly, or hand it to a model.
+3. **Paste `handoff_templates/revise_after_review_prompt.md` into the same chat thread** that has the article's context, followed by the review's SECTION 1 through SECTION 8 content. That prompt has the model revise the draft *and* regenerate the metadata in one pass — so PRIMARY CLAIM, UNCERTAIN SECTIONS, KNOWN GAPS and the rest don't silently go stale against the revised text. Those sections are fed straight to the review models, so a stale KNOWN GAPS entry gets re-flagged on every subsequent run.
+4. **Save what comes back** as two files: the revised draft, and the metadata block (the format matches `handoff_templates/metadata_only.md`).
+5. **Re-run:**
+
+   ```powershell
+   uv run python -m ci_article_review.pipeline --raw-draft revised_draft.md --metadata metadata.md --publication your_publication_name
+   ```
+
+   The run number increments and the report gains a **Delta From Prior Run** block — word change, how many prior consensus flags you resolved, how many new ones appeared, and whether the primary claim or heading structure moved.
+
+6. Repeat until the findings are ones you're content to ship, then publish with `--publish`.
+
+`--raw-draft` on its own works too — it just uses the whole file as the article body and skips the metadata context, which means the review models lose the author-supplied framing. Pair it with `--metadata` whenever you have that context to give.
+
+---
+
+## Cross-run analytics
+
+A single run tells you about one article. `ci-history-report` reads every `run_*_report.json` under `pipeline_history/` and reports what only shows up across many runs:
+
+```powershell
+uv run ci-history-report
+```
+
+| Flag | Purpose |
+|---|---|
+| `--history-root DIR` | Directory containing per-article run history (default `pipeline_history`) |
+| `--article SLUG` | Scope to one article — the `pipeline_history/` subdirectory name, not the article title |
+| `--recent-window N` | How many of the most recent calls/runs count as "recent" vs. baseline (default 5) |
+| `--json` | Print the raw result as JSON instead of the console summary |
+| `--verbose`, `-v` | DEBUG logging |
+
+What it reports:
+
+- **Provider reliability** — per-provider success rate over the most recent calls versus the historical baseline, with a `DEGRADED` flag when the recent failure rate is at least 40 points worse. This is the check that catches an expired API key failing across every domain, instead of noticing after several bad runs. Providers need at least 3 baseline calls before a comparison is made.
+- **Cost** — total spend, average per run, and recent-versus-baseline direction (`increasing` / `decreasing` / `flat`, at a 15% relative threshold). Direction only — cost has no "better" way to editorialize.
+- **Quality trends** — Flesch-Kincaid grade, SEO issue count, and broken link count, both globally (recent vs. baseline average) and per article across its own revision history (first run vs. latest, as `improved` / `worsened` / `unchanged`).
+
+It reads `pipeline_history/` fresh every time — no database, no index. Reports missing a field are treated as "not enough history" rather than an error, since the report schema has grown over time.
+
+---
+
 ## Command-line options
 
 ```powershell
 uv run python -m ci_article_review.pipeline --draft HANDOFF --publication NAME [options]
 ```
 
+Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required — they are mutually exclusive.
+
 | Flag | Purpose |
 |---|---|
 | `--draft PATH` | Run the review pipeline on a draft handoff document |
-| `--url URL` | Fetch a published web page and run the review on its extracted content (mutually exclusive with `--draft`/`--publish`) |
+| `--raw-draft PATH` | Run on a plain article file with no handoff headers (e.g. pasted straight out of a chat session) — the whole file becomes the article body |
+| `--url URL` | Fetch a published web page and run the review on its extracted content |
 | `--publish PATH` | Publish an approved publication handoff (saves as draft unless `--publish-live`) |
+| `--metadata PATH` | Metadata-only file (PRIMARY CLAIM, TARGET AUDIENCE, etc., no DRAFT section) to pair with `--raw-draft`. Requires `--raw-draft`. |
 | `--publication NAME` | Publication config to use (`configs/NAME.yaml`) — **required** |
 | `--publish-live` | Publish live instead of as a WordPress draft |
 | `--config-dir DIR` | Config directory (default `configs`) |
@@ -163,7 +232,7 @@ uv run python -m ci_article_review.pipeline --draft handoff.md --publication myp
 uv run pytest packages/
 ```
 
-360 tests, all external API calls mocked — no keys required.
+Around 600 tests, all external API calls mocked — no keys required.
 
 ---
 
@@ -183,16 +252,22 @@ content-intelligence/
 ├── requirements-dev.txt          adds pytest and other dev tooling
 ├── .env.example                  documents all supported environment variables
 ├── .pre-commit-config.yaml       ruff + mypy pre-commit hooks
+├── alembic.ini                   Alembic config for the ci-core database schema
+├── alembic/                      migrations for ci_core.models (not used at runtime yet)
+├── .github/                      CI workflows
 │
 ├── packages/
 │   ├── ci-article-review/        the article-review pipeline (the bulk of the code)
 │   │   ├── pyproject.toml
 │   │   ├── src/ci_article_review/
 │   │   │   ├── pipeline.py            orchestration engine — start here
+│   │   │   ├── setup.py               first-run scaffolding for configs/
 │   │   │   ├── config_loader.py       config parsing and validation
 │   │   │   ├── consolidation.py       weighted ensemble consolidation → one report
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
+│   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
+│   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs
 │   │   │   ├── model_registry.py      loads configs/model_registry.yaml — current/superseded detection
@@ -212,9 +287,11 @@ content-intelligence/
 │   │   │   │   ├── review/streaming.py       streaming response helpers
 │   │   │   │   ├── cms/wordpress.py          WordPress REST API publisher
 │   │   │   │   └── citation/
-│   │   │   │       ├── resolver.py           primary source resolution and checksums
-│   │   │   │       ├── wayback.py            Wayback Machine archive availability check
-│   │   │   │       └── sources/              FRED, EIA, Census, FHWA data adapters
+│   │   │   │       ├── resolver.py           primary source resolution, checksums, confidence tiers
+│   │   │   │       ├── wayback.py            Wayback archive check + Save Page Now submission
+│   │   │   │       ├── topic_match.py        keyword gating for pointer-only adapters
+│   │   │   │       └── sources/              10 adapters: census, crossref, eia, epa, ferc,
+│   │   │   │                                 fhwa, fred, icc, ilga, pjm
 │   │   │   │
 │   │   │   ├── analysis/
 │   │   │   │   ├── readability.py     Flesch-Kincaid grade, word count, sentence stats
@@ -230,20 +307,40 @@ content-intelligence/
 │   │   │   └── handoff_templates/     fill these out to submit drafts and publish
 │   │   └── tests/                     pipeline test suite, all external calls mocked
 │   │
-│   ├── ci-core/                  shared library for CI tools (early stage)
+│   ├── ci-core/                  shared library (only ci_core.http is wired in — see above)
 │   │   ├── pyproject.toml
 │   │   ├── src/ci_core/
+│   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS — the part actually in use
+│   │   │   ├── llm/              async provider adapters + factory (not yet consumed)
+│   │   │   ├── config.py         pydantic settings (not yet consumed)
+│   │   │   ├── db.py             async SQLAlchemy engine/session (not yet consumed)
+│   │   │   ├── models.py         ORM models (not yet consumed)
+│   │   │   └── logging.py
 │   │   └── tests/
 │   │
-│   └── ci-style-profile/             style-profile bootstrapping (see PLAN.md)
+│   └── ci-style-profile/         style-profile bootstrapping (see PLAN.md)
 │       ├── pyproject.toml
+│       ├── sources.example.yaml  copy to src/ci_style_profile/sources.yaml
+│       ├── configs/presets.yaml
 │       ├── src/ci_style_profile/
+│       │   ├── bootstrap.py      entry point (style-profile-bootstrap)
+│       │   ├── collectors/       wordpress, gmail, outlook365, twitter, textfiles, custom/
+│       │   ├── detect.py         style detection pass
+│       │   ├── synthesize.py     profile synthesis
+│       │   ├── style_consolidation.py
+│       │   ├── normalize.py, callers.py, output.py, logging_config.py
+│       │   ├── staging/          cached source text (gitignored)
+│       │   └── profiles/         timestamped profile snapshots (gitignored)
 │       └── tests/
 │
-├── pipeline_history/             run reports saved here (gitignored, local only)
+├── pipeline_history/             run reports, readable reviews, and daily pipeline logs
+│                                 (gitignored, local only)
 └── docs/                         extended documentation
     ├── PROVIDERS.md              account setup for every service
     ├── CONFIGURATION.md          full config reference, thoroughness, ensemble weights
+    ├── CITATIONS.md              Section 9 confidence tiers and archiving behavior
+    ├── NAMING.md                 package/module naming convention
+    ├── TERMINOLOGY.md            "voice" vs. "style" and other term definitions
     └── TROUBLESHOOTING.md        error messages and fixes
 ```
 
@@ -255,4 +352,8 @@ content-intelligence/
 
 - **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** — Full `user.yaml` reference: model config (simple and extended forms), web search, Vertex AI, Azure, thoroughness levels, ensemble weighting.
 
+- **[docs/CITATIONS.md](docs/CITATIONS.md)** — How Section 9 resolves claims to primary sources: the three confidence tiers (verified / pointer-only / unresolved), what each one does and doesn't prove, and the Wayback Machine archiving behavior.
+
 - **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — Error messages and fixes for every service, plus pipeline behavior edge cases.
+
+- **[docs/NAMING.md](docs/NAMING.md)** / **[docs/TERMINOLOGY.md](docs/TERMINOLOGY.md)** — Package naming convention, and the deliberate "voice" vs. "style" distinction.
