@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from ci_core.http import USER_AGENT
+from ci_core.http import USER_AGENT, UnsafeURLError
 
 from ci_article_review.analysis import webpage
 
@@ -97,36 +97,53 @@ class TestTrafilaturaPaths:
 
 
 class TestFetchSsrfGuard:
-    def test_rejects_private_host_without_fetching(self):
-        with patch("ci_article_review.analysis.webpage.requests.get") as mock_get:
+    """URL mode fetches through the shared guard in ``ci_core.http``.
+
+    The check used to live in ``analysis/links.py`` and be called separately
+    here. It moved into ``safe_get`` so ``adapters/citation/`` could reach it
+    without an import cycle — which is why model-supplied URLs went unguarded
+    (audit finding 2) — and so that redirects are re-validated per hop rather
+    than only the URL the caller passed (finding 15).
+    """
+
+    def test_a_refused_host_surfaces_as_a_valueerror(self):
+        """Callers catch ValueError; UnsafeURLError is a subclass of it."""
+        with patch(
+            "ci_article_review.analysis.webpage.safe_get",
+            side_effect=UnsafeURLError("Refusing to fetch ... (SSRF guard): x"),
+        ):
             with pytest.raises(ValueError, match="SSRF guard"):
                 webpage.fetch_url("http://169.254.169.254/latest/meta-data/")
-        mock_get.assert_not_called()
 
-    def test_rejects_localhost_without_fetching(self):
-        with patch("ci_article_review.analysis.webpage.requests.get") as mock_get:
-            with pytest.raises(ValueError):
-                webpage.fetch_url("http://localhost:8080/internal")
-        mock_get.assert_not_called()
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost:8080/internal",
+            "http://127.0.0.1/",
+        ],
+    )
+    def test_private_targets_are_rejected_by_the_real_guard(self, url):
+        """No patching of the guard itself — this exercises the real predicate."""
+        with pytest.raises(ValueError):
+            webpage.fetch_url(url)
 
     def test_fetches_public_host(self):
         resp = MagicMock()
         resp.text = SAMPLE_HTML
         resp.raise_for_status = MagicMock()
-        with (
-            patch(
-                "ci_article_review.analysis.webpage._is_public_host", return_value=True
-            ),
-            patch(
-                "ci_article_review.analysis.webpage.requests.get", return_value=resp
-            ) as mock_get,
-        ):
+        with patch(
+            "ci_article_review.analysis.webpage.safe_get", return_value=resp
+        ) as mock_get:
             html = webpage.fetch_url("https://example.com/post")
         assert html == SAMPLE_HTML
-        # Real User-Agent and redirects enabled.
-        kwargs = mock_get.call_args.kwargs
-        assert kwargs["headers"]["User-Agent"] == USER_AGENT
-        assert kwargs["allow_redirects"] is True
+        assert mock_get.call_args.args[0] == "https://example.com/post"
+
+    def test_the_platform_user_agent_is_still_sent(self):
+        """safe_get defaults to DEFAULT_HEADERS, which carries the platform UA."""
+        from ci_core.http import DEFAULT_HEADERS
+
+        assert DEFAULT_HEADERS["User-Agent"] == USER_AGENT
 
 
 class TestBuildHandoffFromUrl:
@@ -173,10 +190,8 @@ class TestUrlModeFlowsIntoReview:
         ]
         with (
             patch.object(sys, "argv", argv),
-            patch(
-                "ci_article_review.analysis.webpage._is_public_host", return_value=True
-            ),
-            patch("ci_article_review.analysis.webpage.requests.get", return_value=resp),
+            patch("ci_article_review.analysis.webpage.safe_get", return_value=True),
+            patch("ci_article_review.analysis.webpage.safe_get", return_value=resp),
             patch("ci_article_review.pipeline.logging.FileHandler"),
             patch("logging.Logger.addHandler"),
             patch("ci_article_review.pipeline.run_draft_pipeline") as mock_run,

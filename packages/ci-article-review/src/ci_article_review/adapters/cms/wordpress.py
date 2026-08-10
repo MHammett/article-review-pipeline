@@ -1,6 +1,9 @@
 import base64
 import logging
+
 import requests
+
+from ci_core import redact
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +41,34 @@ PUBLICATION
 def _auth_header(username, application_password):
     token = base64.b64encode(f"{username}:{application_password}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
+
+
+def _require_https(site_url, wp_config):
+    """Refuse to send an application password over cleartext HTTP.
+
+    Basic auth is base64, which is encoding, not encryption — anyone on the path
+    reads the credential verbatim. A WordPress application password grants
+    post-creation rights on a live site, and it is sent on every category lookup
+    as well as the publish itself.
+
+    ``allow_insecure_http: true`` exists for a local WordPress on the loopback
+    interface, which is a real development case. It has to be set deliberately.
+    """
+    if site_url.lower().startswith("https://"):
+        return
+    if wp_config.get("allow_insecure_http"):
+        log.warning(
+            "WordPress site_url is not HTTPS and allow_insecure_http is set — "
+            "the application password will be sent in cleartext."
+        )
+        return
+    raise ValueError(
+        f"Refusing to send WordPress credentials over an insecure URL: {site_url}\n"
+        "Basic auth is base64-encoded, not encrypted, so an application password "
+        "sent over http:// is readable by anything on the network path.\n"
+        "Fix wordpress.site_url to use https://, or set "
+        "wordpress.allow_insecure_http: true if this is a local test site."
+    )
 
 
 def _lookup_term_ids(api_base, headers, taxonomy, items):
@@ -146,6 +177,7 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
     Returns dict with keys: success (bool), post_id, post_url, error (if failed).
     """
     site_url = wp_config["site_url"].rstrip("/")
+    _require_https(site_url, wp_config)
     endpoint = wp_config.get("rest_api_endpoint", "/wp-json/wp/v2")
     api_base = f"{site_url}{endpoint}"
     username = wp_config["username"]
@@ -195,11 +227,10 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
         )
         return {"success": True, "post_id": post_id, "post_url": post_url}
     except requests.HTTPError as e:
-        error_body = ""
-        try:
-            error_body = e.response.json()
-        except Exception:
-            error_body = str(e)
+        # Redacted and bounded like every other adapter's error path. A WordPress
+        # error body can echo the submitted post, and this string is both logged
+        # and returned to the caller for display.
+        error_body = redact.capture_error_body(e) or redact.redact_url_keys(str(e))
         log.error(f"WordPress push failed: {error_body}")
         return {"success": False, "error": str(error_body)}
     except Exception as e:

@@ -1,15 +1,13 @@
 """URL extraction, HTTP status validation, and Wayback Machine archive checks."""
 
 import concurrent.futures
-import ipaddress
 import logging
 import re
-import socket
-from urllib.parse import urlparse
 
 import requests
 
-from ci_core.http import DEFAULT_HEADERS
+from ci_core.http import DEFAULT_HEADERS, safe_get
+from ci_core.http import is_public_host as _core_is_public_host
 
 from ..adapters.citation.wayback import (
     check as wayback_check,
@@ -34,32 +32,20 @@ def extract_urls(text):
 
 
 def _is_public_host(url):
-    """Return True if the URL's host resolves only to public (routable) addresses.
+    """Link validation's view of the SSRF guard: fail *open* on DNS failure.
 
-    Guards against SSRF: a draft (especially a third-party submission) could
-    contain a link to cloud metadata (169.254.169.254), localhost, or another
-    internal service.  We resolve the hostname and reject any result that is
-    loopback, private, link-local, or otherwise non-global.  Not airtight
-    against DNS-rebinding or a public URL that 302-redirects to an internal
-    host, but it blocks the common cases cheaply.
+    Delegates to ``ci_core.http.is_public_host``. The guard moved to ci-core so
+    adapters/citation/ could reach it too — it previously lived here, where
+    ``adapters -> analysis`` would have closed an import cycle, which is why
+    model-supplied URLs went unvalidated (audit finding 2).
+
+    This wrapper keeps the fail-open choice, which is right *here* and wrong
+    elsewhere: the job of link validation is to tell the author why a link is
+    bad, so an unresolvable host should produce the real DNS error from the HTTP
+    layer rather than a security refusal. Anything that fetches a body and then
+    feeds it to a model uses the fail-closed default instead.
     """
-    host = urlparse(url).hostname
-    if not host:
-        return False
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except Exception:
-        # DNS failure — let the HTTP layer handle it and report the error.
-        return True
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if not ip.is_global or ip.is_loopback or ip.is_private or ip.is_link_local:
-            return False
-    return True
+    return _core_is_public_host(url, fail_open_on_dns_error=True)
 
 
 def _wayback_fallback(url, timeout):
@@ -81,12 +67,7 @@ def _wayback_fallback(url, timeout):
     if not wb.get("archived") or not snapshot_url:
         return None
     try:
-        snap_resp = requests.get(
-            snapshot_url,
-            allow_redirects=True,
-            timeout=timeout,
-            headers=DEFAULT_HEADERS,
-        )
+        snap_resp = safe_get(snapshot_url, timeout=timeout)
     except Exception:
         return None
     if snap_resp.status_code >= 400:
