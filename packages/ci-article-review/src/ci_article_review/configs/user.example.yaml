@@ -316,6 +316,26 @@ pipeline:
 # ensemble:
 #   consensus_threshold: 2.0
 #   lt_weight: 0.5
+#
+#   # confidence_weights: how much a model's OWN stated confidence damps its
+#   # vote. The fact-check prompt asks for high/medium/low on every finding;
+#   # by default that value is recorded and displayed but does not affect
+#   # weighting, so two models flagging a passage at "low" reach consensus
+#   # exactly as if both had said "high".
+#   #
+#   # Uncomment to make hedging count. Values multiply the model's weight, so
+#   # they damp a finding without vetoing it — several models agreeing at "low"
+#   # can still reach consensus, which is right, because agreement is evidence
+#   # even when each model hedged.
+#   #
+#   # Note self-reported confidence is not calibrated and is not comparable
+#   # across providers, and enabling this changes what lands in Section 1.
+#   # Re-check your consensus_threshold after turning it on.
+#   #
+#   # confidence_weights:
+#   #   high: 1.0
+#   #   medium: 0.75
+#   #   low: 0.5
 #   weights:
 #     gemini:
 #       default: 1.0

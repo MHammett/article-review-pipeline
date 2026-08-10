@@ -44,9 +44,12 @@ Per-model overrides (``models.<name>.prompts``) take precedence over the
 thoroughness preset for that model.
 """
 
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +205,52 @@ def _extract_passages(model_name, domain, result):
 # ---------------------------------------------------------------------------
 
 
+#: Default confidence multipliers: all 1.0, i.e. exactly the previous behaviour.
+#:
+#: The models are asked for a `confidence` on every fact-check item and every
+#: additional observation, and nothing read it. Two models flagging a passage at
+#: "low" produced a Section 1 consensus flag identical to two at "high" — the
+#: hedging was discarded precisely on the path into the section that implies the
+#: most certainty, and Section 1 is what the revision prompt feeds back to the
+#: drafting model.
+#:
+#: Off by default on purpose. Self-reported confidence is not calibrated and is
+#: not comparable across providers, and turning it on shifts what lands in
+#: Section 1 — so it is a deliberate choice with a golden-report diff attached,
+#: not a silent change to everyone's thresholds. Set ensemble.confidence_weights
+#: to enable; a sane starting point is high 1.0 / medium 0.75 / low 0.5.
+_DEFAULT_CONFIDENCE_MULTIPLIERS = {"high": 1.0, "medium": 1.0, "low": 1.0}
+
+
+def _confidence_multipliers(ensemble_cfg):
+    """Resolve the configured confidence multipliers, falling back to no-op."""
+    configured = (ensemble_cfg or {}).get("confidence_weights") or {}
+    merged = dict(_DEFAULT_CONFIDENCE_MULTIPLIERS)
+    for level, value in configured.items():
+        try:
+            merged[str(level).strip().lower()] = float(value)
+        except (TypeError, ValueError):
+            log.warning(
+                "ensemble.confidence_weights.%s is not a number (%r) — ignoring it.",
+                level,
+                value,
+            )
+    return merged
+
+
+def _confidence_multiplier(flag_data, multipliers):
+    """Multiplier for one finding's self-reported confidence.
+
+    Damps a finding's contribution; never vetoes it. A "low" flag several models
+    agree on should still be able to reach consensus, because agreement is
+    evidence even when each model hedged. An unrecognised or absent value scores
+    1.0 — most domains do not emit a confidence at all, and their weighting must
+    not change.
+    """
+    level = str(flag_data.get("confidence", "")).strip().lower()
+    return multipliers.get(level, 1.0)
+
+
 def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
     """Weighted consensus detection across all model/domain results.
 
@@ -216,6 +265,8 @@ def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
     # passage_key → accumulated data
     passage_map: dict[str, dict] = {}
 
+    confidence_multipliers = _confidence_multipliers(ensemble_cfg)
+
     for (model_name, domain), result in results.items():
         weight = _get_weight(model_name, domain, ensemble_cfg)
         for passage, flag_data in _extract_passages(model_name, domain, result):
@@ -229,7 +280,8 @@ def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
                     "flag_data": [],
                     "passage": passage,
                 }
-            passage_map[key]["weight_sum"] += weight
+            multiplier = _confidence_multiplier(flag_data, confidence_multipliers)
+            passage_map[key]["weight_sum"] += weight * multiplier
             passage_map[key]["models"].append(f"{model_name}:{domain}")
             passage_map[key]["flag_data"].append(flag_data)
 

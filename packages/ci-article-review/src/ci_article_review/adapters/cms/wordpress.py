@@ -85,17 +85,20 @@ def _lookup_term_ids(api_base, headers, taxonomy, items):
         items:     List of slugs (str) or IDs (int), or a single slug string
 
     Returns:
-        List of integer term IDs.  Slugs that cannot be resolved are logged
-        as warnings and omitted.
+        ``(resolved_ids, unresolved_slugs)``. Unresolved slugs are returned
+        rather than only logged: a post created with an empty categories array
+        is an editorial failure, and it used to be reported as a clean success
+        with the explanation buried in a warning above the success output.
     """
     if not items:
-        return []
+        return [], []
 
     # Accept a single string or a list
     if isinstance(items, (str, int)):
         items = [items]
 
     resolved = []
+    unresolved = []
     for item in items:
         if isinstance(item, int):
             resolved.append(item)
@@ -116,14 +119,16 @@ def _lookup_term_ids(api_base, headers, taxonomy, items):
                 resolved.append(terms[0]["id"])
                 log.debug(f"Resolved {taxonomy} slug '{slug}' → ID {terms[0]['id']}")
             else:
+                unresolved.append(slug)
                 log.warning(
                     f"WordPress {taxonomy} slug '{slug}' not found — "
                     f"create it in WP admin first, or use its integer ID."
                 )
         except Exception as e:
+            unresolved.append(slug)
             log.warning(f"WordPress {taxonomy} lookup failed for '{slug}': {e}")
 
-    return resolved
+    return resolved, unresolved
 
 
 def _build_post_payload(
@@ -168,7 +173,14 @@ def _build_post_payload(
     return payload
 
 
-def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
+def push(
+    content,
+    pub_params,
+    wp_config,
+    rank_math_config,
+    publish_live=False,
+    allow_missing_terms=False,
+):
     """Push article to WordPress.  Always saves as draft unless publish_live=True.
 
     Resolves category and tag slugs to integer IDs via the WP REST API before
@@ -188,18 +200,36 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
     auth_headers = _auth_header(username, app_password)  # without Content-Type for GETs
 
     # Resolve slugs → IDs before building the post payload
-    category_ids = _lookup_term_ids(
+    category_ids, unresolved_categories = _lookup_term_ids(
         api_base,
         auth_headers,
         "categories",
         pub_params.get("wordpress_category"),
     )
-    tag_ids = _lookup_term_ids(
+    tag_ids, unresolved_tags = _lookup_term_ids(
         api_base,
         auth_headers,
         "tags",
         pub_params.get("tags", []),
     )
+
+    # Fail closed before an irreversible publish. Going live into no category,
+    # with none of its tags, is a real editorial failure, and the checklist item
+    # the user already ticked ("WordPress category correct") was confirmed before
+    # this lookup ran — so the one check that could have caught it happened at
+    # the one moment it could not.
+    unresolved = unresolved_categories + unresolved_tags
+    if unresolved and publish_live and not allow_missing_terms:
+        return {
+            "success": False,
+            "error": (
+                "Refusing to publish live with unresolved taxonomy terms: "
+                + ", ".join(sorted(unresolved))
+                + ". Create them in WP admin (or use integer IDs), or pass "
+                "allow_missing_terms=True to publish without them."
+            ),
+            "unresolved_terms": sorted(unresolved),
+        }
 
     payload = _build_post_payload(
         pub_params,
@@ -225,7 +255,12 @@ def push(content, pub_params, wp_config, rank_math_config, publish_live=False):
             f"WordPress push successful: post_id={post_id} url={post_url} "
             f"categories={category_ids} tags={tag_ids}"
         )
-        return {"success": True, "post_id": post_id, "post_url": post_url}
+        result = {"success": True, "post_id": post_id, "post_url": post_url}
+        if unresolved:
+            # Surfaced on the result, not just in a log line, so the caller can
+            # print it next to the success message instead of it scrolling past.
+            result["unresolved_terms"] = sorted(unresolved)
+        return result
     except requests.HTTPError as e:
         # Redacted and bounded like every other adapter's error path. A WordPress
         # error body can echo the submitted post, and this string is both logged
