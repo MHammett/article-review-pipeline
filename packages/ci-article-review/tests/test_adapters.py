@@ -447,37 +447,41 @@ class TestWordPressTermResolution:
     def test_integer_ids_pass_through(self):
         from ci_article_review.adapters.cms.wordpress import _lookup_term_ids
 
-        result = _lookup_term_ids(
+        result, unresolved = _lookup_term_ids(
             "http://site.com/wp-json/wp/v2", {}, "categories", [5, 12]
         )
         assert result == [5, 12]
+        assert unresolved == []
 
     def test_slug_resolved_to_id(self):
         from ci_article_review.adapters.cms.wordpress import _lookup_term_ids
 
         with patch("ci_article_review.adapters.cms.wordpress.requests.get") as mock_get:
             mock_get.return_value = self._mock_term_response(42, "data-centers")
-            result = _lookup_term_ids(
+            result, unresolved = _lookup_term_ids(
                 "http://site.com/wp-json/wp/v2", {}, "categories", ["data-centers"]
             )
         assert result == [42]
+        assert unresolved == []
 
     def test_unknown_slug_omitted_with_warning(self):
         from ci_article_review.adapters.cms.wordpress import _lookup_term_ids
 
         with patch("ci_article_review.adapters.cms.wordpress.requests.get") as mock_get:
             mock_get.return_value = self._mock_empty_response()
-            result = _lookup_term_ids(
+            result, unresolved = _lookup_term_ids(
                 "http://site.com/wp-json/wp/v2", {}, "tags", ["nonexistent-tag"]
             )
         assert result == []
+        # Returned, not just logged — the caller has to be able to act on it.
+        assert unresolved == ["nonexistent-tag"]
 
     def test_mixed_ids_and_slugs(self):
         from ci_article_review.adapters.cms.wordpress import _lookup_term_ids
 
         with patch("ci_article_review.adapters.cms.wordpress.requests.get") as mock_get:
             mock_get.return_value = self._mock_term_response(99, "energy")
-            result = _lookup_term_ids(
+            result, _unresolved = _lookup_term_ids(
                 "http://site.com/wp-json/wp/v2", {}, "tags", [7, "energy"]
             )
         assert 7 in result
@@ -488,7 +492,7 @@ class TestWordPressTermResolution:
 
         with patch("ci_article_review.adapters.cms.wordpress.requests.get") as mock_get:
             mock_get.return_value = self._mock_term_response(3, "tech")
-            result = _lookup_term_ids(
+            result, _unresolved = _lookup_term_ids(
                 "http://site.com/wp-json/wp/v2", {}, "categories", "tech"
             )
         assert result == [3]
@@ -496,14 +500,12 @@ class TestWordPressTermResolution:
     def test_empty_input_returns_empty(self):
         from ci_article_review.adapters.cms.wordpress import _lookup_term_ids
 
-        assert (
-            _lookup_term_ids("http://site.com/wp-json/wp/v2", {}, "categories", [])
-            == []
-        )
-        assert (
-            _lookup_term_ids("http://site.com/wp-json/wp/v2", {}, "categories", None)
-            == []
-        )
+        assert _lookup_term_ids(
+            "http://site.com/wp-json/wp/v2", {}, "categories", []
+        ) == ([], [])
+        assert _lookup_term_ids(
+            "http://site.com/wp-json/wp/v2", {}, "categories", None
+        ) == ([], [])
 
 
 # ---------------------------------------------------------------------------

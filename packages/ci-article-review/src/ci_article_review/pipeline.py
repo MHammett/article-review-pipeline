@@ -1928,6 +1928,18 @@ def run_publish_pipeline(
         print("\nWordPress push successful.")
         print(f"Post URL: {result['post_url']}")
         print(f"Post ID:  {result['post_id']}")
+        if result.get("unresolved_terms"):
+            # Loud, and next to the success line rather than in a log above it.
+            # The post exists but is missing metadata the author asked for.
+            print(f"\n{'!' * 60}")
+            print(
+                "WARNING: these categories/tags did not exist in WordPress and "
+                "were NOT applied:"
+            )
+            for term in result["unresolved_terms"]:
+                print(f"  - {term}")
+            print("Create them in WP admin, then set them on the post.")
+            print("!" * 60)
         print(
             f"Status:   {'PUBLISHED' if publish_live else 'DRAFT (pass --publish-live to publish)'}"
         )
