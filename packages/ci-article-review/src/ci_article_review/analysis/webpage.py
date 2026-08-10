@@ -12,12 +12,10 @@ here so this module's callers keep working unchanged.
 
 import logging
 
-import requests
 
 from ci_core.extract import extract_article
-from ci_core.http import USER_AGENT
+from ci_core.http import USER_AGENT, UnsafeURLError, safe_get
 
-from .links import _is_public_host
 
 __all__ = ["extract_article", "fetch_url", "build_handoff_from_url"]
 
@@ -35,16 +33,14 @@ def fetch_url(url, timeout=_FETCH_TIMEOUT):
 
     The SSRF guard runs BEFORE any network call — a user could paste any URL.
     """
-    if not _is_public_host(url):
-        raise ValueError(
-            f"Refusing to fetch a non-public/internal host (SSRF guard): {url}"
-        )
-    resp = requests.get(
-        url,
-        timeout=timeout,
-        allow_redirects=True,
-        headers={"User-Agent": _USER_AGENT},
-    )
+    # safe_get fails closed on an unresolvable host and re-validates every
+    # redirect hop, so a public URL that 302s to 169.254.169.254 is refused too
+    # — the previous check validated only the URL the user typed and then let
+    # requests follow an attacker-chosen chain (audit finding 15).
+    try:
+        resp = safe_get(url, timeout=timeout)
+    except UnsafeURLError as e:
+        raise ValueError(str(e)) from e
     resp.raise_for_status()
     return resp.text
 

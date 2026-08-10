@@ -20,68 +20,62 @@ _FALLBACK is used only when the YAML is missing or unreadable.
 import logging
 from pathlib import Path
 
-import yaml as _yaml
+import yaml as _yaml  # noqa: F401
+
+from ci_core.config_helpers import PackagedConfigError, load_packaged_yaml
 
 log = logging.getLogger(__name__)
 
-# Hardcoded fallback — kept in parity with configs/timeouts.yaml (see tests).
-_FALLBACK = {
-    "base_seconds": 60,
-    "floor_seconds": 90,
-    "variance_margin": 1.25,
-    "size_multipliers": [
-        {"max_chars": 5000, "mult": 0.4},
-        {"max_chars": 20000, "mult": 0.6},
-        {"max_chars": 50000, "mult": 0.85},
-        {"max_chars": 80000, "mult": 1.0},
-        {"max_chars": 150000, "mult": 1.4},
-        {"max_chars": None, "mult": 1.8},
-    ],
-    "model_multipliers": {
-        "grok": 0.8,
-        "gpt-5.4": 1.0,
-        "gpt-5.5": 1.3,
-        "mistral-small": 0.8,
-        "mistral-large": 1.0,
-        "mistral-medium-3-5": 1.7,
-        "gemini": 4.0,
-        "sonar": 7.0,
-        "default": 1.0,
-    },
-    "effort_multipliers": {
-        "none": 1.0,
-        "low": 1.15,
-        "medium": 2.0,
-        "high": 3.5,
-        "xhigh": 10.5,
-        "default": 1.0,
-    },
-}
-
 
 def _load():
+    """Load the sliding-scale timeout model from the packaged timeouts.yaml.
+
+    Raises PackagedConfigError rather than falling back to a duplicate table in
+    Python — see ci_core.config_helpers.load_packaged_yaml for why. The shape
+    checks below are real validation, which is something the old parity test
+    could not provide: it only proved two copies matched, not that either was
+    usable.
+    """
     path = Path(__file__).parent.parent / "configs" / "timeouts.yaml"
-    if not path.exists():
-        return _FALLBACK
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = _yaml.safe_load(f) or {}
-        # Minimal shape validation — fall back if any required section is missing.
-        for key in (
-            "base_seconds",
-            "floor_seconds",
-            "size_multipliers",
-            "model_multipliers",
-            "effort_multipliers",
-        ):
-            if key not in data:
-                raise ValueError(f"timeouts.yaml missing '{key}'")
-        return data
-    except Exception as exc:
-        log.warning(
-            "Could not load configs/timeouts.yaml (%s) — using built-in defaults", exc
+    data = load_packaged_yaml(path)
+    for key in (
+        "base_seconds",
+        "floor_seconds",
+        "size_multipliers",
+        "model_multipliers",
+        "effort_multipliers",
+    ):
+        if key not in data:
+            raise PackagedConfigError(f"{path}: missing required key {key!r}")
+
+    buckets = data["size_multipliers"]
+    if not isinstance(buckets, list) or not buckets:
+        raise PackagedConfigError(
+            f"{path}: 'size_multipliers' must be a non-empty list"
         )
-        return _FALLBACK
+    # Ascending max_chars with exactly one open-ended final bucket, or the
+    # lookup silently picks the wrong multiplier for large drafts.
+    seen_open = False
+    last = -1
+    for bucket in buckets:
+        limit = bucket.get("max_chars")
+        if limit is None:
+            seen_open = True
+            continue
+        if seen_open:
+            raise PackagedConfigError(
+                f"{path}: size_multipliers has a bucket after the open-ended one"
+            )
+        if limit <= last:
+            raise PackagedConfigError(
+                f"{path}: size_multipliers max_chars must ascend (saw {limit} after {last})"
+            )
+        last = limit
+    if not seen_open:
+        raise PackagedConfigError(
+            f"{path}: size_multipliers needs a final bucket with max_chars: null"
+        )
+    return data
 
 
 _CONFIG = _load()

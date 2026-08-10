@@ -336,6 +336,100 @@ def global_quality_trend(entries, recent_window=RECENT_WINDOW):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Per-pass contribution — is each ensemble call earning its keep?
+# ---------------------------------------------------------------------------
+
+
+def pass_contribution(entries):
+    """Per (model, domain) pass: what it cost, and what it actually contributed.
+
+    Audit findings 10 and 16 both ask a question the pipeline had no way to
+    answer: at `maximum` thoroughness it makes ~25-30 calls, and nothing said
+    which of them earn their cost. The audit deliberately declined to retune the
+    presets without data. This produces the data, entirely from reports already
+    on disk — no new calls, no new instrumentation.
+
+    For each pass, across all runs:
+
+      calls            how many times it ran
+      failures         how many of those failed
+      total_usd        what it cost in total
+      consensus_hits   findings it raised that reached Section 1
+      sole_source      consensus flags ONLY it raised (nobody corroborated)
+      corroborated     consensus flags it shared with at least one other pass
+      usd_per_consensus_hit   cost efficiency, the number to sort by
+
+    The interesting signal is a pass with real cost and few consensus hits, or
+    one whose hits are always corroborated by a cheaper pass — that is a
+    candidate for removal from the preset. A pass with many *sole_source* hits
+    is the opposite: it is seeing things nothing else sees, and dropping it
+    would lose findings.
+
+    A caveat worth keeping in view: consensus participation is a proxy for
+    value, not value itself. A red-team pass that raises one genuinely alarming
+    finding nobody else spots scores badly here and is worth every cent. Read
+    this to form hypotheses, then confirm with --only-model / --only-domain.
+    """
+    stats: dict[str, dict] = {}
+
+    def _slot(name):
+        return stats.setdefault(
+            name,
+            {
+                "pass": name,
+                "calls": 0,
+                "failures": 0,
+                "total_usd": 0.0,
+                "consensus_hits": 0,
+                "sole_source": 0,
+                "corroborated": 0,
+            },
+        )
+
+    for entry in entries:
+        report = entry["report"]
+
+        for call in report.get("api_call_log") or []:
+            name = call.get("pass")
+            if not name:
+                continue
+            slot = _slot(name)
+            slot["calls"] += 1
+            if call.get("failed"):
+                slot["failures"] += 1
+
+        for cost_entry in (report.get("cost_summary") or {}).get("by_pass") or []:
+            name = cost_entry.get("pass")
+            if name:
+                _slot(name)["total_usd"] += float(cost_entry.get("total_usd") or 0.0)
+
+        for flag in report.get("section_1_consensus") or []:
+            models = [m for m in (flag.get("models") or []) if m]
+            for name in set(models):
+                slot = _slot(name)
+                slot["consensus_hits"] += 1
+                if len(set(models)) == 1:
+                    slot["sole_source"] += 1
+                else:
+                    slot["corroborated"] += 1
+
+    for slot in stats.values():
+        hits = slot["consensus_hits"]
+        slot["usd_per_consensus_hit"] = (
+            round(slot["total_usd"] / hits, 4) if hits else None
+        )
+        slot["total_usd"] = round(slot["total_usd"], 4)
+
+    # Most expensive per unit of signal first; passes that contributed nothing
+    # at all sort last but are kept, because "cost with zero hits" is the
+    # loudest result this can produce.
+    return sorted(
+        stats.values(),
+        key=lambda s: (s["usd_per_consensus_hit"] is None, -(s["total_usd"])),
+    )
+
+
 def build_history_report(
     history_root=HISTORY_ROOT, article_slug=None, recent_window=RECENT_WINDOW
 ):
@@ -352,6 +446,7 @@ def build_history_report(
             entries, recent_window=recent_window
         ),
         "per_article_quality_trend": per_article_quality_trend(entries),
+        "pass_contribution": pass_contribution(entries),
     }
 
 
@@ -433,6 +528,34 @@ def print_history_report(result):
             print(
                 f"  {v['article_title']!r} ({v['runs']} runs): "
                 f"FK grade {v['fk_grade_trend']}, SEO {v['seo_issues_trend']}, links {v['broken_links_trend']}"
+            )
+
+    contribution = result.get("pass_contribution") or []
+    if contribution:
+        print("\nPer-pass contribution (is each ensemble call earning its cost?):")
+        print(
+            f"  {'pass':30s} {'calls':>6s} {'fail':>5s} {'$total':>9s} "
+            f"{'hits':>5s} {'sole':>5s} {'$/hit':>9s}"
+        )
+        for s in contribution:
+            per_hit = (
+                f"${s['usd_per_consensus_hit']:.4f}"
+                if s["usd_per_consensus_hit"] is not None
+                else "—"
+            )
+            print(
+                f"  {s['pass']:30s} {s['calls']:6d} {s['failures']:5d} "
+                f"${s['total_usd']:8.4f} {s['consensus_hits']:5d} "
+                f"{s['sole_source']:5d} {per_hit:>9s}"
+            )
+        never = [s for s in contribution if s["consensus_hits"] == 0 and s["calls"]]
+        if never:
+            print(
+                f"  Note: {len(never)} pass(es) have never contributed to a "
+                "consensus flag. That is a candidate for trimming the preset — "
+                "but check their sole-source findings first, since a pass that "
+                "sees what nothing else sees scores badly here and is still "
+                "worth paying for."
             )
 
     print()

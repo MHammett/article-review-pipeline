@@ -22,7 +22,7 @@ You used `${VAR_NAME}` syntax in a config but the variable isn't in your `.env` 
 Publication names can only contain letters, numbers, hyphens, and underscores. No slashes, spaces, or dots.
 
 **`No DRAFT section found`**  
-Your handoff document doesn't have a line that reads exactly `DRAFT` followed by the article text. Use the template in `handoff_templates/draft_submission.md`.
+Your handoff document doesn't have a line that reads exactly `DRAFT` followed by the article text. Use the template in `handoff_templates/draft_submission.template.md`.
 
 **`No model assignments could be built`**  
 No models passed credential and enabled checks. Make sure at least one model has a valid API key and is not set to `enabled: false`.

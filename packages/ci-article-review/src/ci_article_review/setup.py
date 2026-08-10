@@ -2,8 +2,8 @@
 First-run setup: create configs/ directory and copy example templates.
 
 Usage:
-    uv run python -m ci_article_review.setup
-    uv run python -m ci_article_review.setup --publication dnacom
+    uv run ci-setup
+    uv run ci-setup --publication dnacom
 """
 
 import argparse
@@ -68,6 +68,37 @@ def _copy_if_missing(src: Path, dst: Path, label: str) -> bool:
     shutil.copy2(src, dst)
     print(f"  Created {dst}")
     return True
+
+
+_TEMPLATE_DIR = Path(__file__).parent / "handoff_templates"
+
+#: Copied into the working tree so they can be edited. The packaged copies live
+#: inside site-packages, which is neither guessable nor a sane thing to edit —
+#: the README used to name a path the user could not reasonably find or change.
+_WORKING_TEMPLATES = (
+    "draft_submission.template.md",
+    "metadata_only.md",
+    "publication.md",
+)
+
+
+def _copy_handoff_templates(dest_dir: Path) -> None:
+    """Put the fill-in templates somewhere the user can actually edit them."""
+    if not _TEMPLATE_DIR.is_dir():  # pragma: no cover - broken install
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\nCopying handoff templates into {dest_dir}/...")
+    for name in _WORKING_TEMPLATES:
+        src = _TEMPLATE_DIR / name
+        if src.exists():
+            _copy_if_missing(src, dest_dir / name, f"{dest_dir}/{name}")
+    example = _TEMPLATE_DIR / "examples" / "draft_submission.filled-example.md"
+    if example.exists():
+        _copy_if_missing(
+            example,
+            dest_dir / "draft_submission.filled-example.md",
+            f"{dest_dir}/draft_submission.filled-example.md",
+        )
 
 
 def _validate_publication_name(name: str) -> bool:
@@ -145,6 +176,8 @@ def main() -> None:
     if env_example.exists():
         _copy_if_missing(env_example, env_file, ".env")
 
+    _copy_handoff_templates(Path("handoff_templates"))
+
     publication_name = _prompt_publication_name(args.publication)
     pub_yaml = configs_dir / f"{publication_name}.yaml"
     pub_example = _EXAMPLE_DIR / "publication.example.yaml"
@@ -184,12 +217,21 @@ def main() -> None:
     print(f"   uv run ci-check --publication {publication_name}")
     step += 1
 
-    # One line, console-script form: the docs standardised on `uv run ci-review`
-    # (PR #51), and a trailing backslash is a bash continuation that splits the
-    # command on Windows cmd.exe — which is the documented primary platform.
+    print(f"\n{step}. Fill in handoff_templates/draft_submission.template.md")
+    print("   A worked example sits beside it as draft_submission.filled-example.md.")
+    step += 1
+
+    # One line, console-script form. A trailing backslash is a bash continuation
+    # that splits the command on Windows cmd.exe — the documented primary
+    # platform — and PR #51 standardised the docs on console scripts. Both are
+    # now enforced against printed strings by test_docs_current.py.
+    #
+    # The --draft path names the template ci-setup just copied, rather than a
+    # placeholder: a printed command should point at a file that exists.
     print(f"\n{step}. Run the pipeline:")
     print(
-        f"   uv run ci-review --draft path/to/handoff.md --publication {publication_name}"
+        "   uv run ci-review --draft handoff_templates/draft_submission.template.md"
+        f" --publication {publication_name}"
     )
     print()
 

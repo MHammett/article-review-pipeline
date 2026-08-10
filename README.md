@@ -18,7 +18,18 @@ per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
   It also carries settings (`ci_core.config`), SQLAlchemy persistence (`ci_core.db`,
   `ci_core.models`) and structured logging (`ci_core.logging`), driven by `alembic/`.
   Those are implemented and tested but have no production consumers yet — nothing
-  outside ci-core's own tests and `alembic/env.py` imports them.
+  outside ci-core's own tests and `alembic/env.py` imports them. Because of that
+  they live behind an optional extra rather than being installed for everyone:
+
+  ```powershell
+  uv sync --extra persistence
+  ```
+
+  A normal `uv sync` skips them, so a plain install no longer pulls an async
+  PostgreSQL driver (`asyncpg`, which builds a C extension) or an ASGI web
+  framework (`starlette`) for a command-line tool. Their tests skip cleanly when
+  the extra is absent; the dev dependency group installs it, so CI coverage is
+  unchanged.
 - **ci-article-review** (`ci_article_review`) — the article-review pipeline: runs a
   drafted or already-published article through grammar correction and ensemble
   multi-model AI review, then publishes to WordPress on approval. The mature package.
@@ -100,7 +111,14 @@ Queries each provider's live models API and reports what's available — so you 
 uv run ci-review --draft path/to/handoff.md --publication your_publication_name
 ```
 
-Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` argument.
+`ci-setup` copies `handoff_templates/draft_submission.template.md` into your
+working directory. Fill it in and pass it as the `--draft` argument.
+
+A complete worked example — a real published article with every section filled
+out — ships alongside it at
+`handoff_templates/examples/draft_submission.filled-example.md`. Read it to see
+what a good PRE-DRAFT ANALYSIS looks like; do not edit it as your starting
+point.
 
 **6. Publish an approved draft:**
 
@@ -186,6 +204,8 @@ What it reports:
 - **Provider reliability** — per-provider success rate over the most recent calls versus the historical baseline, with a `DEGRADED` flag when the recent failure rate is at least 40 points worse. This is the check that catches an expired API key failing across every domain, instead of noticing after several bad runs. Providers need at least 3 baseline calls before a comparison is made.
 - **Cost** — total spend, average per run, and recent-versus-baseline direction (`increasing` / `decreasing` / `flat`, at a 15% relative threshold). Direction only — cost has no "better" way to editorialize.
 - **Quality trends** — Flesch-Kincaid grade, SEO issue count, and broken link count, both globally (recent vs. baseline average) and per article across its own revision history (first run vs. latest, as `improved` / `worsened` / `unchanged`).
+
+- **Per-pass contribution** — for each `model:domain` pass: how often it ran, what it cost, how many of its findings reached consensus, and how many of those *only* it raised. This is the data for deciding whether every call in a `maximum` run earns its keep. Read it to form a hypothesis and confirm with `--only-model` / `--only-domain`; a pass with many sole-source findings scores badly on cost-per-hit and may still be the most valuable one you have.
 
 It reads `pipeline_history/` fresh every time — no database, no index. Reports missing a field are treated as "not enough history" rather than an error, since the report schema has grown over time.
 
@@ -376,6 +396,7 @@ content-intelligence/
 ├── pipeline_history/             run reports, readable reviews, and daily pipeline logs
 │                                 (gitignored, local only)
 └── docs/                         extended documentation
+    ├── ARCHITECTURE.md           pass structure, data flow, design rationale
     ├── PROVIDERS.md              account setup for every service
     ├── CONFIGURATION.md          full config reference, thoroughness, ensemble weights
     ├── CITATIONS.md              Section 9 confidence tiers and archiving behavior
@@ -387,6 +408,8 @@ content-intelligence/
 ---
 
 ## Documentation
+
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — How the pipeline works as a whole: the pass structure, what flows between passes, why consolidation is weighted the way it is, the review→revise→re-run loop end to end, and the extension points. Start here to understand the design rather than the configuration.
 
 - **[docs/PROVIDERS.md](docs/PROVIDERS.md)** — Account setup and API keys for every service: OpenAI, Gemini (AI Studio + Vertex AI), Mistral, Perplexity, Grok, Claude, LanguageTool, WordPress.
 

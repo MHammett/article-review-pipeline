@@ -951,9 +951,9 @@ class TestGemini:
         # (extended reasoning) — two independent silent-period sources. A live
         # Vertex AI run timed out at 205.78s against the bare grounded default of
         # 160s. Guard against that config regressing back to the bare default.
-        from ci_article_review.config_loader import _COST_PRESETS
+        from ci_article_review.config_loader import _load_presets_from_yaml
 
-        gemini_cfg = _COST_PRESETS["maximum"]["models"]["gemini"]
+        gemini_cfg = _load_presets_from_yaml()["maximum"]["models"]["gemini"]
         assert gemini_cfg.get("thinking_budget") == 16000
         assert gemini_cfg.get("stream_read_timeout", 0) > 160, (
             "maximum preset's gemini entry combines grounding with thinking_budget "

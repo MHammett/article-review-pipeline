@@ -234,7 +234,16 @@ def _render_section_9(citations):
         lines.append("")
 
     if verified:
+        # One-line gloss per tier. CITATIONS.md calibrates these carefully, but
+        # the reader meets them here first, and "Verified" alone invites more
+        # trust than the tier earns (audit finding 18).
         lines.append("### Verified (checksummed against fetched content)")
+        lines.append(
+            "_Source fetched, checksummed, and a model confirmed the extracted "
+            "text supports the claim — with a quote checked against the page. "
+            "The strongest tier; still one cheap model call, not a human._"
+        )
+        lines.append("")
         for c in verified:
             lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(
@@ -248,6 +257,11 @@ def _render_section_9(citations):
             "### Pointer-only (topic-relevant source identified, NOT independently "
             "verified — confirm manually before citing)"
         )
+        lines.append(
+            "_A keyword match pointed at a portal that is probably about the right "
+            "topic. Nothing was retrieved or confirmed. Treat as a research lead._"
+        )
+        lines.append("")
         for c in pointer:
             lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
@@ -259,6 +273,12 @@ def _render_section_9(citations):
             "### Could not be verified (source fetched, but its content could NOT "
             "be read or assessed — this is NOT a finding against the source)"
         )
+        lines.append(
+            "_A scanned PDF, a JavaScript-rendered page, a bot wall, or a "
+            "relevance check that could not run. Treat exactly like pointer-only. "
+            "The one thing it never means is that the source failed to back you._"
+        )
+        lines.append("")
         for c in unverifiable:
             lines.append(f'- "{c.get("claim", "")}"')
             for kv in _kv_lines(c, exclude=("claim", "resolved")):

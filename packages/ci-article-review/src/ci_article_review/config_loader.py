@@ -1,9 +1,10 @@
 import re
-import yaml
 from pathlib import Path
 from dotenv import load_dotenv
 
 from ci_core.config_helpers import (
+    PackagedConfigError,
+    load_packaged_yaml,
     load_yaml as _load_yaml,
     normalize_model_configs as _normalize_model_configs,
     resolve_env_recursive as _resolve_env_recursive,
@@ -120,8 +121,8 @@ def _validate_publication_config(config, publication_name):
 # so users can dial cost vs coverage with a single pipeline.cost_preset value.
 #
 # Preset definitions are loaded from configs/presets.yaml at runtime so model
-# names can be updated without editing Python.  The _COST_PRESETS dict below
-# is used only as a fallback when the YAML file is missing or unreadable.
+# names can be updated without editing Python. The YAML is the single source of
+# truth — there is no duplicate table here (audit finding 14).
 #
 # Behavior when cost_preset is set:
 #   - Sets thoroughness (unless the user also set thoroughness explicitly).
@@ -131,107 +132,6 @@ def _validate_publication_config(config, publication_name):
 #   - Skips providers the user has not configured (no API key / no models entry).
 #   - Respects enabled: false set by the user.
 #
-_COST_PRESETS = {
-    # economy: fastest and cheapest — mini/small models, no reasoning, one model per domain.
-    # Good for workflow validation and quick structural checks.
-    "economy": {
-        "thoroughness": "standard",
-        "models": {
-            "openai": {"model": "gpt-5.4-mini"},
-            "gemini": {"model": "gemini-2.5-flash"},
-            "mistral": {"model": "mistral-small-latest"},
-            "perplexity": {"model": "sonar"},
-            "grok": {"enabled": False},
-            "claude": {"enabled": False},
-        },
-    },
-    # standard: solid quality, no reasoning overhead — flagship non-reasoning models.
-    # Good for first-pass review of clean drafts.
-    "standard": {
-        "thoroughness": "standard",
-        "models": {
-            "openai": {"model": "gpt-5.4"},
-            "gemini": {"model": "gemini-2.5-flash"},
-            "mistral": {"model": "mistral-large-latest"},
-            "perplexity": {"model": "sonar-pro"},
-            "grok": {"model": "grok-4.3"},
-            "claude": {"model": "claude-haiku-4-5-20251001"},
-        },
-    },
-    # balanced: thorough coverage with light reasoning.
-    # OpenAI: gpt-5.4 with low reasoning_effort — mid-tier model, light CoT.
-    # Mistral: mistral-medium-3-5 replaced magistral-medium-latest (deprecated 5/22/2026,
-    #   retires 7/31/2026). Only "high"/"none" supported — no effort flag at balanced tier.
-    # Grok: reasoning is model-selection based, not parameter based. Use grok-4.20-0309-reasoning
-    #   for CoT at balanced and above; reasoning_effort is not a supported Grok parameter.
-    "balanced": {
-        "thoroughness": "thorough",
-        "models": {
-            "openai": {"model": "gpt-5.4", "reasoning_effort": "low"},
-            "gemini": {"model": "gemini-2.5-flash"},
-            "mistral": {"model": "mistral-medium-3-5"},
-            "perplexity": {"model": "sonar-reasoning-pro"},
-            "grok": {"model": "grok-4.20-0309-reasoning"},
-            "claude": {"model": "claude-sonnet-4-6", "effort": "medium"},
-        },
-    },
-    # thorough: deep reasoning, thorough coverage.
-    # OpenAI: gpt-5.4 with high reasoning_effort — mid-tier model, deep CoT.
-    # Gemini: gemini-2.5-pro for more thorough grounded analysis.
-    "thorough": {
-        "thoroughness": "thorough",
-        "models": {
-            "openai": {
-                "model": "gpt-5.4",
-                "reasoning_effort": "high",
-                # No stream_read_timeout override — see configs/presets.yaml.
-            },
-            "gemini": {"model": "gemini-2.5-pro"},
-            "mistral": {
-                "model": "mistral-medium-3-5",
-                "reasoning_effort": "high",
-                "stream_read_timeout": 200,
-            },
-            "perplexity": {
-                "model": "sonar-reasoning-pro",
-                "stream_read_timeout": 500,
-            },
-            "grok": {"model": "grok-4.20-0309-reasoning"},
-            "claude": {"model": "claude-opus-4-8", "effort": "high"},
-        },
-    },
-    # maximum: highest capability, all domains, max reasoning.
-    # OpenAI: gpt-5.5 is the highest capability model as of June 2026; xhigh reasoning.
-    # Gemini: gemini-2.5-pro confirmed available in Vertex AI (gemini-3.x models return 404 there).
-    # Grok: reasoning is model-selection based — grok-4.20-0309-reasoning is the CoT variant.
-    "maximum": {
-        "thoroughness": "maximum",
-        "models": {
-            "openai": {
-                "model": "gpt-5.5",
-                "reasoning_effort": "xhigh",
-                # No stream_read_timeout override — see configs/presets.yaml.
-            },
-            "gemini": {
-                "model": "gemini-2.5-pro",
-                "thinking_budget": 16000,
-                "stream_read_timeout": 260,
-            },
-            "mistral": {
-                "model": "mistral-medium-3-5",
-                "reasoning_effort": "high",
-                "stream_read_timeout": 200,
-            },
-            "perplexity": {
-                "model": "sonar-reasoning-pro",
-                "stream_read_timeout": 500,
-            },
-            "grok": {"model": "grok-4.20-0309-reasoning"},
-            "claude": {"model": "claude-opus-4-8", "effort": "high"},
-        },
-    },
-}
-
 # Keys that identify provider infrastructure or per-model tuning that the user
 # controls independently of which cost_preset is active.  These are preserved from
 # user config even when cost_preset overrides model names and reasoning flags.
@@ -251,22 +151,23 @@ _INFRA_KEYS = frozenset(
 
 
 def _load_presets_from_yaml(config_dir=None):
-    """Load cost presets from configs/presets.yaml; return None if missing.
+    """Load cost presets from the packaged configs/presets.yaml.
 
     Resolves the path relative to this module (not the CWD) so presets load
     correctly regardless of where the pipeline is invoked from — matching the
     behavior of ci_core/llm/cost.py and model_registry.py.
+
+    Raises PackagedConfigError if the file is missing or malformed. There is no
+    hardcoded fallback: the duplicate it replaced had to be edited in lockstep
+    with the YAML, and in the only state it could have fired — a broken install
+    — quietly running a stale preset is worse than saying so.
     """
-    import logging
 
     if config_dir is None:
         config_dir = Path(__file__).parent / "configs"
     yaml_path = Path(config_dir) / "presets.yaml"
-    if not yaml_path.exists():
-        return None
     try:
-        with open(yaml_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        data = load_packaged_yaml(yaml_path)
         # Validate top-level structure: each key must be a dict with a 'models' sub-dict.
         result = {}
         for preset_name, preset_body in data.items():
@@ -284,12 +185,20 @@ def _load_presets_from_yaml(config_dir=None):
                 "thoroughness": preset_body.get("thoroughness", "standard"),
                 "models": models_normalised,
             }
-        return result or None
+        if not result:
+            raise PackagedConfigError(
+                f"{yaml_path}: contains no usable preset definitions"
+            )
+        return result
+    except PackagedConfigError:
+        # A missing or malformed packaged file is a broken install, not a
+        # runtime condition to survive — quietly running a stale preset gives
+        # the user wrong models and wrong costs with no indication why.
+        raise
     except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "Could not load %s (%s) — using built-in preset defaults", yaml_path, exc
-        )
-        return None
+        raise PackagedConfigError(
+            f"{yaml_path}: could not be parsed as cost presets ({exc})"
+        ) from exc
 
 
 def _apply_cost_preset(pipeline_cfg, models_raw):
@@ -302,7 +211,7 @@ def _apply_cost_preset(pipeline_cfg, models_raw):
     if not preset_name:
         return pipeline_cfg, models_raw
 
-    presets = _load_presets_from_yaml() or _COST_PRESETS
+    presets = _load_presets_from_yaml()
     preset = presets.get(preset_name)
     if not preset:
         valid = ", ".join(f"'{k}'" for k in presets)
