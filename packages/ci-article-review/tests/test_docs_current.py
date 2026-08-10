@@ -64,11 +64,11 @@ def _mentions(text, token):
 # ---------------------------------------------------------------------------
 
 # Every CLI whose flags the README documents. Adding a CLI here is a one-line
-# change — e.g. when PR #36's ci_voice_patterns.voice_pattern_report lands:
-#     "ci_voice_patterns.voice_pattern_report",
+# change — voice_pattern_report was added this way when PR #46 restored it.
 CLI_MODULES = [
     "ci_article_review.pipeline",
     "ci_article_review.history_analytics",
+    "ci_article_review.voice_pattern_report",
 ]
 
 
