@@ -8,7 +8,7 @@ Section 9 is not a pass/fail list. A claim can be resolved at very different lev
 
 ## Confidence tiers
 
-Every entry carries a `verification` field. Three outcomes reach the report.
+Every entry carries a `verification` field. Four outcomes reach the report.
 
 ### Verified — `verification: "checksum"`
 
@@ -24,7 +24,9 @@ This tier is only reachable two ways:
 
 **How much to trust it:** high. The source was retrieved and its relevance affirmatively checked. Still worth a glance — the relevance check is one cheap model call, not a human — but this tier is doing real verification work.
 
-> **One caveat worth knowing.** If the relevance check can't run — no Mistral API key configured, the call fails, or the verdict comes back unparseable — the entry stays in the verified tier with a `relevance_check` field explaining why the check was skipped. This is a deliberate degradation to the older behavior rather than a hard failure, but it means a "verified" entry carrying a `relevance_check` note has only been *fetched and checksummed*, not relevance-confirmed. If you have no Mistral key configured, treat the whole verified tier as fetch-only.
+> **If the relevance check can't run,** the entry does not stay here — it moves to *Could not be verified* below. Reaching this tier always means a model read the extracted content and affirmed it. With no Mistral key configured, expect no verified `known_url` entries at all.
+
+**What the model actually reads.** The fetched body is reduced to readable text before verification: main-article extraction for HTML (nav, header, footer, script and style blocks stripped) and `pypdf` text extraction for PDFs. The excerpt sent to the model is then centred on the passage containing the claim's distinctive terms and figures, rather than the first N characters of the document — in a long PDF the supporting sentence is rarely near the top.
 
 ### Pointer-only — `verification: "pointer"`
 
@@ -49,6 +51,21 @@ No configured adapter matched, or the source URL couldn't be fetched. The entry 
 A distinct failure mode that lands in the *Unresolved* section of the readable report. The source URL fetched and checksummed fine, but the relevance check came back saying the page does **not** support the claim. The entry records the verdict (`contradicts`, `not_addressed`, or `inconclusive`) and the model's one-sentence reason.
 
 This is worth more attention than an ordinary unresolved entry. An ordinary one means "we couldn't find a source." This one means "a source was proposed and it doesn't check out" — and a `contradicts` verdict in particular is a signal about the claim, not just about the citation.
+
+This tier asserts something about the source, so it is only ever reached when the document was genuinely read. If the content could not be extracted, or the check could not run, the entry becomes *Could not be verified* instead — never this.
+
+### Could not be verified — `verification: "unverifiable"`
+
+The source URL fetched and checksummed fine, but no judgement about it was possible. Either the content could not be read, or the relevance check could not run:
+
+- the document is a PDF with no extractable text layer (a pure scan, or password-protected);
+- the page is JavaScript-rendered, paywalled, or otherwise yielded no article text;
+- the response was a bot-check, CAPTCHA, or paywall interstitial served as HTTP 200 rather than the document itself (`content_kind: "access_wall"`);
+- no Mistral API key is configured, or the relevance call failed or returned an unparseable verdict.
+
+`resolved` stays `true` — a real document was fetched, and it is still archived and shown to you for manual checking. But nothing was confirmed and, importantly, **nothing was refuted**.
+
+**How much to trust it:** treat it exactly like pointer-only — a lead to check by hand. The one thing it never means is that the source failed to support the claim. That distinction is the point of the tier: an honest "we couldn't read this" is useful, while a wrong "this source doesn't back you up" is actively misleading.
 
 ---
 
@@ -78,6 +95,8 @@ The change may be a substantive revision — a figure restated, a methodology no
 Content-mismatch entries (`verification: "content_mismatch"`) are not drift-flagged either. They've already left the verified tier carrying a stronger signal, and stacking a second one on top adds noise, not information.
 
 There's no drift check on a first run against an empty or missing `pipeline_history/`, and none for a URL never cited before — no prior checksum means nothing to compare.
+
+**Scope: matching checksum bases only.** Two checksums are compared only when they were taken over the same thing, recorded as `checksum_basis`. A `known_url` checksum used to cover the raw HTTP response body and now covers the extracted article text (`checksum_basis: "extracted_text"`), so comparing across that change would report every previously-cited source as having changed when none of them moved. Reports written before the switch carry no `checksum_basis` and are therefore not compared against current ones. This suppression is self-healing: once a URL has been re-checksummed on the new basis, the run after that compares normally. Adapter-sourced citations carry no basis label at all — what their checksum covers never changed, so they stay comparable against every prior run.
 
 ---
 
