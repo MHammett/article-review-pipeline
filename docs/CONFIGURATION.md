@@ -769,6 +769,10 @@ Open `configs/your_publication_name.yaml`. Key fields:
 | `seo_rules.title_max_chars` | SEO title length ceiling (default 60) |
 | `seo_rules.title_min_chars` | SEO title length floor (default 20) |
 | `seo_rules.min_article_words` | Minimum word count before thin-content warning (default 300) |
+| `seo_rules.meta_description_max_chars` | Meta description ceiling (default 155) |
+| `seo_rules.meta_description_min_chars` | Meta description floor (default 70) |
+| `seo_rules.suggestions` | Whether to run the SEO suggestion pass (default `true`) |
+| `seo_rules.content_review` | Whether to run the SEO structure review (default `true`) |
 | `wordpress.site_url` | `https://yoursite.com` |
 | `wordpress.username` | Your WordPress login username |
 | `wordpress.application_password` | The application password from your WordPress profile |
@@ -781,6 +785,144 @@ seo_rules:
   title_min_chars: 20
   min_article_words: 500    # longer minimum for long-form-only publication
 ```
+
+---
+
+### SEO suggestions
+
+The pre-analysis SEO pass reports what's missing. The suggestion pass proposes
+values for it, covering every field in the publication handoff's SEO METADATA
+block — the same fields `adapters/cms/wordpress.py` pushes to Rank Math:
+
+| Field | What you get | Pushed as |
+|---|---|---|
+| Focus keyword | **3–5 candidates**, strongest first, each with a one-line rationale — including whether the article actually uses the phrase | `rank_math_focus_keyword` |
+| Meta description | A draft under `seo_rules.meta_description_max_chars` | `rank_math_description` |
+| OG title | A shorter title, but only when the article title exceeds `seo_rules.title_max_chars` — otherwise the field reports that the article title is used as-is | `rank_math_og_title` |
+| OG description | Social-card text, but only when a distinctly social framing beats reusing the meta description — otherwise the field reports that the meta description is used. Held to the same character limit | `rank_math_og_description` |
+| Schema type | `Article`, `NewsArticle`, or `BlogPosting` with a one-line rationale, flagged when it differs from `rank_math.default_schema_type` | `rank_math_schema_type` |
+
+Every field reports an outcome. The two with defaults in the push (OG title, OG
+description) name the default that would take effect rather than going silent,
+so you can see the field was considered. A value over its character limit is
+reported with its count and flagged — never truncated into a dangling clause,
+and never dropped.
+
+It runs during a `--draft` review, not at publish time, so the output feeds the
+[revision round-trip](../packages/ci-article-review/src/ci_article_review/handoff_templates/revise_after_review_prompt.md)
+and can be regenerated for free on every pass. Seeing the intended keyword this
+early is also the point at which you can notice that the article never actually
+uses the phrase it should rank for. It appears in three places: the console
+summary under `SEO issues`, an `## SEO Suggestions` section at the end of
+`run_N_<timestamp>_review.md`, and `pre_analysis.seo.suggestions` in the report
+JSON.
+
+At publish time it runs only as a backstop: if a publication handoff reaches
+`--publish` with SEO METADATA still missing a focus keyword or meta description
+(including the template's `derive from primary claim` placeholders, which the
+parser drops), suggestions print before the WordPress confirmation prompt so you
+can cancel, fill the handoff in, and re-run.
+
+**Nothing here is applied automatically** — not to a config, not to a handoff,
+not to WordPress. Keyword choice is a strategic decision about what you want to
+rank for, so the candidates are yours to pick from. (Older configs carried
+`rank_math.derive_focus_keyword_if_missing` and
+`derive_meta_description_if_missing`; no code ever read them, and they have
+been removed rather than wired up to write values on your behalf.)
+
+**Cost and failure behavior.** One call to a small fast model
+(`mistral-small-latest`, the same model the citation relevance verifier uses),
+roughly $0.0002 per run, tracked in the report's `cost_summary` under the
+`seo_suggestions` pass. It needs a Mistral API key; without one it is skipped
+with that reason stated. A failed call is logged and the run continues — a
+suggestion never fails a review.
+
+**Turning it off:**
+
+```yaml
+seo_rules:
+  suggestions: false        # no suggestion call on any run
+```
+
+Or for a single run, without editing the config:
+
+```bash
+uv run ci-review --draft handoff.md --publication your_publication_name --no-seo-suggestions
+```
+
+`--no-seo-suggestions` turns off **both** SEO model calls (suggestions and the
+structure review below) — it's about not paying for the SEO extras, not about
+one of the two. The config keys are independent if you want only one.
+
+With the pass off, the `no_meta_description` finding still appears — it just
+states where a meta description becomes due (the publication handoff's SEO
+METADATA block) rather than offering a draft of one.
+
+---
+
+### On-page checks
+
+These are deterministic — no model call, no cost, and a finding is either true
+or it isn't. They run as part of the pre-analysis SEO pass and appear in the
+same `SEO issues` list:
+
+| Check | Fires when |
+|---|---|
+| `missing_image_alt` | An image (markdown or raw `<img>`) has no alt text — the only description a screen reader or image-search crawler gets. One finding for the batch, not one per image |
+| `weak_anchor_text` | Link text is `click here`, `read more`, a bare URL, or similar — text that promises nothing about the destination |
+| `no_internal_links` | The article links out but never to your own site. Requires `wordpress.site_url`; skipped entirely without it rather than guessed at |
+| `title_h1_mismatch` | The handoff title and the article's H1 differ. Deliberate is fine — but it is just as often an edit applied to one and not the other |
+| `meta_description_too_long` / `_too_short` | A **supplied** description falls outside the configured range. Only presence was checked before |
+
+**Keyword usage** is reported alongside each suggested keyword candidate: does
+the phrase appear in your title, your headings, your opening, and how many
+times in the body. A candidate the article never uses is called out plainly —
+that is the finding worth acting on, and it costs nothing to compute.
+
+Matching is literal (casefolded, whitespace-collapsed) with no stemming, so
+"interconnection queues" does not match a candidate of "interconnection queue".
+That slightly overstates the problem, which beats a fuzzy match reporting a
+phrase as present when a reader would not find it.
+
+Deliberately **not** checked: keyword density. It has not been a ranking signal
+for well over a decade, and writing to a density target makes prose worse.
+Paragraph and sentence length are also absent here — `readability.py` already
+reports both, including `longest_paragraph_words`.
+
+---
+
+### SEO structure review
+
+A second cheap model call, judging the article the way someone who just
+arrived from a search result sees it — and has not yet decided to stay. It
+answers three questions only:
+
+- **Headings** — does each one tell a scanning reader what is in the section
+  below it, or could it sit above any section of any article?
+- **Opening** — does it deliver what the title and keyword promise, or warm up
+  first and bury the answer?
+- **Title promise** — does the article deliver what the title claims?
+
+Findings carry a concrete suggestion (an actual replacement heading, not "make
+it more descriptive") and quote the passage they are about. **Zero findings is
+the expected result on a sound article** and renders as such, rather than as
+an empty section or a manufactured nit.
+
+The prompt explicitly tells the model to leave missing information, weak
+arguments, factual doubts, and tone alone — the `completeness`, `argument_integrity`,
+`fact_check`, and `voice_style` ensemble domains already cover those, and
+repeating them here would bury the structural findings. Findings that come
+back outside the three categories are dropped rather than passed through.
+
+Cost is tracked separately from the suggestion pass, under the
+`seo_content_review` entry in `cost_summary`. To turn off only this one:
+
+```yaml
+seo_rules:
+  content_review: false
+```
+
+---
 
 You can use an environment variable for the application password:
 

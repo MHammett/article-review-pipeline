@@ -44,6 +44,18 @@ seo_rules:
   title_max_chars: 60       # search snippets truncate around 60 chars
   title_min_chars: 20
   min_article_words: 300    # below this, the report flags thin content
+  meta_description_max_chars: 155   # ceiling for the meta description
+  meta_description_min_chars: 70    # below this, search substitutes body text
+  # One extra cheap model call per draft run, proposing the whole SEO METADATA
+  # block: focus keyword candidates, meta description, OG title, OG
+  # description, schema type. Advisory only — nothing is applied
+  # automatically.
+  suggestions: true
+  # A second cheap call judging the article's structure the way a reader
+  # arriving from a search result sees it: are the headings descriptive, does
+  # the opening deliver, does the article match its title.
+  content_review: true
+  # --no-seo-suggestions turns off both for a single run.
 
 languagetool:
   auto_apply:
@@ -97,8 +109,9 @@ wordpress:
 
 rank_math:
   default_schema_type: BlogPosting
-  derive_focus_keyword_if_missing: true
-  derive_meta_description_if_missing: true
+  # A focus keyword and meta description are never derived and written for
+  # you — see seo_rules.suggestions, which proposes both for you to choose
+  # from and apply yourself.
   auto_set_og_tags: true
   do_not_touch:
     - cornerstone_content

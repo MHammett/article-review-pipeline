@@ -10,6 +10,13 @@ gap, following the SECTION 1-8 structure documented in
 the pipeline after that template was written).
 """
 
+#: Order the SEO METADATA fields render in, matching publication.md's block.
+#: Duplicated from ``analysis.seo_suggest.FIELD_ORDER`` rather than imported so
+#: this module stays a dependency-free renderer over a plain dict — importing
+#: the suggestion module would pull the provider adapters in behind it. A test
+#: asserts the two stay in step.
+_SEO_FIELD_ORDER = ("meta_description", "og_title", "og_description", "schema_type")
+
 
 def _kv_lines(d, exclude=()):
     """Render remaining key/value pairs of a flag dict as indented bullets."""
@@ -269,6 +276,169 @@ def _render_section_9(citations):
     return lines
 
 
+def _render_seo_suggestions(pre_analysis):
+    """Render the SEO suggestion block, if the pass produced one.
+
+    This section exists to reach the chat revision round-trip (see
+    ``handoff_templates/revise_after_review_prompt.md``), so it is written for
+    a model as much as for a person — hence the explicit instruction not to
+    treat any of it as decided. Keyword choice is the author's call, and a
+    revision pass that quietly picks one would be making it for them.
+
+    Returns [] when no suggestion pass ran, so reports predating this section
+    (and runs with the pass disabled) render exactly as they did before.
+    """
+    suggestions = (pre_analysis or {}).get("seo", {}).get("suggestions")
+    if not suggestions:
+        return []
+
+    lines = ["## SEO Suggestions", ""]
+    if suggestions.get("status") != "ok":
+        lines.append(
+            f"_Not available this run: {suggestions.get('reason', 'unknown reason')}._"
+        )
+        lines.append("")
+        return lines
+
+    lines.append(
+        "_Proposed, not decided. Nothing here has been written to any config, "
+        "handoff, or WordPress metadata. Do not select a focus keyword on the "
+        "author's behalf — that is a strategic choice about what to rank for._"
+    )
+    lines.append("")
+
+    candidates = suggestions.get("keyword_candidates") or []
+    if candidates:
+        lines.append("### Focus keyword candidates")
+        for c in candidates:
+            rationale = f" — {c['rationale']}" if c.get("rationale") else ""
+            lines.append(f"- **{c['keyword']}**{rationale}")
+            usage = _keyword_usage_line(c.get("usage"))
+            if usage:
+                lines.append(f"  - {usage}")
+        lines.append("")
+
+    fields = suggestions.get("fields") or {}
+    if fields:
+        lines.append("### SEO METADATA fields")
+        lines.append("")
+        for name in _SEO_FIELD_ORDER:
+            field = fields.get(name)
+            if field:
+                lines.extend(_render_seo_field(field))
+
+    return lines
+
+
+def _keyword_usage_line(usage):
+    """Where a candidate phrase actually appears in the article.
+
+    A mechanical scan, not a judgement — and the reason keyword candidates
+    surface at draft stage at all. A phrase the article never uses is the
+    finding a revision pass most needs to see.
+    """
+    if not usage:
+        return ""
+    if not usage.get("body_count"):
+        return (
+            "**The article never uses this phrase.** Either work it in where it "
+            "fits naturally, or pick a candidate the piece already speaks to."
+        )
+
+    where = []
+    if usage.get("in_title"):
+        where.append("the title")
+    if usage.get("in_opening"):
+        where.append("the opening")
+    headings = usage.get("in_headings") or []
+    if headings:
+        where.append(f"{len(headings)} heading(s)")
+    placement = ", ".join(where) if where else "the body only"
+    return f"Appears {usage['body_count']}x — in {placement}."
+
+
+def _render_seo_content_review(pre_analysis):
+    """Render the structural findings from the search-reader review pass."""
+    content_review = (pre_analysis or {}).get("seo", {}).get("content_review")
+    if not content_review:
+        return []
+
+    lines = ["## SEO Structure Review", ""]
+    if content_review.get("status") != "ok":
+        lines.append(
+            f"_Not available this run: "
+            f"{content_review.get('reason', 'unknown reason')}._"
+        )
+        lines.append("")
+        return lines
+
+    findings = content_review.get("findings") or []
+    if not findings:
+        lines.append(
+            "_Nothing flagged — headings, opening, and title all read as "
+            "delivering what a search reader arrived for._"
+        )
+        lines.append("")
+        return lines
+
+    lines.append(
+        "_How the article reads to someone who just arrived from a search "
+        "result. Structure only — the review sections above cover argument, "
+        "completeness, and voice._"
+    )
+    lines.append("")
+    for finding in findings:
+        target = f': "{finding["target"]}"' if finding.get("target") else ""
+        lines.append(f"- **{finding['type']}**{target}")
+        lines.append(f"  - {finding['problem']}")
+        if finding.get("suggestion"):
+            lines.append(f"  - Suggested: {finding['suggestion']}")
+    lines.append("")
+    return lines
+
+
+def _render_seo_field(field):
+    """One row of the SEO METADATA table of outcomes.
+
+    Fields with no proposed value still render. Two of them (OG title, OG
+    description) have defaults the WordPress push applies on its own, and
+    naming the default that would take effect is more use to the author than
+    omitting the field and leaving them to wonder whether it was considered.
+    """
+    label = field.get("label", "")
+    if not field.get("value"):
+        return [f"**{label}:** {field.get('default_note', '_not proposed_')}", ""]
+
+    measured = (
+        f" ({field['chars']}/{field['limit']} chars)"
+        if field.get("limit") is not None
+        else ""
+    )
+    over = " — **over the limit, trim before use**" if field.get("over_limit") else ""
+    lines = [f"**{label}**{measured}{over}", ""]
+
+    if field.get("recognized") is False:
+        lines.append(
+            "_Not one of the types this publication's template lists — confirm "
+            "Rank Math accepts it before using._"
+        )
+        lines.append("")
+    elif field.get("differs_from_default"):
+        lines.append(
+            f"_Differs from the configured default "
+            f"(`{field['configured_default']}`), which is what the push would "
+            f"set if this field is left blank._"
+        )
+        lines.append("")
+
+    lines.append(f"> {field['value']}")
+    if field.get("rationale"):
+        lines.append("")
+        lines.append(f"_{field['rationale']}_")
+    lines.append("")
+    return lines
+
+
 def render_report_markdown(report):
     """Render a review report dict into a readable markdown document.
 
@@ -350,5 +520,7 @@ def render_report_markdown(report):
     lines.extend(_render_section_7(report.get("section_7_low_confidence", [])))
     lines.extend(_render_section_8(report.get("section_8_additional", [])))
     lines.extend(_render_section_9(report.get("section_9_citations", [])))
+    lines.extend(_render_seo_suggestions(report.get("pre_analysis", {})))
+    lines.extend(_render_seo_content_review(report.get("pre_analysis", {})))
 
     return "\n".join(lines).rstrip() + "\n"

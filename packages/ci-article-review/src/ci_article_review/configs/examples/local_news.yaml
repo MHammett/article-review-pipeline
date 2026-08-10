@@ -70,7 +70,8 @@ wordpress:
 
 rank_math:
   default_schema_type: NewsArticle
-  derive_focus_keyword_if_missing: true
-  derive_meta_description_if_missing: true
+  # A focus keyword and meta description are never derived and written for
+  # you — see seo_rules.suggestions, which proposes both for you to choose
+  # from and apply yourself.
   auto_set_og_tags: true
   do_not_touch: []
