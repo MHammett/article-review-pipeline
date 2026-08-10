@@ -420,6 +420,37 @@ def _global_ceiling(per_task_timeouts, retry_delay):
     return max(per_task_timeouts) + retry_delay + 30
 
 
+def _run_with_timeout(fn, timeout, name):
+    """Run ``fn`` under a per-task wall-clock backstop. Raises TimeoutError on expiry.
+
+    An inner single-worker executor so the budget applies to this call alone
+    rather than to the position of its future in a completion queue.
+
+    The executor is shut down with ``wait=False`` rather than used as a context
+    manager: a running thread cannot be killed, so on expiry the call is
+    genuinely abandoned and lives on until its socket read-gap timeout fires —
+    but the run stops *waiting* on it now, which is the whole point of a
+    wall-clock backstop. (The context-manager form re-joins the thread on the
+    way out, which would block until the slow call finished and undo the
+    timeout entirely.) Mirrors ci_style_profile.callers.call_all's ``_task``.
+
+    An abandoned thread can still delay interpreter exit, because
+    concurrent.futures joins its workers via atexit. That is accepted rather
+    than worked around: the delay is bounded by the adapter's read-gap timeout,
+    and the alternative (daemonizing the pool's threads) means reaching into
+    ThreadPoolExecutor internals to kill sockets mid-write.
+    """
+    inner = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    inner_future = inner.submit(fn)
+    try:
+        return inner_future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        inner_future.cancel()
+        raise TimeoutError(f"Timed out after {timeout}s")
+    finally:
+        inner.shutdown(wait=False, cancel_futures=True)
+
+
 def run_draft_pipeline(
     handoff_path,
     publication_name,
@@ -613,7 +644,7 @@ def run_draft_pipeline(
     # is treated as an override and left untouched.
     #
     # Since the review adapters stream (SSE), this computed value is the per-task
-    # thread WALL-CLOCK BACKSTOP enforced by _run_with_timeout below — NOT a socket
+    # thread WALL-CLOCK BACKSTOP enforced by _run_with_timeout — NOT a socket
     # timeout. Streaming does not make a long generation finish faster (a gpt-5.5
     # xhigh call still emits tokens for ~800s); it changes the socket read timeout,
     # which the adapters now hold at a small constant inter-token gap (see
@@ -739,16 +770,6 @@ def run_draft_pipeline(
             [t for _, _, t in runner_timeouts],
             pipeline_cfg.get("retry_delay_seconds", 10),
         )
-
-        def _run_with_timeout(fn, timeout, name):
-            """Enforce a per-task timeout. Raises TimeoutError on expiry."""
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner:
-                inner_future = inner.submit(fn)
-                try:
-                    return inner_future.result(timeout=timeout)
-                except concurrent.futures.TimeoutError:
-                    inner_future.cancel()
-                    raise TimeoutError(f"Timed out after {timeout}s")
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(runner_timeouts)
