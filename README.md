@@ -64,13 +64,13 @@ uv sync
 **1. Run setup:**
 
 ```powershell
-uv run python -m ci_article_review.setup
+uv run ci-setup
 ```
 
 This creates `configs/`, copies the example templates, prompts for your publication name, and prints exactly what to fill in next. Run it with `--publication NAME` to skip the interactive prompt:
 
 ```powershell
-uv run python -m ci_article_review.setup --publication dnacom
+uv run ci-setup --publication dnacom
 ```
 
 **2. Fill in `configs/user.yaml`** with your API keys and model selection. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for account setup instructions per provider. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full config reference.
@@ -80,7 +80,7 @@ uv run python -m ci_article_review.setup --publication dnacom
 **4. Verify your setup:**
 
 ```powershell
-uv run python -m ci_article_review.check --publication your_publication_name
+uv run ci-check --publication your_publication_name
 ```
 
 Makes one minimal call to each configured service and reports pass/fail with specific error messages before you run a real article through.
@@ -88,7 +88,7 @@ Makes one minimal call to each configured service and reports pass/fail with spe
 **Check for newer models** (optional, run any time):
 
 ```powershell
-uv run python -m ci_article_review.discover
+uv run ci-discover
 ```
 
 Queries each provider's live models API and reports what's available — so you always know when a newer model exists without reading every provider's changelog. Compares against your configured models and flags anything newer.
@@ -96,7 +96,7 @@ Queries each provider's live models API and reports what's available — so you 
 **5. Run the pipeline:**
 
 ```powershell
-uv run python -m ci_article_review.pipeline --draft path/to/handoff.md --publication your_publication_name
+uv run ci-review --draft path/to/handoff.md --publication your_publication_name
 ```
 
 Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` argument.
@@ -104,7 +104,7 @@ Fill out `handoff_templates/draft_submission.md` and pass it as the `--draft` ar
 **6. Publish an approved draft:**
 
 ```powershell
-uv run python -m ci_article_review.pipeline --publish path/to/publication_handoff.md --publication your_publication_name
+uv run ci-review --publish path/to/publication_handoff.md --publication your_publication_name
 ```
 
 Always saves as a WordPress draft unless you add `--publish-live`.
@@ -112,7 +112,7 @@ Always saves as a WordPress draft unless you add `--publish-live`.
 **Analyze an existing web page:**
 
 ```powershell
-uv run python -m ci_article_review.pipeline --url https://example.com/some-published-post --publication your_publication_name
+uv run ci-review --url https://example.com/some-published-post --publication your_publication_name
 ```
 
 Instead of a local handoff file, this fetches the page, extracts the main
@@ -156,7 +156,7 @@ Readable review (paste into chat): pipeline_history/my-article/run_1_20260809_14
 5. **Re-run:**
 
    ```powershell
-   uv run python -m ci_article_review.pipeline --raw-draft revised_draft.md --metadata metadata.md --publication your_publication_name
+   uv run ci-review --raw-draft revised_draft.md --metadata metadata.md --publication your_publication_name
    ```
 
    The run number increments and the report gains a **Delta From Prior Run** block — word change, how many prior consensus flags you resolved, how many new ones appeared, and whether the primary claim or heading structure moved.
@@ -223,7 +223,7 @@ It is a suggestion report only. Nothing is written to `pipeline_history/` or to 
 ## Command-line options
 
 ```powershell
-uv run python -m ci_article_review.pipeline --draft HANDOFF --publication NAME [options]
+uv run ci-review --draft HANDOFF --publication NAME [options]
 ```
 
 Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required — they are mutually exclusive.
@@ -252,7 +252,7 @@ Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required —
 Example — measure one model/domain's true latency cheaply:
 
 ```powershell
-uv run python -m ci_article_review.pipeline --draft handoff.md --publication mypub --cost-preset maximum --only-model openai --only-domain fact_check --no-timeout
+uv run ci-review --draft handoff.md --publication mypub --cost-preset maximum --only-model openai --only-domain fact_check --no-timeout
 ```
 
 > On Windows `cmd.exe`, keep the whole command on one line — backslash line-continuation is a bash feature and will split the command.
