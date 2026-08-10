@@ -10,19 +10,17 @@ dependencies = [
     "alembic>=1.14",
     "structlog>=26.1.0",
     "starlette>=1.3.1",
+    # ci_core.llm — the shared streaming LLM call layer. Deliberately built on
+    # requests + raw SSE rather than the per-provider SDKs: one transport, one
+    # set of timeout/encoding/error-body semantics across all six providers.
+    "requests>=2.31.0,<3.0",
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
-anthropic = ["anthropic>=0.28"]
-openai = ["openai>=1.0"]
-gemini = ["google-genai>=1.0"]
-mistral = ["mistralai>=1.0"]
-all-llm = [
-    "anthropic>=0.28",
-    "openai>=1.0",
-    "google-genai>=1.0",
-    "mistralai>=1.0",
-]
+# Vertex AI backend for the Gemini adapter (google.auth token flow).
+# Not needed when using Gemini via AI Studio (API-key auth).
+vertex = ["google-auth>=2.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -33,7 +31,6 @@ packages = ["src/ci_core"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.mypy]
 python_version = "3.10"

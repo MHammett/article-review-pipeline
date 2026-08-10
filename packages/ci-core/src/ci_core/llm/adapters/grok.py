@@ -3,7 +3,7 @@ import time
 import logging
 import requests
 
-from . import streaming
+from .. import streaming
 from ... import redact
 
 DEFAULT_MODEL = "grok-4.3"
@@ -187,6 +187,7 @@ def _call_model(
     )
     return {
         "failed": False,
+        "raw": content,
         "data": parsed,
         "model": model,
         "tokens": {

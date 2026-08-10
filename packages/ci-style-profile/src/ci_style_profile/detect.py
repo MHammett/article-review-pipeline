@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ci_article_review.adapters.review.json_utils import extract_json
+from ci_core.llm.json_utils import extract_json
 from .callers import call_all
 from .collectors.base import Document
 from .style_consolidation import consolidate_detection
@@ -98,9 +98,9 @@ def detect_styles(
         model_subset = None  # all configured
     elif not detection_models:
         # Style-style-weighted subset: claude + openai (weight ≥ 1.1)
-        from ci_article_review.config_loader import _normalize_model_configs
+        from ci_core.config_helpers import normalize_model_configs
 
-        configured = set(_normalize_model_configs(user_config.get("models", {})).keys())
+        configured = set(normalize_model_configs(user_config.get("models", {})).keys())
         model_subset = [m for m in ("claude", "openai") if m in configured]
         if not model_subset:
             model_subset = None

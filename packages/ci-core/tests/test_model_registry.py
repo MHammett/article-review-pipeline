@@ -3,7 +3,7 @@
 import datetime
 
 
-from ci_article_review.model_registry import (
+from ci_core.llm.model_registry import (
     check_model_currency,
     REGISTRY_DATE,
     _SUPERSEDED,

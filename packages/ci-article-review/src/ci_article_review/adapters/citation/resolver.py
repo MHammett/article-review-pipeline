@@ -7,8 +7,8 @@ import requests
 
 from ci_core.http import DEFAULT_HEADERS
 
-from ... import redact
-from ..review import mistral
+from ci_core import redact
+from ci_core.llm.adapters import mistral
 from . import wayback
 
 log = logging.getLogger(__name__)

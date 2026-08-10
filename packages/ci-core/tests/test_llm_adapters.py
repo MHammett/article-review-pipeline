@@ -1,0 +1,1866 @@
+"""Unit tests for the shared LLM provider adapters in ci_core.llm."""
+
+import json
+import pytest
+import requests
+from unittest.mock import patch, MagicMock
+
+# ---------------------------------------------------------------------------
+# SSE streaming mock helpers
+# ---------------------------------------------------------------------------
+# The review adapters POST with stream=True and consume the response via
+# resp.iter_lines(). These helpers build mock responses that yield provider-shaped
+# SSE `data:` lines so the accumulators in adapters/review/streaming.py parse them
+# exactly as they would a live stream.
+
+
+def _sse_mock(lines, status=200):
+    """A mock streaming response whose iter_lines() yields the given SSE lines."""
+    mock = MagicMock()
+    mock.status_code = status
+    mock.raise_for_status = MagicMock()
+    mock.close = MagicMock()
+    # Return a fresh iterator each call so a retry that re-reads still works.
+    mock.iter_lines.side_effect = lambda *a, **k: iter(list(lines))
+    return mock
+
+
+def _error_mock(status, body_text):
+    """A mock response whose raise_for_status() raises HTTPError with a body.
+
+    Mirrors what ``requests`` does for a real 4xx/5xx: the response object is
+    attached to the exception via ``.response`` (still readable via ``.text``
+    since nothing has consumed the stream yet), and ``raise_for_status()``'s own
+    message is just the bare status line — the body only comes from ``.text``.
+    """
+    mock = MagicMock()
+    mock.status_code = status
+    mock.text = body_text
+    mock.close = MagicMock()
+
+    def _raise():
+        raise requests.exceptions.HTTPError(
+            f"{status} Client Error: for url: https://example.invalid", response=mock
+        )
+
+    mock.raise_for_status.side_effect = _raise
+    return mock
+
+
+def _split(text, n=3):
+    """Split text into roughly n non-empty chunks to exercise delta accumulation."""
+    if not text:
+        return [""]
+    size = max(1, -(-len(text) // n))
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _sse_chat_lines(content, usage=None, finish_reason="stop", extras=None, n=3):
+    """OpenAI-compatible chat-completions stream (OpenAI/Grok/Mistral/Perplexity)."""
+    text = content if isinstance(content, str) else json.dumps(content)
+    lines = []
+    for piece in _split(text, n):
+        lines.append(
+            "data: "
+            + json.dumps({"choices": [{"index": 0, "delta": {"content": piece}}]})
+        )
+        lines.append("")
+    final = {"choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}
+    final["usage"] = (
+        usage if usage is not None else {"prompt_tokens": 100, "completion_tokens": 50}
+    )
+    if extras:
+        final.update(extras)
+    lines.append("data: " + json.dumps(final))
+    lines.append("data: [DONE]")
+    return lines
+
+
+def _sse_responses_lines(content, usage=None, reasoning_deltas=None, n=3):
+    """OpenAI Responses API stream (openai.com default + web_search paths).
+
+    ``reasoning_deltas``, if given, emits ``response.reasoning_summary_text.delta``
+    events before the answer deltas — reasoning models stream these during the
+    silent "thinking" phase, ahead of any output text.
+    """
+    text = content if isinstance(content, str) else json.dumps(content)
+    lines = []
+    for piece in reasoning_deltas or []:
+        lines.append(
+            "data: "
+            + json.dumps(
+                {"type": "response.reasoning_summary_text.delta", "delta": piece}
+            )
+        )
+        lines.append("")
+    for piece in _split(text, n):
+        lines.append(
+            "data: "
+            + json.dumps({"type": "response.output_text.delta", "delta": piece})
+        )
+        lines.append("")
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "usage": usage
+                    if usage is not None
+                    else {"input_tokens": 100, "output_tokens": 50}
+                },
+            }
+        )
+    )
+    lines.append("data: [DONE]")
+    return lines
+
+
+def _sse_anthropic_lines(content, input_tokens=100, output_tokens=50, n=3):
+    """Anthropic /v1/messages stream."""
+    text = content if isinstance(content, str) else json.dumps(content)
+    lines = [
+        "event: message_start",
+        "data: "
+        + json.dumps(
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0}
+                },
+            }
+        ),
+        "",
+        "data: "
+        + json.dumps(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }
+        ),
+        "",
+    ]
+    for piece in _split(text, n):
+        lines.append(
+            "data: "
+            + json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": piece},
+                }
+            )
+        )
+        lines.append("")
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": output_tokens},
+            }
+        )
+    )
+    lines.append("data: " + json.dumps({"type": "message_stop"}))
+    return lines
+
+
+def _sse_gemini_lines(content, prompt_tokens=120, completion_tokens=60, n=3):
+    """Gemini streamGenerateContent?alt=sse stream."""
+    text = content if isinstance(content, str) else json.dumps(content)
+    lines = []
+    for piece in _split(text, n):
+        lines.append(
+            "data: "
+            + json.dumps({"candidates": [{"content": {"parts": [{"text": piece}]}}]})
+        )
+        lines.append("")
+    lines.append(
+        "data: "
+        + json.dumps(
+            {
+                "candidates": [{"content": {"parts": []}, "finishReason": "STOP"}],
+                "usageMetadata": {
+                    "promptTokenCount": prompt_tokens,
+                    "candidatesTokenCount": completion_tokens,
+                },
+            }
+        )
+    )
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# OpenAI adapter
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAI:
+    def _mock_response(self, content_dict, status=200, usage=None):
+        return _sse_mock(_sse_responses_lines(content_dict, usage=usage), status=status)
+
+    def test_successful_call(self):
+        from ci_core.llm.adapters import openai as oai
+
+        content = {
+            "flags": [
+                {"passage": "test", "problem": "hedging", "suggested_rewrite": "direct"}
+            ],
+            "low_confidence": [],
+        }
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = oai.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"]["flags"][0]["passage"] == "test"
+        assert result["tokens"]["prompt"] == 100
+        assert "elapsed_seconds" in result
+        # Primary path is the Responses API — not Chat Completions.
+        assert "responses" in mock_session.post.call_args.args[
+            0
+        ] or "responses" in mock_session.post.call_args.kwargs.get("url", "")
+        body = mock_session.post.call_args.kwargs["json"]
+        assert "instructions" in body and "input" in body
+        assert "messages" not in body
+
+    def test_streamed_response_accumulated_and_parsed(self):
+        # The JSON arrives split across many small deltas; the accumulator must
+        # reassemble it before parsing.
+        from ci_core.llm.adapters import openai as oai
+
+        content = {
+            "flags": [{"passage": "p", "problem": "x", "suggested_rewrite": "y"}],
+            "low_confidence": ["a", "b"],
+        }
+        lines = _sse_responses_lines(content, n=12)  # many tiny chunks
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = oai.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"] == content
+        # stream=True must be sent both to requests and in the JSON body.
+        assert mock_session.post.call_args.kwargs["stream"] is True
+        assert mock_session.post.call_args.kwargs["json"]["stream"] is True
+
+    def test_reasoning_summary_deltas_precede_answer_without_corrupting_output(self):
+        # Reasoning-summary text deltas stream ahead of the answer deltas during
+        # the model's silent "thinking" phase; they must be consumed (so they
+        # reset the read-gap timer) without leaking into the assembled JSON.
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        lines = _sse_responses_lines(
+            content, reasoning_deltas=["Weigh", "ing the ", "claims..."]
+        )
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            )
+        assert result["failed"] is False
+        assert result["data"] == content
+
+    def test_usage_tokens_captured_from_final_chunk(self):
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        usage = {"input_tokens": 4321, "output_tokens": 876}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content, usage=usage)
+            result = oai.call("system", "user", "key")
+        assert result["tokens"]["prompt"] == 4321
+        assert result["tokens"]["completion"] == 876
+
+    def test_inter_token_stall_triggers_read_timeout(self):
+        # A stall between tokens surfaces as a requests read timeout while iterating
+        # the stream; the adapter must report a failed call, not hang or crash.
+        from ci_core.llm.adapters import openai as oai
+
+        def stalling_lines(*a, **k):
+            yield "data: " + json.dumps(
+                {"type": "response.reasoning_summary_text.delta", "delta": "..."}
+            )
+            raise requests.exceptions.ReadTimeout("Read timed out. (read timeout=120)")
+
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.raise_for_status = MagicMock()
+        mock.close = MagicMock()
+        mock.iter_lines.side_effect = stalling_lines
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = mock
+            result = oai.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert (
+            "timed out" in result["error"].lower()
+            or "timeout" in result["error"].lower()
+        )
+
+    def test_failed_call(self):
+        from ci_core.llm.adapters import openai as oai
+
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = Exception("Connection error")
+            result = oai.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "elapsed_seconds" in result
+
+    def test_malformed_json(self):
+        from ci_core.llm.adapters import openai as oai
+
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(
+                _sse_responses_lines("not json at all")
+            )
+            result = oai.call("system", "user", "key")
+        assert result["failed"] is True
+        assert result["raw"] == "not json at all"
+
+    def test_model_override(self):
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = oai.call("system", "user", "key", model="gpt-4-turbo")
+        assert result["model"] == "gpt-4-turbo"
+
+    def test_reasoning_payload_uses_reasoning_object(self):
+        # Responses API nests effort/summary under "reasoning" — must not send
+        # Chat Completions' old top-level "reasoning_effort" field, and
+        # temperature (incompatible with reasoning mode) must be omitted.
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.5", "reasoning_effort": "xhigh"},
+            )
+        body = mock_session.post.call_args.kwargs["json"]
+        assert body["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+        assert "reasoning_effort" not in body
+        assert "temperature" not in body
+
+    def test_no_reasoning_effort_omits_reasoning_key(self):
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call("system", "user", "key", provider_config={"model": "gpt-5.4"})
+        body = mock_session.post.call_args.kwargs["json"]
+        assert "reasoning" not in body
+        assert body["temperature"] == 0.2
+
+    def test_read_gap_timeout_constant_not_derived_from_timeout_seconds(self):
+        # Under streaming, the socket read timeout is the inter-token gap — a small
+        # constant. The big sliding-scale timeout_seconds must NOT inflate it (that
+        # value is now only the pipeline's wall-clock backstop).
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.5", "timeout_seconds": 819},
+            )
+        connect, read = mock_session.post.call_args.kwargs["timeout"]
+        assert (
+            read == 120
+        )  # constant inter-token gap, independent of timeout_seconds=819
+
+    def test_default_timeout_when_unset(self):
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call("system", "user", "key", provider_config={"model": "gpt-5.4"})
+        assert mock_session.post.call_args.kwargs["timeout"] == (30, 120)
+
+    def test_stream_read_timeout_override(self):
+        # A grounded/slow model can widen the inter-token allowance explicitly.
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.4", "stream_read_timeout": 200},
+            )
+        assert mock_session.post.call_args.kwargs["timeout"] == (30, 200)
+
+    def test_web_search_responses_api_streamed(self):
+        # web_search: true → Responses API, which streams typed events
+        # (response.output_text.delta) and reports usage on response.completed.
+        from ci_core.llm.adapters import openai as oai
+
+        content = {"confirmed": ["claim"], "outdated": []}
+        text = json.dumps(content)
+        lines = []
+        for piece in _split(text, 4):
+            lines.append(
+                "data: "
+                + json.dumps({"type": "response.output_text.delta", "delta": piece})
+            )
+            lines.append("")
+        lines.append(
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {"usage": {"input_tokens": 321, "output_tokens": 123}},
+                }
+            )
+        )
+        lines.append("data: [DONE]")
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = oai.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": "gpt-5.4", "web_search": True},
+            )
+        assert result["failed"] is False
+        assert result["data"] == content
+        assert result["grounding_available"] is True
+        assert result["model"] == "gpt-5.4+search"
+        assert result["tokens"]["prompt"] == 321
+        assert result["tokens"]["completion"] == 123
+        # Responses API endpoint + stream flag.
+        assert "responses" in mock_session.post.call_args.args[
+            0
+        ] or "responses" in mock_session.post.call_args.kwargs.get("url", "")
+        assert mock_session.post.call_args.kwargs["json"]["stream"] is True
+
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line. OpenAI's error body says which of
+        # invalid/revoked/insufficient-quota/suspended actually caused the 401.
+        from ci_core.llm.adapters import openai as oai
+
+        body_text = json.dumps(
+            {
+                "error": {
+                    "message": "You exceeded your current quota",
+                    "code": "insufficient_quota",
+                }
+            }
+        )
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = oai.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "You exceeded your current quota" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "You exceeded your current quota" in error_text
+
+
+# ---------------------------------------------------------------------------
+# Mistral adapter
+# ---------------------------------------------------------------------------
+
+
+class TestMistral:
+    def _mock_response(self, content_dict):
+        return _sse_mock(
+            _sse_chat_lines(
+                content_dict, usage={"prompt_tokens": 80, "completion_tokens": 40}
+            )
+        )
+
+    def test_reasoning_chunked_content_accumulated(self):
+        # mistral-medium-3-5 streams delta.content as typed chunks (thinking + text);
+        # only the text chunks form the answer JSON.
+        from ci_core.llm.adapters import mistral
+
+        text = json.dumps({"flags": [], "low_confidence": []})
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": [
+                                    {"type": "thinking", "thinking": "considering..."}
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ),
+            "",
+            "data: "
+            + json.dumps(
+                {"choices": [{"delta": {"content": [{"type": "text", "text": text}]}}]}
+            ),
+            "",
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [{"delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 9},
+                }
+            ),
+            "data: [DONE]",
+        ]
+        with patch("ci_core.llm.adapters.mistral.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = mistral.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"] == {"flags": [], "low_confidence": []}
+
+    def test_successful_call(self):
+        from ci_core.llm.adapters import mistral
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.mistral.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = mistral.call("system", "user", "key")
+        assert result["failed"] is False
+        assert "flags" in result["data"]
+        assert "elapsed_seconds" in result
+
+    def test_failed_call(self):
+        from ci_core.llm.adapters import mistral
+
+        with patch("ci_core.llm.adapters.mistral.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = Exception("Timeout")
+            result = mistral.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "elapsed_seconds" in result
+
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line. Mistral's error body carries the
+        # actual reason (invalid key, revoked, suspended, etc.).
+        from ci_core.llm.adapters import mistral
+
+        body_text = json.dumps({"message": "Unauthorized", "request_id": "abc123"})
+        with patch("ci_core.llm.adapters.mistral.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = mistral.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "Unauthorized" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "Unauthorized" in error_text
+
+    def test_truncated_response_salvages_complete_flags(self):
+        # Live failure mode: the model hits an output-token ceiling mid-array,
+        # not a stall (elapsed nowhere near the timeout budget) and not genuinely
+        # malformed content — the response is well-formed JSON up to the cut
+        # point. The adapter should recover the complete flags and mark the
+        # result as truncated rather than discarding everything as "failed".
+        from ci_core.llm.adapters import mistral
+
+        truncated_json = (
+            '{"flags": ['
+            '{"passage": "first passage", "problem": "p1", '
+            '"suggested_rewrite": "r1", "steelman_considered": "s1"}, '
+            '{"passage": "second passage", "problem": "p2", '
+            '"suggested_rewrite": "r2", "steelman_considered": "s2"}, '
+            '{"passage": "The Cambridge preprint\'s central claim may be real'
+        )
+        with patch("ci_core.llm.adapters.mistral.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(truncated_json)
+            result = mistral.call("system", "user", "key")
+
+        assert result["failed"] is False
+        assert result["truncated"] is True
+        assert result["data"] == {
+            "flags": [
+                {
+                    "passage": "first passage",
+                    "problem": "p1",
+                    "suggested_rewrite": "r1",
+                    "steelman_considered": "s1",
+                },
+                {
+                    "passage": "second passage",
+                    "problem": "p2",
+                    "suggested_rewrite": "r2",
+                    "steelman_considered": "s2",
+                },
+            ]
+        }
+        assert result["raw"] == truncated_json
+
+    def test_sends_explicit_max_tokens(self):
+        # No explicit max_tokens was being sent at all, relying on whatever
+        # Mistral's API defaults to — which is what let a response get cut off
+        # well short of the model's real context window.
+        from ci_core.llm.adapters import mistral
+
+        with patch("ci_core.llm.adapters.mistral.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(
+                {"flags": [], "low_confidence": []}
+            )
+            mistral.call("system", "user", "key")
+
+        _, kwargs = mock_session.post.call_args
+        assert kwargs["json"]["max_tokens"] == mistral.DEFAULT_MAX_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# json_utils — shared truncation salvage
+# ---------------------------------------------------------------------------
+
+
+class TestJsonUtilsSalvage:
+    def test_clean_response_not_marked_truncated(self):
+        from ci_core.llm.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        data, truncated = extract_json_with_salvage('{"flags": [{"passage": "a"}]}')
+        assert data == {"flags": [{"passage": "a"}]}
+        assert truncated is False
+
+    def test_truncated_mid_array_between_elements(self):
+        from ci_core.llm.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        # Cut off cleanly after the second element's comma, mid-way through the
+        # third element's key — never even opened the third object's value.
+        raw = (
+            '{"flags": ['
+            '{"passage": "a", "problem": "p1"}, '
+            '{"passage": "b", "problem": "p2"}, '
+            '{"passage": "c", "prob'
+        )
+        data, truncated = extract_json_with_salvage(raw)
+        assert truncated is True
+        assert data == {
+            "flags": [
+                {"passage": "a", "problem": "p1"},
+                {"passage": "b", "problem": "p2"},
+            ]
+        }
+
+    def test_truncated_mid_string_inside_value(self):
+        # Truncation lands inside an unterminated string value, not between
+        # elements — the escape/string-depth tracking must not let that produce
+        # invalid JSON, and the incomplete element must be dropped entirely.
+        from ci_core.llm.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        raw = (
+            '{"flags": ['
+            '{"passage": "a", "problem": "p1"}, '
+            '{"passage": "The Cambridge preprint\'s central claim may be real'
+        )
+        data, truncated = extract_json_with_salvage(raw)
+        assert truncated is True
+        assert data == {"flags": [{"passage": "a", "problem": "p1"}]}
+
+    def test_truncated_with_trailing_backslash_before_cut(self):
+        # A backslash right at the cut point must not desynchronize the
+        # escape-state tracking for whatever came before it.
+        from ci_core.llm.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        raw = '{"flags": [{"passage": "a", "problem": "p1"}, {"passage": "b\\'
+        data, truncated = extract_json_with_salvage(raw)
+        assert truncated is True
+        assert data == {"flags": [{"passage": "a", "problem": "p1"}]}
+
+    def test_nothing_recoverable_returns_none(self):
+        from ci_core.llm.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        data, truncated = extract_json_with_salvage('{"flags": [{"passage"')
+        assert data is None
+        assert truncated is False
+
+    def test_empty_content_returns_none(self):
+        from ci_core.llm.json_utils import (
+            extract_json_with_salvage,
+        )
+
+        assert extract_json_with_salvage("") == (None, False)
+        assert extract_json_with_salvage(None) == (None, False)
+
+
+# ---------------------------------------------------------------------------
+# Gemini adapter
+# ---------------------------------------------------------------------------
+
+
+class TestGemini:
+    def _mock_response(self, content_dict):
+        return _sse_mock(_sse_gemini_lines(content_dict))
+
+    def test_successful_call(self):
+        from ci_core.llm.adapters import gemini
+
+        content = {
+            "confirmed": [],
+            "outdated": [],
+            "contradicted": [],
+            "unverifiable": [],
+            "primary_source_needed": [],
+        }
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is False
+        assert "confirmed" in result["data"]
+        assert result["tokens"]["prompt"] == 120
+        assert "elapsed_seconds" in result
+
+    def test_thought_parts_excluded_from_stream(self):
+        # Parts flagged thought:true are internal reasoning and must not pollute the JSON.
+        from ci_core.llm.adapters import gemini
+
+        text = json.dumps({"confirmed": ["x"]})
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": "reasoning...", "thought": True}]
+                            }
+                        }
+                    ]
+                }
+            ),
+            "",
+            "data: "
+            + json.dumps(
+                {
+                    "candidates": [{"content": {"parts": [{"text": text}]}}],
+                    "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+                }
+            ),
+        ]
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"] == {"confirmed": ["x"]}
+
+    def test_no_candidates(self):
+        from ci_core.llm.adapters import gemini
+
+        # An empty stream (no text parts) is the streaming equivalent of no candidates.
+        empty = _sse_mock(
+            [
+                "data: "
+                + json.dumps(
+                    {"candidates": [{"content": {"parts": []}}], "usageMetadata": {}}
+                )
+            ]
+        )
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = empty
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is True
+
+    def test_multiple_interleaved_thought_parts_excluded(self):
+        # Thought and non-thought parts can arrive interleaved across several
+        # chunks rather than as one contiguous thought block up front — the
+        # accumulator must skip every thought-flagged part regardless of order.
+        from ci_core.llm.adapters import gemini
+
+        text = json.dumps({"confirmed": ["x"], "outdated": []})
+        half = len(text) // 2
+        lines = []
+
+        def _chunk(piece, thought=False, usage=None):
+            cand = {"content": {"parts": [{"text": piece, "thought": thought}]}}
+            if not thought:
+                cand["content"]["parts"][0].pop("thought")
+            obj = {"candidates": [cand]}
+            if usage:
+                obj["usageMetadata"] = usage
+            return "data: " + json.dumps(obj)
+
+        lines.append(_chunk("first reasoning step...", thought=True))
+        lines.append("")
+        lines.append(_chunk(text[:half]))
+        lines.append("")
+        lines.append(_chunk("second reasoning step...", thought=True))
+        lines.append("")
+        lines.append(
+            _chunk(
+                text[half:],
+                usage={"promptTokenCount": 1, "candidatesTokenCount": 1},
+            )
+        )
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"] == {"confirmed": ["x"], "outdated": []}
+
+    def test_max_tokens_truncation_reported_distinctly(self):
+        # A finishReason=MAX_TOKENS on genuinely truncated (unparseable) JSON
+        # should be reported as a distinct, diagnosable failure instead of the
+        # generic "Malformed JSON response" message.
+        from ci_core.llm.adapters import gemini
+
+        truncated = '{"confirmed": ["x", "y", "z'  # cut off mid-string, invalid JSON
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": [{"text": truncated}]},
+                            "finishReason": "MAX_TOKENS",
+                        }
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": 100,
+                        "candidatesTokenCount": 50,
+                    },
+                }
+            )
+        ]
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = gemini.call("system", "user", "key")
+        assert result["failed"] is True
+        assert "MAX_TOKENS" in result["error"]
+        assert result["raw"] == truncated
+
+    def test_api_key_redacted_in_errors(self):
+        from ci_core.llm.adapters.gemini import _redact_key
+
+        api_key = "super-secret-key-abc123"
+        error_with_key = f"HTTPError at https://example.com?key={api_key} returned 500"
+        redacted = _redact_key(error_with_key, api_key)
+        assert api_key not in redacted
+        assert "[REDACTED]" in redacted
+
+    def test_key_not_redacted_when_absent(self):
+        from ci_core.llm.adapters.gemini import _redact_key
+
+        result = _redact_key("Some generic error message", "mykey")
+        assert result == "Some generic error message"
+
+    def test_timeout_error_message_is_domain_agnostic(self, caplog):
+        # gemini.call() is invoked once per (model, domain) pair but is never told
+        # which domain it's running (see pipeline.py's _run_domain — no domain arg
+        # is passed to adapter.call()). The read-gap timeout log line must not name
+        # a specific domain (e.g. "fact-check") since it would be wrong whenever
+        # Gemini runs any other domain, such as completeness.
+        from ci_core.llm.adapters import gemini
+
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = requests.exceptions.Timeout(
+                "Read timed out."
+            )
+            with caplog.at_level("ERROR"):
+                result = gemini.call("system", "user", "key")
+
+        assert result["failed"] is True
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "fact-check" not in error_text.lower(), (
+            f"log message names a specific domain the adapter doesn't know: {error_text!r}"
+        )
+        assert "stream_read_timeout" in error_text, (
+            f"log message should point at stream_read_timeout (the actual read-gap "
+            f"control), not timeout_seconds: {error_text!r}"
+        )
+
+    def test_maximum_preset_gemini_has_stream_read_timeout_override(self):
+        # The maximum preset stacks grounding (search) with thinking_budget: 16000
+        # (extended reasoning) — two independent silent-period sources. A live
+        # Vertex AI run timed out at 205.78s against the bare grounded default of
+        # 160s. Guard against that config regressing back to the bare default.
+        from ci_article_review.config_loader import _COST_PRESETS
+
+        gemini_cfg = _COST_PRESETS["maximum"]["models"]["gemini"]
+        assert gemini_cfg.get("thinking_budget") == 16000
+        assert gemini_cfg.get("stream_read_timeout", 0) > 160, (
+            "maximum preset's gemini entry combines grounding with thinking_budget "
+            "and needs a stream_read_timeout override above the bare 160s grounded "
+            "default — see the 205.78s live timeout this regresses against."
+        )
+
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line for both the grounded and (after
+        # retrying without grounding) plain payload attempts. Gemini's error
+        # body carries the real reason (invalid key, revoked, suspended, etc.).
+        from ci_core.llm.adapters import gemini
+
+        body_text = json.dumps(
+            {
+                "error": {
+                    "code": 401,
+                    "message": "API key not valid",
+                    "status": "UNAUTHENTICATED",
+                }
+            }
+        )
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = gemini.call(
+                    "system", "user", "sk-test-fakesecret12345", retry=False
+                )
+        assert result["failed"] is True
+        assert "API key not valid" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "API key not valid" in error_text
+
+
+# ---------------------------------------------------------------------------
+# Grok adapter
+# ---------------------------------------------------------------------------
+
+
+class TestGrok:
+    def _mock_response(self, content_dict):
+        return _sse_mock(
+            _sse_chat_lines(
+                content_dict, usage={"prompt_tokens": 90, "completion_tokens": 45}
+            )
+        )
+
+    def test_successful_call(self):
+        from ci_core.llm.adapters import grok
+
+        content = {
+            "most_vulnerable_claim": {
+                "passage": "test",
+                "attack_vector": "x",
+                "supporting_evidence_for_attack": "y",
+            },
+            "highest_audience_risk": {
+                "passage": "test",
+                "risk": "z",
+                "audience_segment": "all",
+            },
+            "highest_credibility_risk": {
+                "passage": "test",
+                "risk": "w",
+                "attack_vector": "v",
+            },
+        }
+        with patch("ci_core.llm.adapters.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = grok.call("system", "user", "key")
+        assert result["failed"] is False
+        assert "most_vulnerable_claim" in result["data"]
+        assert "elapsed_seconds" in result
+
+    def test_failed_call(self):
+        from ci_core.llm.adapters import grok
+
+        with patch("ci_core.llm.adapters.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = Exception("Connection refused")
+            result = grok.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "elapsed_seconds" in result
+
+    def test_model_override(self):
+        from ci_core.llm.adapters import grok
+
+        content = {
+            "most_vulnerable_claim": {},
+            "highest_audience_risk": {},
+            "highest_credibility_risk": {},
+        }
+        with patch("ci_core.llm.adapters.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = grok.call("system", "user", "key", model="grok-2-latest")
+        assert result["model"] == "grok-2-latest"
+
+    def test_401_captures_response_body(self, caplog):
+        # raise_for_status() alone only gives the bare status line ("401 Client
+        # Error: Unauthorized"), which can't distinguish an invalid key from a
+        # revoked one, insufficient credits, or a suspended account. The provider's
+        # JSON body carries that distinction — it must show up in the log and in
+        # the returned failure dict, not just the status line.
+        from ci_core.llm.adapters import grok
+
+        body_text = json.dumps(
+            {
+                "error": {
+                    "message": "Incorrect API key provided",
+                    "code": "invalid_api_key",
+                }
+            }
+        )
+        with patch("ci_core.llm.adapters.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = grok.call(
+                    "system", "user", "sk-test-fakesecret12345", retry=False
+                )
+        assert result["failed"] is True
+        assert "Incorrect API key provided" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "Incorrect API key provided" in error_text
+
+
+# ---------------------------------------------------------------------------
+# Claude adapter
+# ---------------------------------------------------------------------------
+
+
+class TestClaude:
+    def _mock_response(self, content_dict):
+        return _sse_mock(
+            _sse_anthropic_lines(content_dict, input_tokens=100, output_tokens=50)
+        )
+
+    def test_successful_call(self):
+        from ci_core.llm.adapters import claude
+
+        content = {
+            "flags": [
+                {
+                    "passage": "test",
+                    "problem": "weak logic",
+                    "suggested_rewrite": "stronger",
+                }
+            ],
+            "low_confidence": [],
+        }
+        with patch("ci_core.llm.adapters.claude.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = claude.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"]["flags"][0]["passage"] == "test"
+        assert result["tokens"]["prompt"] == 100
+        assert result["tokens"]["completion"] == 50
+        assert "elapsed_seconds" in result
+        # stream must be requested in the Anthropic request body.
+        assert mock_session.post.call_args.kwargs["json"]["stream"] is True
+
+    def test_thinking_deltas_excluded(self):
+        # Adaptive/extended reasoning streams thinking_delta events; only text_delta
+        # forms the answer JSON.
+        from ci_core.llm.adapters import claude
+
+        text = json.dumps({"flags": [], "low_confidence": []})
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "type": "message_start",
+                    "message": {"usage": {"input_tokens": 100, "output_tokens": 0}},
+                }
+            ),
+            "",
+            "data: "
+            + json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "weighing..."},
+                }
+            ),
+            "",
+            "data: "
+            + json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {"type": "text_delta", "text": text},
+                }
+            ),
+            "",
+            "data: "
+            + json.dumps(
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 42},
+                }
+            ),
+        ]
+        with patch("ci_core.llm.adapters.claude.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = claude.call("system", "user", "key")
+        assert result["failed"] is False
+        assert result["data"] == {"flags": [], "low_confidence": []}
+        assert result["tokens"]["completion"] == 42  # from message_delta
+
+    def test_failed_call(self):
+        from ci_core.llm.adapters import claude
+
+        with patch("ci_core.llm.adapters.claude.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = Exception("Connection error")
+            result = claude.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "elapsed_seconds" in result
+
+    def test_malformed_json(self):
+        from ci_core.llm.adapters import claude
+
+        with patch("ci_core.llm.adapters.claude.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(
+                _sse_anthropic_lines("not json at all")
+            )
+            result = claude.call("system", "user", "key")
+        assert result["failed"] is True
+        assert result["raw"] == "not json at all"
+
+    def test_model_override(self):
+        from ci_core.llm.adapters import claude
+
+        content = {"flags": [], "low_confidence": []}
+        with patch("ci_core.llm.adapters.claude.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = self._mock_response(content)
+            result = claude.call("system", "user", "key", model="claude-sonnet-4-5")
+        assert result["model"] == "claude-sonnet-4-5"
+
+    def test_401_captures_response_body(self, caplog):
+        # See TestGrok.test_401_captures_response_body: raise_for_status() alone
+        # only yields the bare status line, not the reason. Anthropic's error body
+        # distinguishes an invalid key from other causes of a 401.
+        from ci_core.llm.adapters import claude
+
+        body_text = json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "invalid x-api-key",
+                },
+            }
+        )
+        with patch("ci_core.llm.adapters.claude.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = claude.call(
+                    "system", "user", "sk-test-fakesecret12345", retry=False
+                )
+        assert result["failed"] is True
+        assert "invalid x-api-key" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "invalid x-api-key" in error_text
+
+
+# ---------------------------------------------------------------------------
+# Perplexity JSON extraction (sonar-reasoning-pro <think> preambles / fences)
+# ---------------------------------------------------------------------------
+
+
+class TestPerplexityExtractJson:
+    def test_plain_json(self):
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        assert _extract_json('{"flags": []}') == {"flags": []}
+
+    def test_code_fence(self):
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        assert _extract_json('```json\n{"flags": [1]}\n```') == {"flags": [1]}
+
+    def test_think_preamble(self):
+        # The observed failure mode: a reasoning block before the JSON.
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        raw = '<think>\nLet me reason about this claim...\nstep two\n</think>\n{"verdict": "confirmed"}'
+        assert _extract_json(raw) == {"verdict": "confirmed"}
+
+    def test_prose_before_and_after(self):
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        raw = 'Here is my analysis:\n{"a": 1, "b": [2, 3]}\nHope that helps!'
+        assert _extract_json(raw) == {"a": 1, "b": [2, 3]}
+
+    def test_unrecoverable_returns_none(self):
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        assert _extract_json("no json here at all") is None
+        assert _extract_json("") is None
+
+    def test_multiple_think_blocks(self):
+        # sonar-reasoning-pro can emit more than one <think> block.
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        raw = (
+            "<think>first pass</think>\n"
+            "<think>second pass, reconsidering</think>\n"
+            '{"verdict": "confirmed"}'
+        )
+        assert _extract_json(raw) == {"verdict": "confirmed"}
+
+    def test_think_block_containing_braces_does_not_corrupt_span_match(self):
+        # A reasoning block that itself mentions braces (e.g. discussing the
+        # target JSON schema) must not widen the outermost-{...} span past the
+        # real payload.
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        raw = (
+            '<think>The schema should look like {"verdict": ...} '
+            "so I need to produce that.</think>\n"
+            '{"verdict": "confirmed"}'
+        )
+        assert _extract_json(raw) == {"verdict": "confirmed"}
+
+    def test_worst_case_think_fence_and_leading_prose(self):
+        # The documented worst case: leading prose, a <think> block, AND a
+        # markdown fence, all in the same response.
+        from ci_core.llm.adapters.perplexity import _extract_json
+
+        raw = (
+            "Sure, here is my analysis.\n"
+            "<think>\nLet me think about the claim: {this is not json}\n</think>\n"
+            "```json\n"
+            '{"verdict": "confirmed", "citations": [1, 2]}\n'
+            "```\n"
+            "Let me know if you need anything else!"
+        )
+        assert _extract_json(raw) == {
+            "verdict": "confirmed",
+            "citations": [1, 2],
+        }
+
+
+class TestPerplexityStreamFailures:
+    """Full call() coverage for failure shapes upstream of JSON parsing.
+
+    Perplexity's observed live failure had zero captured token usage — unlike
+    Gemini's, which had full usage. That points to a failure earlier in the
+    response pipeline than "got text, couldn't parse it as JSON". These tests
+    cover the two upstream shapes: an SSE stream that produces no usable
+    content at all, and an in-band {"error": ...} event instead of choices.
+    """
+
+    def test_empty_stream_reports_distinct_error_not_malformed_json(self):
+        from ci_core.llm.adapters import perplexity
+
+        # A stream that produces no choices/content and no usage at all —
+        # e.g. a dropped connection after headers but before any data.
+        lines = ["data: " + json.dumps({}), "data: [DONE]"]
+        with patch(
+            "ci_core.llm.adapters.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert result["error"] != "Malformed JSON response"
+        assert "empty" in result["error"].lower()
+        assert result["tokens"] == {}
+
+    def test_inband_stream_error_event_reported_distinctly(self):
+        from ci_core.llm.adapters import perplexity
+
+        lines = [
+            "data: "
+            + json.dumps({"error": {"message": "rate limit exceeded", "code": 429}}),
+            "data: [DONE]",
+        ]
+        with patch(
+            "ci_core.llm.adapters.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "rate limit exceeded" in result["error"]
+        assert result["error"] != "Malformed JSON response"
+
+    def test_inband_400_invalid_request_logs_payload_diagnostics(self, caplog):
+        # Live occurrence (2026-08-06): perplexity:voice_style at the maximum
+        # preset got a 400 invalid_request in-band SSE error with no field-level
+        # detail. On that shape specifically, the adapter should log a redacted
+        # excerpt of the outgoing payload so a recurrence is diagnosable without
+        # another investigation.
+        from ci_core.llm.adapters import perplexity
+
+        lines = [
+            "data: "
+            + json.dumps(
+                {
+                    "error": {
+                        "message": "invalid request",
+                        "type": "invalid_request",
+                        "code": 400,
+                    }
+                }
+            ),
+            "data: [DONE]",
+        ]
+        with patch(
+            "ci_core.llm.adapters.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            with caplog.at_level("ERROR"):
+                result = perplexity.call(
+                    "voice/style system prompt",
+                    "user draft content",
+                    "sk-secret-key",
+                    retry=False,
+                )
+        assert result["failed"] is True
+        assert "invalid request" in result["error"]
+        diagnostic_logs = "\n".join(
+            r.message for r in caplog.records if "invalid_request payload" in r.message
+        )
+        assert "voice/style system prompt" in diagnostic_logs
+        assert "user draft content" in diagnostic_logs
+        assert "sk-secret-key" not in diagnostic_logs
+
+    def test_payload_has_no_extraneous_keys_for_voice_style_config(self):
+        # Guards against pipeline-internal config keys (timeout_seconds, prompts,
+        # enabled, etc.) leaking into the actual request body — the request must
+        # only ever carry parameters Perplexity's API accepts.
+        from ci_core.llm.adapters import perplexity
+
+        captured = {}
+
+        def _capture_post(url, headers, json, stream, timeout):
+            captured["payload"] = json
+            lines = _sse_chat_lines('{"flags": []}')
+            return _sse_mock(lines)
+
+        with patch(
+            "ci_core.llm.adapters.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.side_effect = _capture_post
+            perplexity.call(
+                "system prompt for voice_style" * 50,
+                "user draft" * 500,
+                "key",
+                retry=False,
+                provider_config={
+                    "model": "sonar-reasoning-pro",
+                    "prompts": ["voice_style"],
+                    "timeout_seconds": 375,
+                    "enabled": True,
+                    "reasoning_effort": "medium",
+                },
+            )
+
+        payload = captured["payload"]
+        assert set(payload.keys()) <= {
+            "model",
+            "messages",
+            "temperature",
+            "stream",
+            "stream_options",
+            "reasoning_effort",
+        }
+        assert payload["model"] == "sonar-reasoning-pro"
+        assert payload["reasoning_effort"] == "medium"
+        assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+        assert payload["messages"][0]["content"].startswith(
+            "system prompt for voice_style"
+        )
+        assert "response_format" not in payload
+
+    def test_genuine_malformed_json_still_reported_as_such(self):
+        # Content was received (and usage captured) but doesn't parse as JSON
+        # even after the extraction fallbacks -- this remains "Malformed JSON
+        # response" and still carries the raw text for diagnostics.
+        from ci_core.llm.adapters import perplexity
+
+        lines = _sse_chat_lines(
+            "This is prose with no JSON payload anywhere in it at all.",
+            usage={"prompt_tokens": 50, "completion_tokens": 20},
+        )
+        with patch(
+            "ci_core.llm.adapters.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(lines)
+            result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert result["error"] == "Malformed JSON response"
+        assert (
+            result["raw"] == "This is prose with no JSON payload anywhere in it at all."
+        )
+        assert result["tokens"] == {"prompt_tokens": 50, "completion_tokens": 20}
+
+    def test_401_captures_response_body(self, caplog):
+        # Live occurrence (2026-08-09): Perplexity started returning 401 with no
+        # code changes on our side. raise_for_status() alone gives only "401
+        # Client Error: Unauthorized", which can't distinguish an invalid key
+        # from a revoked one, insufficient credits, or a suspended account —
+        # the provider's JSON body carries that distinction and must be
+        # captured, not just the bare status line.
+        from ci_core.llm.adapters import perplexity
+
+        body_text = json.dumps(
+            {"error": {"message": "Invalid API key", "type": "invalid_request_error"}}
+        )
+        with patch(
+            "ci_core.llm.adapters.perplexity.requests.Session"
+        ) as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _error_mock(401, body_text)
+            with caplog.at_level("ERROR"):
+                result = perplexity.call("system", "user", "key", retry=False)
+        assert result["failed"] is True
+        assert "Invalid API key" in result["error_body"]
+        error_text = " ".join(r.message for r in caplog.records)
+        assert "Invalid API key" in error_text
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch — verify correct backend is selected
+# ---------------------------------------------------------------------------
+
+
+class TestProviderDispatch:
+    """Verify that provider_config routes each adapter to the right backend."""
+
+    # --- Gemini ---
+
+    def test_gemini_default_uses_aistudio(self):
+        from ci_core.llm.adapters import gemini
+
+        with (
+            patch("ci_core.llm.adapters.gemini._call_aistudio") as mock_ai,
+            patch("ci_core.llm.adapters.gemini._call_vertex") as mock_vx,
+        ):
+            mock_ai.return_value = {
+                "failed": False,
+                "data": {},
+                "model": "x",
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+            gemini.call("sys", "usr", "key", retry=False)
+        mock_ai.assert_called_once()
+        mock_vx.assert_not_called()
+
+    def test_gemini_vertex_ai_dispatches_to_vertex(self):
+        from ci_core.llm.adapters import gemini
+
+        cfg = {
+            "provider": "vertex_ai",
+            "model": "gemini-2.5-flash",
+            "project": "p",
+            "location": "us-central1",
+        }
+        with (
+            patch("ci_core.llm.adapters.gemini._call_vertex") as mock_vx,
+            patch("ci_core.llm.adapters.gemini._call_aistudio") as mock_ai,
+        ):
+            mock_vx.return_value = {
+                "failed": False,
+                "data": {},
+                "model": "x",
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+            gemini.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        mock_vx.assert_called_once()
+        mock_ai.assert_not_called()
+
+    def test_gemini_model_from_provider_config(self):
+        """Model name in provider_config is used when no explicit model arg is passed."""
+        from ci_core.llm.adapters import gemini
+
+        cfg = {"provider": "ai_studio", "model": "gemini-2.5-pro"}
+        captured = {}
+
+        def fake_aistudio(sys, usr, key, model, **kw):
+            captured["model"] = model
+            return {
+                "failed": False,
+                "data": {},
+                "model": model,
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+
+        with patch(
+            "ci_core.llm.adapters.gemini._call_aistudio",
+            side_effect=fake_aistudio,
+        ):
+            gemini.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        assert captured["model"] == "gemini-2.5-pro"
+
+    # --- OpenAI ---
+
+    def test_openai_default_uses_openai_backend(self):
+        from ci_core.llm.adapters import openai as oai
+
+        with (
+            patch("ci_core.llm.adapters.openai._call_openai") as mock_oa,
+            patch("ci_core.llm.adapters.openai._call_azure") as mock_az,
+        ):
+            mock_oa.return_value = {
+                "failed": False,
+                "data": {},
+                "model": "x",
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+            oai.call("sys", "usr", "key", retry=False)
+        mock_oa.assert_called_once()
+        mock_az.assert_not_called()
+
+    def test_openai_azure_dispatches_to_azure(self):
+        from ci_core.llm.adapters import openai as oai
+
+        cfg = {
+            "provider": "azure",
+            "model": "gpt-4o",
+            "endpoint": "https://res.openai.azure.com",
+            "deployment": "my-dep",
+        }
+        with (
+            patch("ci_core.llm.adapters.openai._call_azure") as mock_az,
+            patch("ci_core.llm.adapters.openai._call_openai") as mock_oa,
+        ):
+            mock_az.return_value = {
+                "failed": False,
+                "data": {},
+                "model": "x",
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+            oai.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        mock_az.assert_called_once()
+        mock_oa.assert_not_called()
+
+    def test_openai_azure_missing_endpoint_returns_failure(self):
+        from ci_core.llm.adapters import openai as oai
+
+        cfg = {"provider": "azure", "model": "gpt-4o"}  # no endpoint or deployment
+        result = oai.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        assert result["failed"] is True
+        assert (
+            "endpoint" in result["error"].lower()
+            or "deployment" in result["error"].lower()
+        )
+
+    # --- Mistral ---
+
+    def test_mistral_default_uses_laplateforme(self):
+        from ci_core.llm.adapters import mistral
+
+        with (
+            patch("ci_core.llm.adapters.mistral._call_laplateforme") as mock_lp,
+            patch("ci_core.llm.adapters.mistral._call_azure") as mock_az,
+        ):
+            mock_lp.return_value = {
+                "failed": False,
+                "data": {},
+                "model": "x",
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+            mistral.call("sys", "usr", "key", retry=False)
+        mock_lp.assert_called_once()
+        mock_az.assert_not_called()
+
+    def test_mistral_azure_dispatches_to_azure(self):
+        from ci_core.llm.adapters import mistral
+
+        cfg = {
+            "provider": "azure",
+            "model": "mistral-large-latest",
+            "endpoint": "https://Mistral-Large-abc.eastus2.inference.ai.azure.com",
+        }
+        with (
+            patch("ci_core.llm.adapters.mistral._call_azure") as mock_az,
+            patch("ci_core.llm.adapters.mistral._call_laplateforme") as mock_lp,
+        ):
+            mock_az.return_value = {
+                "failed": False,
+                "data": {},
+                "model": "x",
+                "tokens": {},
+                "elapsed_seconds": 0,
+            }
+            mistral.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        mock_az.assert_called_once()
+        mock_lp.assert_not_called()
+
+    def test_mistral_azure_missing_endpoint_returns_failure(self):
+        from ci_core.llm.adapters import mistral
+
+        cfg = {"provider": "azure", "model": "mistral-large-latest"}  # no endpoint
+        result = mistral.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        assert result["failed"] is True
+        assert "endpoint" in result["error"].lower()
+
+    # --- Grok (no enterprise tier yet — just verify provider_config accepted) ---
+
+    def test_grok_accepts_provider_config_without_error(self):
+        from ci_core.llm.adapters import grok
+
+        content = {
+            "most_vulnerable_claim": {},
+            "highest_audience_risk": {},
+            "highest_credibility_risk": {},
+        }
+        cfg = {"provider": "grok", "model": "grok-3-latest"}
+        with patch("ci_core.llm.adapters.grok.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(
+                _sse_chat_lines(
+                    content, usage={"prompt_tokens": 10, "completion_tokens": 5}
+                )
+            )
+            result = grok.call("sys", "usr", "key", retry=False, provider_config=cfg)
+        assert result["failed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Cross-adapter: the streaming read-gap timeout reaches the HTTP transport
+# ---------------------------------------------------------------------------
+#
+# Under streaming the socket timeout changed meaning: it is now the (connect,
+# read-gap) tuple where read-gap is the MAX STALL BETWEEN TOKENS, a small constant
+# — NOT the sliding-scale timeout_seconds (which is now only the pipeline's
+# wall-clock backstop). This guards the whole class of adapters at once:
+#   1. every adapter passes stream=True and a (connect, read) tuple to .post();
+#   2. the read-gap is the per-adapter constant, NOT inflated by timeout_seconds;
+#   3. a per-model stream_read_timeout override is honored.
+# Every review adapter shares the requests.Session().post(stream=, timeout=) shape.
+
+# (module path, a representative model id). Default ai_studio path for gemini
+# avoids the google.auth flow (vertex), keeping the harness uniform.
+_REVIEW_ADAPTERS = [
+    ("ci_core.llm.adapters.openai", "gpt-5.5"),
+    ("ci_core.llm.adapters.grok", "grok-4.20-0309-reasoning"),
+    ("ci_core.llm.adapters.mistral", "mistral-medium-3-5"),
+    ("ci_core.llm.adapters.perplexity", "sonar-reasoning-pro"),
+    ("ci_core.llm.adapters.claude", "claude-opus-4-8"),
+    ("ci_core.llm.adapters.gemini", "gemini-2.5-flash"),
+]
+
+# Per-adapter default inter-token read-gap (seconds) when stream_read_timeout is
+# NOT set. Grounded adapters (Gemini, Perplexity) default higher because the live
+# web search runs before the first token arrives.
+_DEFAULT_READ_GAPS = {
+    "ci_core.llm.adapters.openai": 120,
+    "ci_core.llm.adapters.grok": 120,
+    "ci_core.llm.adapters.mistral": 120,
+    "ci_core.llm.adapters.perplexity": 160,
+    "ci_core.llm.adapters.claude": 120,
+    "ci_core.llm.adapters.gemini": 160,
+}
+
+
+def _universal_sse_response():
+    """A streamed response mock valid for every adapter's accumulator, so exactly
+    one POST happens and no fallback/retry path is triggered. Carries an empty-JSON
+    answer plus a usage chunk in each provider's SSE shape."""
+    lines = [
+        # OpenAI / Grok / Mistral / Perplexity (chat completions delta)
+        "data: " + json.dumps({"choices": [{"delta": {"content": "{}"}}]}),
+        "data: "
+        + json.dumps(
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+        ),
+        # Anthropic messages events
+        "data: "
+        + json.dumps(
+            {
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 1, "output_tokens": 0}},
+            }
+        ),
+        "data: "
+        + json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "{}"},
+            }
+        ),
+        "data: "
+        + json.dumps(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 1},
+            }
+        ),
+        # Gemini streamGenerateContent chunk
+        "data: "
+        + json.dumps(
+            {
+                "candidates": [{"content": {"parts": [{"text": "{}"}]}}],
+                "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+            }
+        ),
+        "data: [DONE]",
+    ]
+    return _sse_mock(lines)
+
+
+class TestStreamingTimeoutAcrossAdapters:
+    @pytest.mark.parametrize("module_name,model", _REVIEW_ADAPTERS)
+    def test_streams_with_read_gap_not_inflated_by_timeout_seconds(
+        self, module_name, model
+    ):
+        import importlib
+
+        mod = importlib.import_module(module_name)
+        sess = MagicMock()
+        sess.post.return_value = _universal_sse_response()
+        with patch(f"{module_name}.requests.Session", return_value=sess):
+            # A huge timeout_seconds must NOT become the socket read timeout.
+            mod.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": model, "timeout_seconds": 819},
+            )
+        assert sess.post.called, f"{module_name}: .post() was never called"
+        kwargs = sess.post.call_args.kwargs
+        assert kwargs.get("stream") is True, f"{module_name} did not pass stream=True"
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, tuple) and len(timeout) == 2, (
+            f"{module_name} must pass a (connect, read) tuple under streaming — got {timeout!r}"
+        )
+        read_gap = timeout[1]
+        assert read_gap == _DEFAULT_READ_GAPS[module_name], (
+            f"{module_name} read-gap should be the constant "
+            f"{_DEFAULT_READ_GAPS[module_name]}s regardless of timeout_seconds=819 — got {read_gap!r}. "
+            f"timeout_seconds must not inflate the inter-token socket timeout."
+        )
+
+    @pytest.mark.parametrize("module_name,model", _REVIEW_ADAPTERS)
+    def test_default_read_gap_when_unset(self, module_name, model):
+        import importlib
+
+        mod = importlib.import_module(module_name)
+        sess = MagicMock()
+        sess.post.return_value = _universal_sse_response()
+        with patch(f"{module_name}.requests.Session", return_value=sess):
+            mod.call("system", "user", "key", provider_config={"model": model})
+        timeout = sess.post.call_args.kwargs.get("timeout")
+        assert timeout[1] == _DEFAULT_READ_GAPS[module_name], (
+            f"{module_name} default read-gap changed — got {timeout[1]!r}, "
+            f"expected {_DEFAULT_READ_GAPS[module_name]}"
+        )
+
+    @pytest.mark.parametrize("module_name,model", _REVIEW_ADAPTERS)
+    def test_stream_read_timeout_override_honored(self, module_name, model):
+        import importlib
+
+        mod = importlib.import_module(module_name)
+        sess = MagicMock()
+        sess.post.return_value = _universal_sse_response()
+        with patch(f"{module_name}.requests.Session", return_value=sess):
+            mod.call(
+                "system",
+                "user",
+                "key",
+                provider_config={"model": model, "stream_read_timeout": 222},
+            )
+        timeout = sess.post.call_args.kwargs.get("timeout")
+        assert timeout[1] == 222, (
+            f"{module_name} ignored stream_read_timeout override — got {timeout[1]!r} (expected 222)"
+        )

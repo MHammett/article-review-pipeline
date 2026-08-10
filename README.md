@@ -4,14 +4,20 @@ Content Intelligence is a [uv](https://docs.astral.sh/uv/) workspace of tools fo
 producing and reviewing written content. Code lives under `packages/`, one package
 per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
 
-- **ci-core** (`ci_core`) — shared library. What it actually provides to the other
-  packages today is `ci_core.http` (the platform `USER_AGENT` and `DEFAULT_HEADERS`,
-  imported by ci-article-review's link, webpage, and citation fetchers). It also
-  contains an async LLM adapter layer (`ci_core.llm`), settings (`ci_core.config`),
-  and SQLAlchemy persistence (`ci_core.db`, `ci_core.models`, driven by `alembic/`) —
-  those are implemented and tested but not yet wired into any package's runtime path.
-  ci-article-review still uses its own provider adapters under
-  `adapters/review/` and its own YAML config loader.
+- **ci-core** (`ci_core`) — the shared foundation both application packages build on.
+  It owns the LLM layer (`ci_core.llm`: the six streaming provider adapters, SSE
+  handling, robust JSON extraction, cost estimation, the sliding-scale timeout model,
+  and the model registry), outbound HTTP identity (`ci_core.http`), secret redaction
+  (`ci_core.redact`), and the shared config helpers (`ci_core.config_helpers`). The
+  provider/model reference data those read — `pricing.yaml`, `timeouts.yaml`,
+  `model_registry.yaml` — lives in `ci_core/configs/` alongside its loaders.
+  Dependencies flow one way, and the applications do not depend on each other; see
+  [docs/NAMING.md](docs/NAMING.md#dependency-direction).
+
+  It also carries settings (`ci_core.config`), SQLAlchemy persistence (`ci_core.db`,
+  `ci_core.models`) and structured logging (`ci_core.logging`), driven by `alembic/`.
+  Those are implemented and tested but have no production consumers yet — nothing
+  outside ci-core's own tests and `alembic/env.py` imports them.
 - **ci-article-review** (`ci_article_review`) — the article-review pipeline: runs a
   drafted or already-published article through grammar correction and ensemble
   multi-model AI review, then publishes to WordPress on approval. The mature package.
@@ -270,21 +276,12 @@ content-intelligence/
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs
-│   │   │   ├── model_registry.py      loads configs/model_registry.yaml — current/superseded detection
-│   │   │   ├── timeout_model.py       sliding-scale per-call timeout from size × model × effort
 │   │   │   ├── probe.py               lightweight provider reachability probe
-│   │   │   ├── redact.py              scrubs API keys from error output before logging/printing
+│   │   │   │                          (the provider adapters, timeout model, model
+│   │   │   │                          registry, cost, and redaction live in ci-core)
 │   │   │   │
 │   │   │   ├── adapters/
 │   │   │   │   ├── grammar/languagetool.py   grammar correction (Pass 1)
-│   │   │   │   ├── review/gemini.py          fact verification with live search
-│   │   │   │   ├── review/openai.py          voice/style, completeness, optional web search
-│   │   │   │   ├── review/mistral.py         argument integrity and red team
-│   │   │   │   ├── review/perplexity.py      search-grounded fact-check (optional)
-│   │   │   │   ├── review/grok.py            red team — contrarian corpus (optional)
-│   │   │   │   ├── review/claude.py          argument integrity — independent lineage (optional)
-│   │   │   │   ├── review/json_utils.py      shared robust JSON extraction (fences, think-preambles)
-│   │   │   │   ├── review/streaming.py       streaming response helpers
 │   │   │   │   ├── cms/wordpress.py          WordPress REST API publisher
 │   │   │   │   └── citation/
 │   │   │   │       ├── resolver.py           primary source resolution, checksums, confidence tiers
@@ -297,25 +294,36 @@ content-intelligence/
 │   │   │   │   ├── readability.py     Flesch-Kincaid grade, word count, sentence stats
 │   │   │   │   ├── links.py           URL extraction, HTTP status check, Wayback archive check
 │   │   │   │   ├── seo.py             title length, heading structure, meta description
-│   │   │   │   ├── webpage.py         webpage fetch/extraction helpers
-│   │   │   │   └── cost.py            token-based cost estimation with per-model pricing table
+│   │   │   │   └── webpage.py         webpage fetch/extraction helpers
 │   │   │   │
 │   │   │   ├── prompts/               system prompts for each review domain
-│   │   │   ├── configs/               committed defaults: presets.yaml, pricing.yaml,
-│   │   │   │                          timeouts.yaml, model_registry.yaml, *.example.yaml
-│   │   │   │                          (real user.yaml + publication.yaml are gitignored)
+│   │   │   ├── configs/               committed defaults: presets.yaml + *.example.yaml
+│   │   │   │                          (real user.yaml + publication.yaml are gitignored;
+│   │   │   │                          pricing/timeouts/model_registry live in ci-core)
 │   │   │   └── handoff_templates/     fill these out to submit drafts and publish
 │   │   └── tests/                     pipeline test suite, all external calls mocked
 │   │
-│   ├── ci-core/                  shared library (only ci_core.http is wired in — see above)
+│   ├── ci-core/                  the shared foundation both applications import
 │   │   ├── pyproject.toml
 │   │   ├── src/ci_core/
-│   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS — the part actually in use
-│   │   │   ├── llm/              async provider adapters + factory (not yet consumed)
-│   │   │   ├── config.py         pydantic settings (not yet consumed)
-│   │   │   ├── db.py             async SQLAlchemy engine/session (not yet consumed)
-│   │   │   ├── models.py         ORM models (not yet consumed)
-│   │   │   └── logging.py
+│   │   │   ├── llm/
+│   │   │   │   ├── adapters/     the six streaming provider adapters + call_provider/
+│   │   │   │   │                 call_text dispatch (claude, gemini, grok, mistral,
+│   │   │   │   │                 openai, perplexity)
+│   │   │   │   ├── streaming.py       SSE accumulation and read-gap timeouts
+│   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,
+│   │   │   │   │                      truncation salvage)
+│   │   │   │   ├── cost.py            token-based cost estimation
+│   │   │   │   ├── timeout_model.py   sliding-scale timeout from size × model × effort
+│   │   │   │   └── model_registry.py  current/superseded model detection
+│   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
+│   │   │   ├── redact.py         scrubs API keys from error output before logging
+│   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
+│   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml
+│   │   │   ├── config.py         pydantic settings (no production consumer yet)
+│   │   │   ├── db.py             async SQLAlchemy engine/session (no production consumer yet)
+│   │   │   ├── models.py         ORM models (no production consumer yet)
+│   │   │   └── logging.py        structured logging (no production consumer yet)
 │   │   └── tests/
 │   │
 │   └── ci-style-profile/         style-profile bootstrapping (see PLAN.md)

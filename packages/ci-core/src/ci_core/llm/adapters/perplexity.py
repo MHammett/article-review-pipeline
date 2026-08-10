@@ -22,9 +22,9 @@ import time
 import logging
 import requests
 
-from . import streaming
+from .. import streaming
 from ... import redact
-from .json_utils import extract_json as _extract_json
+from ..json_utils import extract_json as _extract_json
 
 DEFAULT_MODEL = "sonar-reasoning-pro"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -299,6 +299,7 @@ def _call_perplexity(
     )
     return {
         "failed": False,
+        "raw": content,
         "data": parsed,
         "model": model,
         "tokens": {

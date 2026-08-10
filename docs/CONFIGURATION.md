@@ -5,11 +5,14 @@ Configuration lives in several files:
 - `configs/user.yaml` — your API keys, model selection, and pipeline behavior (gitignored, never committed)
 - `configs/your_publication_name.yaml` — per-publication settings: voice profile, audience, WordPress credentials
 - `configs/presets.yaml` — cost preset model assignments; edit to update model names without touching code
-- `configs/pricing.yaml` — per-million-token pricing for cost estimation; update when providers change prices
-- `configs/model_registry.yaml` — model deprecation tracking; edit to add superseded entries and bump the date
-- `configs/timeouts.yaml` — sliding-scale timeout model (size × model × effort multipliers)
 
-The first two are gitignored and have example templates you copy (`user.example.yaml`, `publication.example.yaml`, plus worked examples in `configs/examples/`). The other four are committed defaults — they ship with the repo and *are* their own reference; edit them in place, no copy step.
+Three more are provider/model reference data rather than review settings, so they live in `ci-core` next to the shared LLM layer that reads them (`packages/ci-core/src/ci_core/configs/`):
+
+- `pricing.yaml` — per-million-token pricing for cost estimation; update when providers change prices
+- `model_registry.yaml` — model deprecation tracking; edit to add superseded entries and bump the date
+- `timeouts.yaml` — sliding-scale timeout model (size × model × effort multipliers)
+
+The first two are gitignored and have example templates you copy (`user.example.yaml`, `publication.example.yaml`, plus worked examples in `configs/examples/`). The rest are committed defaults — they ship with the repo and *are* their own reference; edit them in place, no copy step.
 
 ---
 
@@ -179,7 +182,7 @@ The two silent-period causes **stack** when a model does both at once. The `maxi
 
 #### Wall-clock backstop is automatic (sliding scale)
 
-You normally don't set timeouts at all. After pre-analysis, the pipeline sizes each model's **wall-clock backstop** from the draft's **character count**, the **model**, and the **reasoning effort**, using the multiplier tables in [`configs/timeouts.yaml`](../packages/ci-article-review/src/ci_article_review/configs/timeouts.yaml):
+You normally don't set timeouts at all. After pre-analysis, the pipeline sizes each model's **wall-clock backstop** from the draft's **character count**, the **model**, and the **reasoning effort**, using the multiplier tables in [`ci-core`'s `timeouts.yaml`](../packages/ci-core/src/ci_core/configs/timeouts.yaml):
 
 ```
 effective = clamp( base × size_mult × model_mult × effort_mult × variance_margin,  floor,  task_timeout_seconds − 15 )
@@ -743,7 +746,7 @@ Note: model registry last updated 2026-06-18 (73 days ago). Consider re-checking
 
 **Keeping the registry current:**
 
-The registry lives in [`configs/model_registry.yaml`](../packages/ci-article-review/src/ci_article_review/configs/model_registry.yaml). After any provider model audit:
+The registry lives in [`ci-core`'s `model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml). After any provider model audit:
 1. Add entries to `superseded:` for models that have been replaced
 2. Update `newer_available:` for current models that have newer variants
 3. Bump `registry_date:` to today's date

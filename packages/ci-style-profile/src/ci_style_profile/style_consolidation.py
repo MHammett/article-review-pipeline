@@ -12,7 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from ci_article_review.adapters.review.json_utils import extract_json
+from ci_core.llm.json_utils import extract_json
 from .callers import call_one
 
 log = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ def consolidate_detection(
     is a list of StyleCluster-shaped dicts (caller converts to StyleCluster
     objects). Returns ``None`` if consolidation could not be performed.
     """
-    from ci_article_review.config_loader import _normalize_model_configs
+    from ci_core.config_helpers import normalize_model_configs
 
     w = weights or DEFAULT_STYLE_WEIGHTS
 
@@ -132,7 +132,7 @@ def consolidate_detection(
         return None
 
     # Always use Claude for reconciliation
-    models_cfg = _normalize_model_configs(user_config.get("models", {}))
+    models_cfg = normalize_model_configs(user_config.get("models", {}))
     claude_cfg = models_cfg.get("claude")
     if not claude_cfg:
         log.error(

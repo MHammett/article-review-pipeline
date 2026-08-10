@@ -64,12 +64,12 @@ from .handoff_parser import (
 )
 from . import history as hist
 from . import consolidation
-from . import redact
-from .model_registry import check_model_currency
-from . import timeout_model
+from ci_core import redact
+from ci_core.llm.model_registry import check_model_currency
+from ci_core.llm import timeout_model
 from .analysis import readability as readability_analysis
 from .analysis import seo as seo_analysis
-from .analysis import cost as cost_analysis
+from ci_core.llm import cost as cost_analysis
 from .analysis.webpage import build_handoff_from_url
 
 log = logging.getLogger("pipeline")
@@ -95,12 +95,12 @@ _DOMAIN_PROMPTS: dict[str, str] = {
 
 #: Maps model names to their adapter module path.
 _ADAPTER_MODULES: dict[str, str] = {
-    "gemini": "ci_article_review.adapters.review.gemini",
-    "openai": "ci_article_review.adapters.review.openai",
-    "mistral": "ci_article_review.adapters.review.mistral",
-    "grok": "ci_article_review.adapters.review.grok",
-    "claude": "ci_article_review.adapters.review.claude",
-    "perplexity": "ci_article_review.adapters.review.perplexity",
+    "gemini": "ci_core.llm.adapters.gemini",
+    "openai": "ci_core.llm.adapters.openai",
+    "mistral": "ci_core.llm.adapters.mistral",
+    "grok": "ci_core.llm.adapters.grok",
+    "claude": "ci_core.llm.adapters.claude",
+    "perplexity": "ci_core.llm.adapters.perplexity",
 }
 
 #: Which models run which domains at each thoroughness level.

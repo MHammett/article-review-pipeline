@@ -46,7 +46,7 @@ import time
 import logging
 import requests
 
-from . import streaming
+from .. import streaming
 from ... import redact
 
 DEFAULT_MODEL = "gpt-5.4"
@@ -305,6 +305,7 @@ def _call_with_web_search(
     log.debug(f"OpenAI (web search) {model} call succeeded in {elapsed}s")
     return {
         "failed": False,
+        "raw": content,
         "data": parsed,
         "model": f"{model}+search",
         "tokens": {
@@ -559,6 +560,7 @@ def _execute_openai_responses(
     log.debug(f"OpenAI {model} call succeeded in {elapsed}s")
     return {
         "failed": False,
+        "raw": content,
         "data": parsed,
         "model": model,
         "tokens": tokens,
@@ -648,6 +650,7 @@ def _execute_request(
     )
     return {
         "failed": False,
+        "raw": content,
         "data": parsed,
         "model": model,
         "tokens": {
