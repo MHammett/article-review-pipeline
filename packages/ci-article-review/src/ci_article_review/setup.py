@@ -15,7 +15,6 @@ from pathlib import Path
 
 
 _EXAMPLE_DIR = Path(__file__).parent / "configs"
-_ENV_EXAMPLE = Path(__file__).parents[5] / ".env.example"  # repo root
 
 
 def _repo_root() -> Path:
@@ -182,14 +181,16 @@ def main() -> None:
         step += 1
 
     print(f"\n{step}. Verify all credentials work:")
-    print(
-        f"   uv run python -m ci_article_review.check --publication {publication_name}"
-    )
+    print(f"   uv run ci-check --publication {publication_name}")
     step += 1
 
+    # One line, console-script form: the docs standardised on `uv run ci-review`
+    # (PR #51), and a trailing backslash is a bash continuation that splits the
+    # command on Windows cmd.exe — which is the documented primary platform.
     print(f"\n{step}. Run the pipeline:")
-    print("   uv run python -m ci_article_review.pipeline \\")
-    print(f"       --draft path/to/handoff.md --publication {publication_name}")
+    print(
+        f"   uv run ci-review --draft path/to/handoff.md --publication {publication_name}"
+    )
     print()
 
 
