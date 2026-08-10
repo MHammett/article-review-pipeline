@@ -35,6 +35,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml as _yaml
+from dotenv import load_dotenv
+
+# sources.yaml and user.yaml resolve ${ENV_VAR} placeholders via
+# ci_core.config_helpers, which reads os.environ — so the .env file has to be
+# loaded before either is read. This used to happen implicitly: the config
+# helpers were imported from ci_article_review.config_loader, which calls
+# load_dotenv() at import time. That import is gone, so do it explicitly here.
+load_dotenv()
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +68,9 @@ def _load_sources_yaml() -> dict:
     except Exception as e:
         log.error("Failed to load sources.yaml: %s", e)
         return {}
-    from ci_article_review.config_loader import _resolve_env_recursive
+    from ci_core.config_helpers import resolve_env_recursive
 
-    return _resolve_env_recursive(data)
+    return resolve_env_recursive(data)
 
 
 def _load_presets() -> dict:
@@ -159,15 +167,15 @@ def _apply_preset(
 
 def _load_user_config_lenient() -> dict:
     """Load user.yaml without strict validation (style profiler works with any model subset)."""
-    from ci_article_review.config_loader import _load_yaml, _resolve_env_recursive
+    from ci_core.config_helpers import load_yaml, resolve_env_recursive
 
     path = Path("configs/user.yaml")
     if not path.exists():
         log.warning("configs/user.yaml not found; no API models available")
         return {}
     try:
-        config = _load_yaml(str(path))
-        config = _resolve_env_recursive(config or {})
+        config = load_yaml(str(path))
+        config = resolve_env_recursive(config or {})
         return config
     except Exception as e:
         log.warning("Could not load user.yaml: %s", e)
@@ -501,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Check model currency
     try:
-        from ci_article_review.model_registry import check_model_currency
+        from ci_core.llm.model_registry import check_model_currency
 
         warnings = check_model_currency(user_config.get("models", {}))
         for w in (warnings or {}).values():

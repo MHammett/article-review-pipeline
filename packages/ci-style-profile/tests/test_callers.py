@@ -28,10 +28,12 @@ def _anthropic_sse(text: str) -> list[str]:
 
 
 def _openai_sse(text: str) -> list[str]:
+    """Responses API (/v1/responses) typed events — what the openai.com backend streams."""
     t = _json.dumps(text)
     return [
-        f'data: {{"choices": [{{"delta": {{"content": {t}}}, "finish_reason": null}}]}}',
-        'data: {"usage": {"prompt_tokens": 100, "completion_tokens": 20}}',
+        f'data: {{"type": "response.output_text.delta", "delta": {t}}}',
+        'data: {"type": "response.completed", "response": {"usage": '
+        '{"input_tokens": 100, "output_tokens": 20}}}',
         "data: [DONE]",
     ]
 
@@ -111,7 +113,7 @@ class TestCallOneAnthropic:
 
 class TestCallOneOpenAI:
     def test_openai_success(self):
-        """call_one OpenAI: mock chat completions SSE → correct content."""
+        """call_one OpenAI: mock Responses API SSE → correct content."""
         from ci_style_profile.callers import call_one, clear_api_call_log
 
         clear_api_call_log()
@@ -240,6 +242,82 @@ class TestCallAll:
         assert called == ["claude"]
         assert "openai" not in results
         assert "gemini" not in results
+
+    def test_call_all_applies_wall_clock_backstop(self):
+        """A call that overruns its budget is reported as a timeout, not awaited.
+
+        Under streaming the socket timeout is only the inter-token read gap, so
+        a model that keeps dribbling tokens needs a wall-clock bound on top.
+        """
+        import time
+
+        from ci_style_profile.callers import call_all, clear_api_call_log
+
+        clear_api_call_log()
+
+        def _slow_call_one(model_name, *a, **kw):
+            time.sleep(2)
+            return {
+                "content": "too late",
+                "failed": False,
+                "tokens": {},
+                "elapsed": 2.0,
+            }
+
+        with (
+            patch("ci_style_profile.callers.call_one", side_effect=_slow_call_one),
+            patch(
+                "ci_style_profile.callers.timeout_model.compute_all",
+                return_value={"claude": 0.2},
+            ),
+        ):
+            started = time.monotonic()
+            results = call_all(
+                system_prompt="s",
+                user_prompt="u",
+                user_config=_MOCK_USER_CONFIG,
+                models=["claude"],
+            )
+            gave_up_after = time.monotonic() - started
+
+        assert results["claude"]["failed"] is True
+        assert "backstop" in results["claude"]["error"]
+        assert results["claude"]["elapsed"] == 0.2
+        # Reported back well before the call itself finished.
+        assert gave_up_after < 1.5
+
+    def test_call_all_uses_per_model_backstops_from_timeout_model(self):
+        """Budgets come from the shared sliding-scale model, sized on prompt length."""
+        from ci_style_profile.callers import call_all, clear_api_call_log
+
+        clear_api_call_log()
+        seen = {}
+
+        def _capture(char_count, model_configs, ceiling, **kw):
+            seen["char_count"] = char_count
+            seen["models"] = sorted(model_configs)
+            seen["ceiling"] = ceiling
+            return {name: 30 for name in model_configs}
+
+        def _fake_call_one(model_name, *a, **kw):
+            return {"content": "", "failed": False, "tokens": {}, "elapsed": 0.0}
+
+        with (
+            patch("ci_style_profile.callers.call_one", side_effect=_fake_call_one),
+            patch(
+                "ci_style_profile.callers.timeout_model.compute_all",
+                side_effect=_capture,
+            ),
+        ):
+            call_all(
+                system_prompt="s" * 100,
+                user_prompt="u" * 400,
+                user_config=_MOCK_USER_CONFIG,
+            )
+
+        assert seen["char_count"] == 500
+        assert seen["models"] == ["claude", "gemini", "openai"]
+        assert seen["ceiling"] > 0
 
     def test_call_all_excludes_perplexity(self):
         """Perplexity is excluded by default."""

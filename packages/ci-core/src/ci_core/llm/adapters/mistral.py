@@ -27,8 +27,8 @@ import time
 import logging
 import requests
 
-from . import streaming
-from .json_utils import extract_json_with_salvage
+from .. import streaming
+from ..json_utils import extract_json_with_salvage
 from ... import redact
 
 DEFAULT_MODEL = "mistral-large-latest"
@@ -404,6 +404,7 @@ def _execute_request(
         )
     result = {
         "failed": False,
+        "raw": content,
         "data": parsed,
         "model": model,
         "tokens": {
@@ -416,7 +417,6 @@ def _execute_request(
         # Not "failed" — the recovered findings are real — but flagged so
         # downstream reporting can distinguish this from a clean response.
         result["truncated"] = True
-        result["raw"] = content
     if misconfig_msg:
         result["misconfiguration_warning"] = misconfig_msg
     return result

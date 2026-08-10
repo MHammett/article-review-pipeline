@@ -8,7 +8,7 @@ import requests
 
 from ci_core.http import DEFAULT_HEADERS
 
-from ... import redact
+from ci_core import redact
 
 log = logging.getLogger(__name__)
 

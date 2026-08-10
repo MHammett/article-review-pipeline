@@ -38,7 +38,7 @@ import time
 import logging
 import requests
 
-from . import streaming
+from .. import streaming
 from ... import redact
 
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -324,6 +324,7 @@ def _call_model(
     )
     return {
         "failed": False,
+        "raw": text,
         "data": parsed,
         "model": model,
         "tokens": {

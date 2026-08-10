@@ -121,7 +121,7 @@ _STALE_WARNING_DAYS_FALLBACK = 120
 
 
 def _load_registry():
-    yaml_path = Path(__file__).parent / "configs" / "model_registry.yaml"
+    yaml_path = Path(__file__).parent.parent / "configs" / "model_registry.yaml"
     if not yaml_path.exists():
         return (
             _SUPERSEDED_FALLBACK,
@@ -170,6 +170,14 @@ def _load_registry():
     _STALE_NOTICE_DAYS,
     _STALE_WARNING_DAYS,
 ) = _load_registry()
+
+# Public aliases for the loaded registry tables. These cross a package boundary
+# (ci-article-review's `ci-discover` reports on them), so they carry public
+# names — see docs/NAMING.md, "Dependency direction". The underscored names
+# above are kept because the parity tests and this module's own internals refer
+# to them alongside their _FALLBACK counterparts.
+SUPERSEDED = _SUPERSEDED
+NEWER_AVAILABLE = _NEWER_AVAILABLE
 
 
 # ---------------------------------------------------------------------------

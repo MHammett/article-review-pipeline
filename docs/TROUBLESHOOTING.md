@@ -117,7 +117,7 @@ The `prompts:` key survives `cost_preset` overrides — you only need to set thi
 These models use adaptive thinking, not extended thinking. Use `effort: low/medium/high` instead of `thinking_budget`. See [CONFIGURATION.md](CONFIGURATION.md#claude--adaptive-vs-extended-thinking).
 
 **Claude times out on long articles**  
-Timeouts are sized automatically (see [the sliding-scale model](CONFIGURATION.md#timeouts-are-automatic-sliding-scale)) — Claude gets a budget from draft size × model × effort like every other provider, so you don't normally set one. If Opus 4.8 at high effort still times out on a very long article, raise `variance_margin` in `configs/timeouts.yaml` or add a `claude` entry to `model_multipliers` there. As a last resort, set `timeout_seconds` explicitly on the Claude model in `user.yaml` to override the formula.
+Timeouts are sized automatically (see [the sliding-scale model](CONFIGURATION.md#timeouts-are-automatic-sliding-scale)) — Claude gets a budget from draft size × model × effort like every other provider, so you don't normally set one. If Opus 4.8 at high effort still times out on a very long article, raise `variance_margin` in ci-core's `timeouts.yaml` or add a `claude` entry to `model_multipliers` there. As a last resort, set `timeout_seconds` explicitly on the Claude model in `user.yaml` to override the formula.
 
 ---
 
@@ -131,11 +131,11 @@ Your API key or username is wrong. Log in to languagetool.org and check your acc
 ## Pipeline behavior
 
 **A model pass timed out**  
-Timeouts are sized automatically by the sliding-scale model in `configs/timeouts.yaml` — you don't hand-set them per model. Each call's budget is `base × size_mult × model_mult × effort_mult × variance_margin`, clamped to `pipeline.task_timeout_seconds − 15`. See [CONFIGURATION.md](CONFIGURATION.md#timeouts-are-automatic-sliding-scale).
+Timeouts are sized automatically by the sliding-scale model in ci-core's `timeouts.yaml` — you don't hand-set them per model. Each call's budget is `base × size_mult × model_mult × effort_mult × variance_margin`, clamped to `pipeline.task_timeout_seconds − 15`. See [CONFIGURATION.md](CONFIGURATION.md#timeouts-are-automatic-sliding-scale).
 
 If a pass still times out, in order of preference:
 
-1. **Raise `variance_margin`** in `configs/timeouts.yaml` (default `1.25`). This lifts *every* model's budget proportionally — the right move when timeouts are generally tight. It trades a longer worst-case wait for fewer truncations.
+1. **Raise `variance_margin`** in ci-core's `timeouts.yaml` (default `1.25`). This lifts *every* model's budget proportionally — the right move when timeouts are generally tight. It trades a longer worst-case wait for fewer truncations.
 2. **Bump that model's effort multiplier** in `timeouts.yaml` if only one model/effort cell is affected (e.g. `xhigh`).
 3. **Raise `pipeline.task_timeout_seconds`** if the computed value is being clamped (the log line `Timeouts (N chars): …` shows each model's budget; if it equals `task_timeout_seconds − 15`, it's clamped).
 4. **Override one model** by setting `timeout_seconds` explicitly on it in `user.yaml` — that value wins and skips the formula entirely.

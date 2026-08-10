@@ -1,6 +1,6 @@
 """Tests for the sliding-scale timeout model."""
 
-import ci_article_review.timeout_model as tm
+import ci_core.llm.timeout_model as tm
 
 CEILING = 1200  # task_timeout_seconds headroom; formula clamps to CEILING - 15
 ANCHOR = 62000  # calibration doc size (the 1.0 size bucket)

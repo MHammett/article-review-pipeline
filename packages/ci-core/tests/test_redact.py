@@ -1,6 +1,6 @@
 """Tests for redact — secret scrubbing before error output."""
 
-from ci_article_review.redact import redact_url_keys, redact_value, truncate_excerpt
+from ci_core.redact import redact_url_keys, redact_value, truncate_excerpt
 
 
 class TestRedactUrlKeys:
