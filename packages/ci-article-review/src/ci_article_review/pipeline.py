@@ -1477,7 +1477,31 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     )
     if markdown_path:
         print(f"Readable review (paste into chat): {markdown_path}")
+        _print_next_step(markdown_path)
     print("=" * 60)
+
+
+def _print_next_step(markdown_path):
+    """Point at the revision prompt that pairs with the review just written.
+
+    The packaged templates live inside the installed package, so the path is
+    neither guessable nor the same as the user's own handoff_templates/
+    directory (which holds their articles, not these templates). Resolving it
+    here — at the one moment the next step is obviously relevant — beats
+    copying the template into the working tree, where it would drift out of
+    sync with the shipped version.
+    """
+    prompt_path = (
+        Path(__file__).parent / "handoff_templates" / "revise_after_review_prompt.md"
+    )
+    if not prompt_path.exists():
+        return
+    print(
+        "\nNext step — revise the draft and reconcile its metadata in one pass:\n"
+        f"  1. Open  {prompt_path}\n"
+        "  2. Paste that prompt into a chat session, followed by the review above.\n"
+        "  3. Save the revised draft + metadata it returns, then re-run."
+    )
 
 
 # ---------------------------------------------------------------------------
