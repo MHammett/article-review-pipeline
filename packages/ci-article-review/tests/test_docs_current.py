@@ -12,6 +12,7 @@ that needs updating — the point is that whoever trips one can fix it in a minu
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -282,10 +283,46 @@ _INLINE_CODE = re.compile(r"`[^`\n]*`")
 _MD_LINK = re.compile(r"(?<!!)\[[^\]\n]*\]\(([^)\s]+)\)")
 
 
+def _tracked_markdown_files():
+    """Markdown files tracked by git, or None if git can't answer.
+
+    "The repo's docs" means the files git tracks — not every .md on disk. A
+    plain ``**/*.md`` walk also picks up untracked and ignored trees, and the
+    one that bites is a **nested git worktree**: this project's tooling creates
+    them under ``.claude/worktrees/`` (git-excluded via ``.git/info/exclude``),
+    each holding a full second copy of the docs at whatever commit that branch
+    sits on. A stale copy there would fail these guards even when every tracked
+    doc is correct — and it would only fail *locally*, since CI checks out a
+    clean tree with no nested worktrees. Asking git avoids that whole class of
+    false positive, and covers ``.venv``/build output for free.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "*.md"],
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [REPO_ROOT / name for name in out.split("\0") if name]
+
+
 def _markdown_files():
+    tracked = _tracked_markdown_files()
+    if tracked is not None:
+        yield from sorted(p for p in tracked if p.is_file())
+        return
+
+    # Fallback for a source tree with no usable git (release tarball, vendored
+    # copy). Skips the known-noisy directories by name; less precise than
+    # git ls-files, which is why it is only the fallback.
     for path in sorted(REPO_ROOT.glob("**/*.md")):
         parts = path.relative_to(REPO_ROOT).parts
-        if any(p in {".git", ".venv", "node_modules", "__pycache__"} for p in parts):
+        if any(
+            p in {".git", ".claude", ".venv", "node_modules", "__pycache__"}
+            for p in parts
+        ):
             continue
         yield path
 
