@@ -24,6 +24,71 @@ _ARCHIVE_URL_RE = re.compile(
     r"https?://web\.archive\.org/web/(\d{4,14})(?:[a-z_]*)?/", re.IGNORECASE
 )
 
+#: HTTP statuses where the origin is reachable but refuses to serve *us* the
+#: document. The resource itself is not claimed to be gone, so reading
+#: archive.org's copy answers the question the origin declined to.
+#:
+#: Deliberately excluded:
+#:   404 / 410 — the resource is genuinely gone. Surfacing that is the whole
+#:     point of link validation; an archive copy would mask a real problem the
+#:     author has to fix by re-sourcing the claim.
+#:   5xx — the origin's own failure, not a refusal aimed at us. A transient 5xx
+#:     will be fine by the time a reader clicks, and a persistent one means the
+#:     source needs replacing; standing in an archived copy hides both. (A 5xx
+#:     is also the shape a misconfigured origin returns for a page it no longer
+#:     has, so treating it as "reachable content" is not safe.)
+_FALLBACK_STATUSES = {
+    401: "auth_required",
+    403: "blocked",
+    # Rate limiting is transient in a way the others aren't, but it is still
+    # "the origin won't serve us right now" rather than "this is gone", and a
+    # run shouldn't report a good link as broken because we asked too fast.
+    # The distinct reason label keeps that visible in the report.
+    429: "rate_limited",
+}
+
+#: Human-readable phrasing for each reason, for report output.
+FALLBACK_REASON_LABELS = {
+    "auth_required": "401 auth required",
+    "blocked": "403 blocked",
+    "rate_limited": "429 rate limited",
+    "timeout": "origin timed out",
+    "unreachable": "origin unreachable",
+}
+
+
+def fallback_reason_for_status(status):
+    """Reason label if an HTTP ``status`` warrants an archive fallback, else None.
+
+    See ``_FALLBACK_STATUSES`` for what is in scope and, more importantly, what
+    is deliberately not.
+    """
+    return _FALLBACK_STATUSES.get(status)
+
+
+def fallback_reason_for_exception(exc):
+    """Reason label if a fetch exception warrants an archive fallback, else None.
+
+    Covers the "we never reached the origin" failures — connect/read timeouts
+    and connection errors (which is where ``requests`` puts DNS resolution
+    failures). These say nothing about whether the resource exists, only that
+    we couldn't ask, so an archived copy is a legitimate substitute in exactly
+    the way it is for a 403.
+
+    An ``HTTPError`` is dispatched to ``fallback_reason_for_status`` so callers
+    with one bare ``except`` don't have to special-case it.
+    """
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = exc.response.status_code if exc.response is not None else None
+        return fallback_reason_for_status(status)
+    # Timeout first: ConnectTimeout subclasses both Timeout and ConnectionError,
+    # and "timed out" is the more specific description of it.
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "unreachable"
+    return None
+
 
 def _age_days_from_timestamp(ts):
     """Days since a Wayback timestamp (YYYYMMDD...), or None if unparseable."""

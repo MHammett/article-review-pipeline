@@ -116,7 +116,23 @@ Submission is **fire-and-forget by design**. Captures run asynchronously and can
 
 A later run's availability check will pick up the snapshot once it exists. A submission failure degrades to "still shows as unarchived" and never fails the run.
 
-**403 fallback.** When a direct fetch of a `known_url` returns 403, the pipeline makes one attempt to read an archived snapshot of that same URL instead, and uses the snapshot's content for checksumming and relevance verification. The entry records `verified_via: "wayback_fallback"` so you can tell it apart from a direct fetch. This is scoped to 403 specifically — a 404 or a 5xx resolves as unfetchable, since those don't indicate a bot block.
+**Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to read an archived snapshot of that same URL instead, and uses the snapshot's content for checksumming and relevance verification.
+
+It fires on:
+
+| Failure | Recorded `origin_failure` |
+|---|---|
+| 401 Unauthorized | `auth_required` |
+| 403 Forbidden | `blocked` |
+| 429 Too Many Requests | `rate_limited` |
+| Connect/read timeout | `timeout` |
+| DNS or connection failure | `unreachable` |
+
+It deliberately does **not** fire on 404/410 — the resource is genuinely gone, and surfacing that is the point; an archive copy would mask a problem you need to fix by re-sourcing the claim. It also does not fire on 5xx, which is the origin's own failure rather than a refusal aimed at us: a transient 5xx will be fine by the time a reader clicks, and a persistent one means the source needs replacing. Neither is helped by quietly substituting an archived copy.
+
+The entry records `verified_via: "wayback_fallback"`, the `origin_failure` reason above, and an `archive_provenance` note stating that the checksum and relevance verdict describe the archived copy, not the live page. Staleness is not suppressed: a 245-day-old snapshot that satisfied a timeout is still reported stale, and the provenance note says so.
+
+The same rules govern draft link validation (`analysis/links.py`), so a link recovered from the archive after a timeout reads `OK (via archive: origin timed out)` rather than being flattened into a plain `OK` or a bare `BROKEN`.
 
 ### archive.org credentials (optional)
 

@@ -71,6 +71,7 @@ from .analysis import readability as readability_analysis
 from .analysis import seo as seo_analysis
 from ci_core.llm import cost as cost_analysis
 from .analysis.webpage import build_handoff_from_url
+from .adapters.citation import wayback
 
 log = logging.getLogger("pipeline")
 
@@ -1256,13 +1257,16 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         links = pre.get("links", [])
         if links:
             broken = [lk for lk in links if not lk.get("ok")]
-            # A 403 with no Wayback snapshot to fall back on is likely still a
-            # live page blocking automated fetches, not a dead link — unlike a
-            # 404 or 5xx, which are confirmed-dead/origin-error. Both still
-            # count toward "broken" above (we couldn't verify the content
-            # either way), but callers should treat them differently before
-            # acting on the report.
-            blocked_403 = [lk for lk in broken if lk.get("status_code") == 403]
+            # A link we couldn't read — the origin refused us (401/403/429) or
+            # we never reached it (timeout, DNS/connection failure) — and that
+            # had no archive snapshot to fall back on is likely still a live
+            # page, unlike a 404/410, which is confirmed dead. Both count toward
+            # "broken" above (we couldn't verify the content either way), but a
+            # reader has to treat them differently before acting on the report.
+            unread = [lk for lk in broken if lk.get("origin_failure")]
+            confirmed_dead = [
+                lk for lk in broken if lk.get("status_code") in (404, 410)
+            ]
             via_archive = [
                 lk for lk in links if lk.get("verified_via") == "wayback_fallback"
             ]
@@ -1284,15 +1288,39 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             if stale_archive:
                 print(f", {len(stale_archive)} stale archive", end="")
             print()
-            if blocked_403:
+            if unread:
+                detail = ", ".join(
+                    sorted(
+                        {
+                            wayback.FALLBACK_REASON_LABELS.get(
+                                lk["origin_failure"], lk["origin_failure"]
+                            )
+                            for lk in unread
+                        }
+                    )
+                )
                 print(
-                    f"  Note: {len(blocked_403)} of the broken link(s) are 403 with no "
-                    "archive snapshot — blocked, likely still valid; verify manually. "
-                    "This is distinct from a 404, which is confirmed dead."
+                    f"  Note: {len(unread)} of the broken link(s) could not be read "
+                    f"({detail}) with no archive snapshot to fall back on — likely "
+                    "still valid; "
+                    "verify manually. This is distinct from a 404, which is "
+                    "confirmed dead."
+                )
+            if confirmed_dead:
+                print(
+                    f"  Note: {len(confirmed_dead)} of the broken link(s) returned "
+                    "404/410 — confirmed gone, and deliberately not substituted with "
+                    "an archive copy. These need re-sourcing."
                 )
             for lk in links:
                 if lk.get("verified_via") == "wayback_fallback":
-                    status = "OK (via archive)"
+                    # Never just "OK": the content came from archive.org, and
+                    # which way the origin failed changes what that means.
+                    reason = lk.get("origin_failure")
+                    label = wayback.FALLBACK_REASON_LABELS.get(reason, reason)
+                    status = (
+                        f"OK (via archive: {label})" if label else "OK (via archive)"
+                    )
                 elif lk.get("ok"):
                     status = "OK"
                 else:
@@ -1320,7 +1348,7 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
                 redirect = (
                     f" → {lk['redirected_to']}" if lk.get("redirected_to") else ""
                 )
-                print(f"  {status:30s} {lk['url'][:60]}{redirect}{extras}")
+                print(f"  {status:36s} {lk['url'][:60]}{redirect}{extras}")
 
     if report.get("api_call_log"):
         print("\nAPI call times  (elapsed / budget — headroom shows timeout margin):")
@@ -1432,6 +1460,27 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             f"(not independently verified), {len(unverifiable)} could not be verified, "
             f"{len(citations) - len(resolved)} unresolved"
         )
+        from_archive = [
+            c for c in resolved if c.get("verified_via") == "wayback_fallback"
+        ]
+        if from_archive:
+            # These were checksummed and verified against archive.org's copy,
+            # not the live page. Same tier, weaker provenance — say so rather
+            # than folding them into the verified count silently.
+            detail = ", ".join(
+                sorted(
+                    {
+                        wayback.FALLBACK_REASON_LABELS.get(
+                            c.get("origin_failure"), c.get("origin_failure") or "?"
+                        )
+                        for c in from_archive
+                    }
+                )
+            )
+            print(
+                f"  {len(from_archive)} resolved from an archive.org snapshot rather "
+                f"than the live source ({detail}) — content checked is the archived copy"
+            )
         if submitted:
             print(
                 f"  {len(submitted)} resolved URL(s) submitted for archiving "

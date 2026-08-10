@@ -410,7 +410,7 @@ pipeline:
 
 **`wayback_snapshot_stale_days`** controls when a Wayback Machine snapshot is considered stale. At 180 days (default), a snapshot from more than six months ago triggers a `[STALE]` flag and a manual re-archive recommendation. Lower this for publications with high source-freshness standards (e.g., 90 days for breaking-news adjacent pieces). It applies to both draft link validation and resolved citation URLs.
 
-Archiving is not check-only: resolved citation URLs that aren't archived yet are submitted to archive.org's Save Page Now, and a 403 on a direct fetch falls back to reading an archived snapshot. Both are covered in [CITATIONS.md](CITATIONS.md#wayback-machine-behavior).
+Archiving is not check-only: resolved citation URLs that aren't archived yet are submitted to archive.org's Save Page Now, and a fetch the origin refused (401/403/429) or that never reached it (timeout, DNS failure) falls back to reading an archived snapshot. Both are covered in [CITATIONS.md](CITATIONS.md#wayback-machine-behavior).
 
 ---
 

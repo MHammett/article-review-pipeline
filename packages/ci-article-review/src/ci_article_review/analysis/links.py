@@ -11,7 +11,11 @@ import requests
 
 from ci_core.http import DEFAULT_HEADERS
 
-from ..adapters.citation.wayback import check as wayback_check
+from ..adapters.citation.wayback import (
+    check as wayback_check,
+    fallback_reason_for_exception,
+    fallback_reason_for_status,
+)
 
 log = logging.getLogger(__name__)
 
@@ -59,13 +63,15 @@ def _is_public_host(url):
 
 
 def _wayback_fallback(url, timeout):
-    """After a direct 403, try archive.org's snapshot instead of giving up.
+    """When the origin won't (or can't) serve us the page, try archive.org's
+    snapshot instead of giving up.
 
-    archive.org serves its own cached copy, so a site blocking our fetch
-    doesn't block the archived one. Only called for 403 — a 404 means the
-    resource is genuinely gone (checking Wayback wouldn't change that) and a
-    5xx is the origin's own problem, not something Wayback can stand in for.
-    A single attempt, no retry loop.
+    archive.org serves its own cached copy, so a site blocking our fetch —
+    or a host we never reached at all — doesn't block the archived one. Which
+    failures qualify is decided by ``fallback_reason_for_status`` /
+    ``fallback_reason_for_exception`` in the wayback module; a 404 (genuinely
+    gone) and a 5xx (the origin's own problem) deliberately do not. A single
+    attempt, no retry loop.
 
     Returns the snapshot URL on success, or None if there's no snapshot or
     the snapshot itself doesn't resolve.
@@ -96,13 +102,30 @@ def _finalize_http_result(url, resp, timeout):
         "redirected_to": final_url if final_url != url else None,
         "verified_via": "direct",
     }
-    if resp.status_code == 403:
-        snapshot_url = _wayback_fallback(url, timeout)
-        if snapshot_url:
-            result["ok"] = True
-            result["verified_via"] = "wayback_fallback"
-            result["wayback_snapshot_url"] = snapshot_url
+    reason = fallback_reason_for_status(resp.status_code)
+    if reason:
+        _apply_wayback_fallback(result, url, reason, timeout)
     return result
+
+
+def _apply_wayback_fallback(result, url, reason, timeout):
+    """Try the archive fallback and, if it lands, mark ``result`` as recovered.
+
+    ``origin_failure`` records *why* the origin didn't serve us the page and is
+    set either way — a link read from the archive after a timeout stays
+    distinguishable from one read after a 403, and a link that stayed broken
+    is still distinguishable from a confirmed 404. The origin's own
+    status/error is left on the result untouched for the same reason: a
+    recovered link must never look like a clean direct fetch.
+    """
+    result["origin_failure"] = reason
+    snapshot_url = _wayback_fallback(url, timeout)
+    if not snapshot_url:
+        return False
+    result["ok"] = True
+    result["verified_via"] = "wayback_fallback"
+    result["wayback_snapshot_url"] = snapshot_url
+    return True
 
 
 def _check_http(url, timeout=_HEAD_TIMEOUT):
@@ -130,10 +153,24 @@ def _check_http(url, timeout=_HEAD_TIMEOUT):
             ) as resp:
                 return _finalize_http_result(url, resp, timeout)
         return _finalize_http_result(url, resp, timeout)
-    except requests.exceptions.Timeout:
-        return {"status_code": None, "ok": False, "error": "timeout"}
     except Exception as exc:
-        return {"status_code": None, "ok": False, "error": str(exc)}
+        return _finalize_error_result(url, exc, timeout)
+
+
+def _finalize_error_result(url, exc, timeout):
+    """Build the result for a fetch that never produced a response.
+
+    A timeout or a DNS/connection failure means we couldn't reach the origin —
+    which says nothing about whether the page exists — so these get the same
+    archive fallback a 403 does. The error stays on the result either way: a
+    recovered link is reported as read-from-archive, never as a clean fetch.
+    """
+    error = "timeout" if isinstance(exc, requests.exceptions.Timeout) else str(exc)
+    result = {"status_code": None, "ok": False, "error": error}
+    reason = fallback_reason_for_exception(exc)
+    if reason:
+        _apply_wayback_fallback(result, url, reason, timeout)
+    return result
 
 
 def _check_one(
@@ -172,9 +209,16 @@ def validate_links(
       status_code   int   — HTTP status code (None on network error)
       ok            bool  — True when status < 400
       redirected_to str   — final URL if a redirect occurred
-      error         str   — set only on network error
-      verified_via  str   — "direct", or "wayback_fallback" when a 403 on the
-                            live URL was confirmed OK via an archive.org snapshot
+      error         str   — set only on network error; still set when the link
+                            was recovered from the archive, since the origin
+                            really did fail
+      verified_via  str   — "direct", or "wayback_fallback" when the live URL
+                            couldn't be read but an archive.org snapshot could
+      origin_failure str  — why the origin didn't serve us the page, whether or
+                            not the archive fallback then succeeded: "blocked"
+                            (403), "auth_required" (401), "rate_limited" (429),
+                            "timeout", or "unreachable" (DNS/connection error).
+                            Absent for a 404/410/5xx, which get no fallback.
       wayback_snapshot_url str — the snapshot fetched, set only when verified_via
                             is "wayback_fallback"
       wayback       dict  — result from Wayback availability check (if check_wayback)

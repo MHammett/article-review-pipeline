@@ -178,7 +178,10 @@ By default the pipeline checks every URL in the article over HTTP and queries th
 The URL resolves to a private, loopback, or link-local address (e.g. `localhost`, `127.0.0.1`, `192.168.x.x`, or the cloud metadata IP `169.254.169.254`). The pipeline refuses to fetch internal hosts to avoid server-side request forgery when reviewing drafts that may contain untrusted links. If the link is legitimately internal and you trust the draft, verify it manually — the guard is intentional and not configurable.
 
 **Link shows `BROKEN` but the page loads in a browser**  
-Some servers reject automated HEAD requests (returning 403 or 405). The pipeline falls back to a GET request for 405s, but 403s are reported as-is. This is a server-side bot detection — the link is likely fine. Verify manually before removing it.
+Some servers reject automated HEAD requests (returning 403 or 405), and some are simply unreachable from where the pipeline runs (timeout, DNS failure). The pipeline falls back to a GET request for 405s, and to an archive.org snapshot for 401/403/429/timeout/DNS failures — so `BROKEN` here means there was no usable snapshot either. The summary calls these out separately from confirmed 404s. The link is likely still fine; verify manually before removing it.
+
+**Link shows `OK (via archive: …)`**  
+The live URL could not be read — the parenthetical says why (`403 blocked`, `origin timed out`, `origin unreachable`, `401 auth required`, `429 rate limited`) — but archive.org had a snapshot the pipeline could read. The link is not confirmed working right now, only confirmed to have existed. If the snapshot is also flagged `[STALE]`, the content you're citing may have moved on. Worth a manual look before publishing, especially for a primary source.
 
 **Wayback Machine shows `Not archived` for a valid URL**  
 The Wayback Machine hasn't crawled that URL yet, or the URL is behind a login. Consider requesting archival at https://web.archive.org/save/ before publishing — it's a single form submission. The pipeline flags this in the summary so you can act on it.
