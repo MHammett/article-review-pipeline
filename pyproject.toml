@@ -4,6 +4,10 @@ members = ["packages/*"]
 [dependency-groups]
 dev = [
     "pytest>=7.4.0,<9.0",
+    # ci-core's persistence cluster is an optional extra for end users (audit
+    # finding 13) but must stay installed for development, so its tests keep
+    # running in CI rather than silently skipping.
+    "ci-core[persistence]",
     "pre-commit>=3.0",
     "mypy>=1.9",
     "ruff>=0.4",
@@ -11,6 +15,11 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx2>=2.4.0",
 ]
+
+[tool.uv.sources]
+# The dev group depends on the workspace's own ci-core (for its persistence
+# extra), so uv needs to be told to resolve it from the workspace.
+ci-core = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

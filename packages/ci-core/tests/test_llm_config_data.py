@@ -29,48 +29,81 @@ def _load(name):
 
 
 # ---------------------------------------------------------------------------
-# Parity: YAML (as loaded by the module) == hardcoded fallback
+# Validity, not parity
 # ---------------------------------------------------------------------------
+#
+# These used to assert that each YAML matched a duplicate hardcoded table in
+# Python (audit finding 14). Four such pairs existed, and every pricing or
+# timeout edit had to be made twice or CI failed — on the config surface that
+# changes most often.
+#
+# The duplicates are gone: the YAML is the single source of truth and the
+# loaders raise PackagedConfigError if it is missing or malformed. A parity test
+# only ever proved two copies matched, never that either was *usable*, so these
+# check the thing that actually matters instead.
 
 
-class TestPricingParity:
-    def test_loaded_pricing_matches_fallback(self):
+class TestPackagedConfigsAreValid:
+    def test_pricing_loads_with_entries(self):
         from ci_core.llm import cost
 
-        assert cost._PRICING == cost._PRICING_FALLBACK, (
-            "configs/pricing.yaml has drifted from _PRICING_FALLBACK in llm/cost.py — "
-            "update both or the fallback will serve stale prices when the YAML is missing."
-        )
+        assert cost._PRICING, "pricing.yaml produced an empty table"
+        for model, pair in cost._PRICING.items():
+            assert len(pair) == 2, f"{model} price is not a pair"
+            assert all(isinstance(v, float) and v >= 0 for v in pair), (
+                f"{model} has a negative or non-numeric price: {pair}"
+            )
 
-    def test_loaded_unknown_price_matches_fallback(self):
+    def test_unknown_price_is_a_positive_pair(self):
         from ci_core.llm import cost
 
-        assert cost._UNKNOWN_PRICE == cost._UNKNOWN_PRICE_FALLBACK
+        assert len(cost._UNKNOWN_PRICE) == 2
+        assert all(v > 0 for v in cost._UNKNOWN_PRICE)
 
+    def test_timeout_size_buckets_ascend_and_end_open(self):
+        """The bucket order decides which multiplier a draft gets.
 
-class TestRegistryParity:
-    def test_superseded_matches_fallback(self):
-        import ci_core.llm.model_registry as mr
-
-        assert mr._SUPERSEDED == mr._SUPERSEDED_FALLBACK, (
-            "configs/model_registry.yaml superseded: has drifted from "
-            "_SUPERSEDED_FALLBACK in model_registry.py."
-        )
-
-    def test_newer_available_matches_fallback(self):
-        import ci_core.llm.model_registry as mr
-
-        assert mr._NEWER_AVAILABLE == mr._NEWER_AVAILABLE_FALLBACK
-
-
-class TestTimeoutParity:
-    def test_loaded_timeouts_match_fallback(self):
+        A parity test could not catch a mis-ordered bucket, because it would
+        happily match a mis-ordered duplicate.
+        """
         import ci_core.llm.timeout_model as tm
 
-        assert tm._CONFIG == tm._FALLBACK, (
-            "configs/timeouts.yaml has drifted from _FALLBACK in timeout_model.py — "
-            "update both or a missing YAML will silently use stale timeout multipliers."
-        )
+        buckets = tm._CONFIG["size_multipliers"]
+        limits = [b.get("max_chars") for b in buckets]
+        assert limits[-1] is None, "final bucket must be open-ended (max_chars: null)"
+        finite = [x for x in limits[:-1]]
+        assert all(x is not None for x in finite), "only the last bucket may be open"
+        assert finite == sorted(finite), f"size buckets are not ascending: {finite}"
+
+    def test_timeout_multipliers_are_positive(self):
+        import ci_core.llm.timeout_model as tm
+
+        for section in ("model_multipliers", "effort_multipliers"):
+            for key, value in tm._CONFIG[section].items():
+                assert float(value) > 0, f"{section}.{key} must be positive"
+
+    def test_a_missing_packaged_file_raises_rather_than_degrading(self, tmp_path):
+        """The state the old fallbacks existed for — now reported, not hidden.
+
+        Silently serving a stale pricing table in a broken install gives the
+        user quietly wrong cost numbers instead of a fixable message.
+        """
+        import pytest
+
+        from ci_core.config_helpers import PackagedConfigError, load_packaged_yaml
+
+        with pytest.raises(PackagedConfigError, match="missing"):
+            load_packaged_yaml(tmp_path / "does-not-exist.yaml")
+
+    def test_a_malformed_packaged_file_raises(self, tmp_path):
+        import pytest
+
+        from ci_core.config_helpers import PackagedConfigError, load_packaged_yaml
+
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("just a string, not a mapping", encoding="utf-8")
+        with pytest.raises(PackagedConfigError, match="not a YAML mapping"):
+            load_packaged_yaml(bad)
 
 
 # ---------------------------------------------------------------------------

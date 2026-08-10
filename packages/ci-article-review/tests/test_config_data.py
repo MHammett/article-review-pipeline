@@ -28,19 +28,51 @@ def _load(name):
         return yaml.safe_load(f)
 
 
-class TestPresetParity:
-    def test_loaded_presets_match_fallback(self):
-        from ci_article_review.config_loader import (
-            _load_presets_from_yaml,
-            _COST_PRESETS,
+class TestPresetsAreValid:
+    """Validity, not parity (audit finding 14).
+
+    This used to assert configs/presets.yaml matched a duplicate _COST_PRESETS
+    dict in config_loader.py, so every model-name change had to be made twice.
+    The duplicate is gone; the YAML is the single source of truth and the loader
+    raises if it is missing or malformed. A parity test only proved two copies
+    agreed, never that either was usable — these check that instead.
+    """
+
+    def test_every_documented_preset_exists(self):
+        from ci_article_review.config_loader import _load_presets_from_yaml
+
+        presets = _load_presets_from_yaml()
+        expected = {"economy", "standard", "balanced", "thorough", "maximum"}
+        assert expected <= set(presets), (
+            f"presets.yaml is missing: {sorted(expected - set(presets))}. "
+            "These are the choices offered by --cost-preset."
         )
 
-        loaded = _load_presets_from_yaml()
-        assert loaded is not None, "configs/presets.yaml failed to load"
-        assert loaded == _COST_PRESETS, (
-            "configs/presets.yaml has drifted from _COST_PRESETS in config_loader.py — "
-            "update both or a missing YAML will silently run stale preset models."
-        )
+    def test_each_preset_names_a_known_thoroughness(self):
+        from ci_article_review.config_loader import _load_presets_from_yaml
+
+        for name, body in _load_presets_from_yaml().items():
+            assert body.get("thoroughness") in {"standard", "thorough", "maximum"}, (
+                f"preset {name!r} has an unknown thoroughness "
+                f"{body.get('thoroughness')!r}"
+            )
+
+    def test_each_preset_configures_only_real_providers(self):
+        from ci_article_review.config_loader import _load_presets_from_yaml
+        from ci_article_review.pipeline import _ADAPTER_MODULES
+
+        for name, body in _load_presets_from_yaml().items():
+            unknown = set(body.get("models", {})) - set(_ADAPTER_MODULES)
+            assert not unknown, f"preset {name!r} names unknown providers: {unknown}"
+
+    def test_a_missing_presets_file_raises_rather_than_degrading(self, tmp_path):
+        import pytest
+
+        from ci_core.config_helpers import PackagedConfigError
+        from ci_article_review.config_loader import _load_presets_from_yaml
+
+        with pytest.raises(PackagedConfigError):
+            _load_presets_from_yaml(config_dir=tmp_path)
 
 
 class TestPresetsStructure:

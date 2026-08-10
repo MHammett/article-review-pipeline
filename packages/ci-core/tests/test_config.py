@@ -1,6 +1,19 @@
 """Tests for ci_core.config — all external state controlled via monkeypatch."""
 
 import pytest
+
+# ci_core.config/.db/.models/.logging moved behind the `persistence` extra
+# (audit finding 13): they have no production consumer, and making them
+# mandatory meant every CLI user installed an async PostgreSQL driver and an
+# ASGI web framework for a tool that never serves HTTP. Skip cleanly when the
+# extra is absent; CI installs it, so coverage is unchanged there.
+pytest.importorskip(
+    "pydantic_settings",
+    reason="ci-core[persistence] not installed — uv sync --extra persistence",
+)
+
+
+import pytest
 from pydantic import ValidationError
 
 from ci_core.config import (

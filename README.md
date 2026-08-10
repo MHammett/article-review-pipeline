@@ -18,7 +18,18 @@ per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
   It also carries settings (`ci_core.config`), SQLAlchemy persistence (`ci_core.db`,
   `ci_core.models`) and structured logging (`ci_core.logging`), driven by `alembic/`.
   Those are implemented and tested but have no production consumers yet — nothing
-  outside ci-core's own tests and `alembic/env.py` imports them.
+  outside ci-core's own tests and `alembic/env.py` imports them. Because of that
+  they live behind an optional extra rather than being installed for everyone:
+
+  ```powershell
+  uv sync --extra persistence
+  ```
+
+  A normal `uv sync` skips them, so a plain install no longer pulls an async
+  PostgreSQL driver (`asyncpg`, which builds a C extension) or an ASGI web
+  framework (`starlette`) for a command-line tool. Their tests skip cleanly when
+  the extra is absent; the dev dependency group installs it, so CI coverage is
+  unchanged.
 - **ci-article-review** (`ci_article_review`) — the article-review pipeline: runs a
   drafted or already-published article through grammar correction and ensemble
   multi-model AI review, then publishes to WordPress on approval. The mature package.
