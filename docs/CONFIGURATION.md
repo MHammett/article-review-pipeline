@@ -718,7 +718,7 @@ Anthropic / Claude  (configured: claude-opus-4-8)
 **After discovery, to update your configured model:**
 1. Edit `models:` in `configs/user.yaml` (or update the `cost_preset` which sets models automatically)
 2. Run `python check.py --publication your_pub` to verify the new model responds
-3. Optionally update `model_registry.py` to add the old model to `_SUPERSEDED`
+3. Optionally add the old model to `superseded:` in [`model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml)
 
 ---
 
