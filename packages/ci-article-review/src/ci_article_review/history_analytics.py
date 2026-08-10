@@ -438,7 +438,12 @@ def print_history_report(result):
     print()
 
 
-def main():
+def build_parser():
+    """Construct the CLI parser.
+
+    Split out of main() so tests can introspect the flags without running the
+    report — see tests/test_docs_current.py.
+    """
     parser = argparse.ArgumentParser(
         description="Article Review Pipeline — cross-run history analytics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -474,6 +479,11 @@ def main():
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
     )
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     logging.basicConfig(

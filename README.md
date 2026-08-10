@@ -191,6 +191,33 @@ What it reports:
 
 It reads `pipeline_history/` fresh every time — no database, no index. Reports missing a field are treated as "not enough history" rather than an error, since the report schema has grown over time.
 
+### Recurring voice patterns
+
+The review pipeline flags AI-speak in `section_3_voice` fresh on every run, so the same tic gets caught and re-litigated article after article. `ci-voice-patterns` reads the same `pipeline_history/` files and reports the patterns that keep recurring — the ones that have earned a permanent `style_rules.banned_words` / `banned_phrases` entry instead:
+
+```powershell
+uv run ci-voice-patterns --publication NAME --config configs/NAME.yaml
+```
+
+| Flag | Purpose |
+|---|---|
+| `--history-root DIR` | Directory containing per-article run history (default `pipeline_history`) |
+| `--publication NAME` | Scope to reports whose `publication` field matches this value |
+| `--config PATH` | Publication config YAML to read existing `style_rules.banned_words`/`banned_phrases` from, so already-banned patterns are excluded (read-only, never modified) |
+| `--min-articles N` | Minimum distinct articles a pattern must appear in to be reported (default 3) |
+| `--similarity-threshold N` | Normalized-text similarity ratio (0-1) for two findings to count as the same pattern (default 0.82) |
+| `--json` | Print the raw result as JSON instead of the console summary |
+| `--verbose`, `-v` | DEBUG logging |
+
+What it reports:
+
+- **Recurring flagged passages** — candidate `banned_phrases` entries: the actual passage text that keeps getting flagged across articles.
+- **Recurring voice problems** — the same critique showing up repeatedly, which points at a pattern worth reviewing even when the wording differs each time.
+
+Both are clustered with a normalized-text `difflib` similarity check rather than any NLP/ML clustering — the goal is surfacing obvious repeats, not perfect semantic dedup. A pattern must appear in at least `--min-articles` *distinct* articles to qualify, so one model flagging the same phrase twice in a single draft isn't cross-article evidence.
+
+It is a suggestion report only. Nothing is written to `pipeline_history/` or to any publication config — a human decides whether each candidate actually becomes a rule.
+
 ---
 
 ## Command-line options
@@ -273,6 +300,7 @@ content-intelligence/
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
+│   │   │   ├── voice_pattern_report.py  recurring voice patterns across articles (ci-voice-patterns)
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs
