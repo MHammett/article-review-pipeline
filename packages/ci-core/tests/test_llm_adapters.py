@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 # ---------------------------------------------------------------------------
 # The review adapters POST with stream=True and consume the response via
 # resp.iter_lines(). These helpers build mock responses that yield provider-shaped
-# SSE `data:` lines so the accumulators in adapters/review/streaming.py parse them
+# SSE `data:` lines so the accumulators in ci_core/llm/streaming.py parse them
 # exactly as they would a live stream.
 
 
@@ -874,7 +874,10 @@ class TestGemini:
         # generic "Malformed JSON response" message.
         from ci_core.llm.adapters import gemini
 
-        truncated = '{"confirmed": ["x", "y", "z'  # cut off mid-string, invalid JSON
+        # Cut off mid-string with nothing salvageable: the array never closes a
+        # complete element, so salvage cannot recover anything and the
+        # MAX_TOKENS diagnosis must still surface.
+        truncated = '{"confirmed": ['  # cut off before any complete element
         lines = [
             "data: "
             + json.dumps(
@@ -1245,37 +1248,37 @@ class TestClaude:
 
 class TestPerplexityExtractJson:
     def test_plain_json(self):
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         assert _extract_json('{"flags": []}') == {"flags": []}
 
     def test_code_fence(self):
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         assert _extract_json('```json\n{"flags": [1]}\n```') == {"flags": [1]}
 
     def test_think_preamble(self):
         # The observed failure mode: a reasoning block before the JSON.
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         raw = '<think>\nLet me reason about this claim...\nstep two\n</think>\n{"verdict": "confirmed"}'
         assert _extract_json(raw) == {"verdict": "confirmed"}
 
     def test_prose_before_and_after(self):
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         raw = 'Here is my analysis:\n{"a": 1, "b": [2, 3]}\nHope that helps!'
         assert _extract_json(raw) == {"a": 1, "b": [2, 3]}
 
     def test_unrecoverable_returns_none(self):
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         assert _extract_json("no json here at all") is None
         assert _extract_json("") is None
 
     def test_multiple_think_blocks(self):
         # sonar-reasoning-pro can emit more than one <think> block.
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         raw = (
             "<think>first pass</think>\n"
@@ -1288,7 +1291,7 @@ class TestPerplexityExtractJson:
         # A reasoning block that itself mentions braces (e.g. discussing the
         # target JSON schema) must not widen the outermost-{...} span past the
         # real payload.
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         raw = (
             '<think>The schema should look like {"verdict": ...} '
@@ -1300,7 +1303,7 @@ class TestPerplexityExtractJson:
     def test_worst_case_think_fence_and_leading_prose(self):
         # The documented worst case: leading prose, a <think> block, AND a
         # markdown fence, all in the same response.
-        from ci_core.llm.adapters.perplexity import _extract_json
+        from ci_core.llm.json_utils import extract_json as _extract_json
 
         raw = (
             "Sure, here is my analysis.\n"
@@ -1342,7 +1345,7 @@ class TestPerplexityStreamFailures:
         assert result["failed"] is True
         assert result["error"] != "Malformed JSON response"
         assert "empty" in result["error"].lower()
-        assert result["tokens"] == {}
+        assert result["tokens"] == {"prompt": 0, "completion": 0}
 
     def test_inband_stream_error_event_reported_distinctly(self):
         from ci_core.llm.adapters import perplexity
@@ -1478,7 +1481,9 @@ class TestPerplexityStreamFailures:
         assert (
             result["raw"] == "This is prose with no JSON payload anywhere in it at all."
         )
-        assert result["tokens"] == {"prompt_tokens": 50, "completion_tokens": 20}
+        # Normalized contract: even on the failure path the token dict is
+        # {prompt, completion}, never the provider-native spelling.
+        assert result["tokens"] == {"prompt": 50, "completion": 20}
 
     def test_401_captures_response_body(self, caplog):
         # Live occurrence (2026-08-09): Perplexity started returning 401 with no

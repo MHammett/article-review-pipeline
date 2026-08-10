@@ -28,6 +28,7 @@ import logging
 import requests
 
 from .. import streaming
+from ..tokens import normalize_tokens
 from ..json_utils import extract_json_with_salvage
 from ... import redact
 
@@ -385,10 +386,7 @@ def _execute_request(
             "error": "Malformed JSON response",
             "raw": content,
             "model": model,
-            "tokens": {
-                "prompt": usage.get("prompt_tokens"),
-                "completion": usage.get("completion_tokens"),
-            },
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
         }
 
@@ -407,10 +405,7 @@ def _execute_request(
         "raw": content,
         "data": parsed,
         "model": model,
-        "tokens": {
-            "prompt": usage.get("prompt_tokens"),
-            "completion": usage.get("completion_tokens"),
-        },
+        "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
     }
     if truncated:

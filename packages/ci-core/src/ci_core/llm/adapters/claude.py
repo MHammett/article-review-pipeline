@@ -33,12 +33,13 @@ Config examples (configs/user.yaml extended form)::
       timeout_seconds: 360
 """
 
-import json
 import time
 import logging
 import requests
 
 from .. import streaming
+from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
+from ..tokens import normalize_tokens
 from ... import redact
 
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -286,50 +287,50 @@ def _call_model(
             "error": f"Empty text response (stop_reason={stop_reason!r})",
             "raw": None,
             "model": model,
-            "tokens": {
-                "prompt": usage.get("input_tokens"),
-                "completion": usage.get("output_tokens"),
-            },
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
         }
 
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError:
-            log.warning(
-                f"Claude {model} returned non-JSON content after {elapsed}s: "
-                f"{text[:400]!r}"
-            )
-            return {
-                "failed": True,
-                "error": "Malformed JSON response",
-                "raw": text,
-                "model": model,
-                "tokens": usage,
-                "elapsed_seconds": elapsed,
-            }
+    # Shared extractor: direct parse, then <think>-stripping, a fence found
+    # anywhere, and an outermost {...} span — a superset of the leading-fence
+    # handling this adapter used to do inline. Salvage then recovers the
+    # complete elements of a response cut off at the output-token ceiling.
+    parsed, truncated = _extract_json_with_salvage(text)
+    if parsed is None:
+        log.warning(
+            f"Claude {model} returned non-JSON content after {elapsed}s: {text[:400]!r}"
+        )
+        return {
+            "failed": True,
+            "error": "Malformed JSON response",
+            "raw": text,
+            "model": model,
+            "tokens": normalize_tokens(usage),
+            "elapsed_seconds": elapsed,
+        }
 
     thinking_mode = (
         "adaptive" if adaptive else ("extended" if thinking_budget else "standard")
     )
-    log.debug(
-        f"Claude {model} call succeeded in {elapsed}s "
-        f"(thinking={thinking_mode}, {usage.get('input_tokens', '?')} input tokens)"
-    )
-    return {
+    if truncated:
+        log.warning(
+            f"Claude {model} response was truncated (likely hit the output-token "
+            f"ceiling — {usage.get('output_tokens', '?')} output tokens) after "
+            f"{elapsed}s; salvaged the complete elements, discarded the rest."
+        )
+    else:
+        log.debug(
+            f"Claude {model} call succeeded in {elapsed}s "
+            f"(thinking={thinking_mode}, {usage.get('input_tokens', '?')} input tokens)"
+        )
+    result = {
         "failed": False,
         "raw": text,
         "data": parsed,
         "model": model,
-        "tokens": {
-            "prompt": usage.get("input_tokens"),
-            "completion": usage.get("output_tokens"),
-        },
+        "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
     }
+    if truncated:
+        result["truncated"] = True
+    return result

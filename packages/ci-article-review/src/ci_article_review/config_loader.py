@@ -255,7 +255,7 @@ def _load_presets_from_yaml(config_dir=None):
 
     Resolves the path relative to this module (not the CWD) so presets load
     correctly regardless of where the pipeline is invoked from — matching the
-    behavior of analysis/cost.py and model_registry.py.
+    behavior of ci_core/llm/cost.py and model_registry.py.
     """
     import logging
 

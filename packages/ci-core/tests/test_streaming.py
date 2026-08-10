@@ -1,4 +1,4 @@
-"""Regression tests for shared SSE decoding in adapters/review/streaming.py.
+"""Regression tests for shared SSE decoding in ci_core/llm/streaming.py.
 
 These use a *real* ``requests.Response`` (not a string-level mock) with a fake
 ``.raw`` object, so the test exercises the actual ``requests`` encoding-detection

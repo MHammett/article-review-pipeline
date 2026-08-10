@@ -26,7 +26,7 @@
 #
 # stream_read_timeout note: the review adapters stream (SSE); the socket read
 # timeout is normally a small constant "max gap between chunks" (see
-# adapters/review/streaming.py), NOT the total generation budget. High/xhigh
+# ci_core/llm/streaming.py), NOT the total generation budget. High/xhigh
 # reasoning effort can produce a long SILENT period — zero bytes on the wire,
 # not even a keep-alive — while the model reasons before it starts emitting
 # visible output.
@@ -35,7 +35,7 @@
 # with 0 output tokens against the default 120s read-gap under Chat Completions,
 # which carries no signal at all during the reasoning phase. Fixed by migrating
 # the adapter's primary path to the Responses API with reasoning.summary
-# enabled (adapters/review/openai.py): response.reasoning_summary_text.delta
+# enabled (ci_core/llm/adapters/openai.py): response.reasoning_summary_text.delta
 # events stream real bytes DURING the silent phase. Live-verified (2 xhigh
 # calls, no override, default 120s read-gap): reasoning-summary deltas start
 # ~2-6s in and recur throughout, with a worst observed gap of ~8s — no longer

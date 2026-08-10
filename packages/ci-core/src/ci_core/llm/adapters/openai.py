@@ -16,7 +16,7 @@ The openai.com path (default and web_search) both use the Responses API
 set) request ``reasoning.summary`` so the stream carries
 ``response.reasoning_summary_text.*`` events during the silent "thinking"
 phase — see streaming.py and the read-gap timeout discussion in
-adapters/review/streaming.py and configs/presets.yaml. Azure still uses Chat
+ci_core/llm/streaming.py and configs/presets.yaml. Azure still uses Chat
 Completions (``_execute_request`` / ``OPENAI_API_URL``) since only the
 openai.com path was migrated.
 
@@ -41,12 +41,13 @@ Azure note: provisioned throughput deployments do not 503; the fallback chain
 is bypassed for Azure and the configured deployment is used directly.
 """
 
-import json
 import time
 import logging
 import requests
 
 from .. import streaming
+from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
+from ..tokens import normalize_tokens
 from ... import redact
 
 DEFAULT_MODEL = "gpt-5.4"
@@ -54,7 +55,7 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 # Inter-token read-gap timeout (seconds) for the streaming socket. Constant, not
-# derived from the sliding-scale timeout_seconds — see adapters/review/streaming.py.
+# derived from the sliding-scale timeout_seconds — see ci_core/llm/streaming.py.
 _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 
 # Fallback chain tried in order when primary model returns a capacity error (503).
@@ -79,24 +80,35 @@ def _resolve_model(model_arg, cfg):
 
 
 def _parse_json_maybe_fenced(content):
-    """Parse ``content`` as JSON, stripping a leading/trailing code fence if present.
+    """Parse ``content`` as JSON, tolerating fences, preambles, and truncation.
 
     The Responses API has no ``response_format: json_object``, so JSON is
     requested via the system prompt / instructions and occasionally comes back
-    wrapped in a ```` ```json ... ``` ```` fence. Returns ``(parsed, None)`` on
-    success or ``(None, content)`` on failure (the original text, for the
-    caller's ``raw`` field).
+    wrapped in a ```` ```json ... ``` ```` fence or behind a reasoning preamble.
+    Delegates to the shared extractor — a superset of the leading-fence handling
+    this was doing inline — and falls back to truncation salvage for a response
+    cut off at the output-token ceiling.
+
+    Returns ``(parsed, None, truncated)`` on success or ``(None, content,
+    False)`` on failure (the original text, for the caller's ``raw`` field).
     """
-    try:
-        return json.loads(content), None
-    except json.JSONDecodeError:
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        try:
-            return json.loads(cleaned), None
-        except json.JSONDecodeError:
-            return None, content
+    parsed, truncated = _extract_json_with_salvage(content)
+    if parsed is None:
+        return None, content, False
+    return parsed, None, truncated
+
+
+def _log_outcome(label, truncated, elapsed, usage):
+    """Log a successful call, distinguishing a salvaged truncation from a clean one."""
+    if truncated:
+        log.warning(
+            f"{label} response was truncated (likely hit the output-token ceiling "
+            f"— {usage.get('output_tokens') or usage.get('completion_tokens', '?')} "
+            f"output tokens) after {elapsed}s; salvaged the complete elements, "
+            f"discarded the rest."
+        )
+    else:
+        log.debug(f"{label} call succeeded in {elapsed}s")
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +299,7 @@ def _call_with_web_search(
     content = assembled["content"]
 
     # Parse JSON — Responses API output may be wrapped in code fences
-    parsed, raw_on_fail = _parse_json_maybe_fenced(content)
+    parsed, raw_on_fail, truncated = _parse_json_maybe_fenced(content)
     if parsed is None:
         log.warning(
             f"OpenAI (web search) {model} returned non-JSON content after {elapsed}s"
@@ -297,24 +309,24 @@ def _call_with_web_search(
             "error": "Malformed JSON response",
             "raw": raw_on_fail,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
             "grounding_available": True,
         }
 
-    log.debug(f"OpenAI (web search) {model} call succeeded in {elapsed}s")
-    return {
+    _log_outcome(f"OpenAI (web search) {model}", truncated, elapsed, usage)
+    result = {
         "failed": False,
         "raw": content,
         "data": parsed,
         "model": f"{model}+search",
-        "tokens": {
-            "prompt": usage.get("input_tokens"),
-            "completion": usage.get("output_tokens"),
-        },
+        "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
         "grounding_available": True,
     }
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -540,12 +552,9 @@ def _execute_openai_responses(
     elapsed = round(time.monotonic() - t0, 2)
     content = assembled["content"]
     usage = assembled["usage"]
-    tokens = {
-        "prompt": usage.get("input_tokens"),
-        "completion": usage.get("output_tokens"),
-    }
+    tokens = normalize_tokens(usage)
 
-    parsed, raw_on_fail = _parse_json_maybe_fenced(content)
+    parsed, raw_on_fail, truncated = _parse_json_maybe_fenced(content)
     if parsed is None:
         log.warning(f"OpenAI {model} returned non-JSON content after {elapsed}s")
         return {
@@ -557,8 +566,8 @@ def _execute_openai_responses(
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(f"OpenAI {model} call succeeded in {elapsed}s")
-    return {
+    _log_outcome(f"OpenAI {model}", truncated, elapsed, usage)
+    result = {
         "failed": False,
         "raw": content,
         "data": parsed,
@@ -566,6 +575,9 @@ def _execute_openai_responses(
         "tokens": tokens,
         "elapsed_seconds": elapsed,
     }
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -632,30 +644,27 @@ def _execute_request(
     content = assembled["content"]
     usage = assembled["usage"]
 
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
+    parsed, truncated = _extract_json_with_salvage(content)
+    if parsed is None:
         log.warning(f"OpenAI {model} returned non-JSON content after {elapsed}s")
         return {
             "failed": True,
             "error": "Malformed JSON response",
             "raw": content,
             "model": model,
-            "tokens": usage,
+            "tokens": normalize_tokens(usage),
             "elapsed_seconds": elapsed,
         }
 
-    log.debug(
-        f"OpenAI {model} call succeeded in {elapsed}s ({usage.get('total_tokens', '?')} tokens)"
-    )
-    return {
+    _log_outcome(f"OpenAI {model}", truncated, elapsed, usage)
+    result = {
         "failed": False,
         "raw": content,
         "data": parsed,
         "model": model,
-        "tokens": {
-            "prompt": usage.get("prompt_tokens"),
-            "completion": usage.get("completion_tokens"),
-        },
+        "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
     }
+    if truncated:
+        result["truncated"] = True
+    return result
