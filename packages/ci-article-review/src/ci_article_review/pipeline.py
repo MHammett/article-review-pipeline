@@ -1497,7 +1497,13 @@ def run_publish_pipeline(
 # ---------------------------------------------------------------------------
 
 
-def main():
+def build_parser():
+    """Construct the CLI parser.
+
+    Split out of main() so tests can introspect the flags without running the
+    pipeline — see tests/test_docs_current.py, which asserts every long-form
+    flag is documented in the README.
+    """
     parser = argparse.ArgumentParser(
         description="Article Review Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1574,7 +1580,11 @@ def main():
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
     )
+    return parser
 
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.publish_live and args.draft:
