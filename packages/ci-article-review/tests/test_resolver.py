@@ -3,6 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from ci_core import extract
@@ -29,6 +30,22 @@ _ARTICLE_HTML = (
     + ("The measured value is documented in detail throughout this report. " * 8)
     + "</p></article><footer>Copyright notice</footer></body></html>"
 )
+
+
+def _quote_from_prompt(user_prompt):
+    """Return a sentence genuinely present in the prompt's page-content block.
+
+    The relevance verifier requires a "supports" verdict to carry text copied
+    from the page, and checks it (audit finding 1). Test doubles therefore have
+    to behave like a model that actually read the document rather than one that
+    asserts a verdict — deriving the quote from the prompt keeps them honest
+    without hard-coding fixture text at every call site.
+    """
+    body = user_prompt
+    if "<<<PAGE_CONTENT_" in body:
+        body = body.split(">>>", 1)[-1].rsplit("<<<END_PAGE_CONTENT_", 1)[0]
+    sentences = [s.strip() for s in body.split(".") if len(s.strip()) > 20]
+    return (max(sentences, key=len) + ".") if sentences else body.strip()[:80]
 
 
 def _page_response(body=_ARTICLE_HTML, content_type="text/html; charset=utf-8"):
@@ -210,7 +227,7 @@ class TestResolveCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=mock_resp,
             ) as mock_get,
             patch(
@@ -237,7 +254,7 @@ class TestResolveCitations:
 
     def test_known_url_fetch_failure_reports_unresolved(self):
         with patch(
-            "ci_article_review.adapters.citation.resolver.requests.get",
+            "ci_article_review.adapters.citation.resolver.safe_get",
             side_effect=RuntimeError("timeout"),
         ):
             results = resolver.resolve_citations(
@@ -256,7 +273,7 @@ class TestResolveCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=mock_resp,
             ),
             patch(
@@ -285,7 +302,7 @@ class TestResolveCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=mock_resp,
             ),
             patch(
@@ -296,7 +313,11 @@ class TestResolveCitations:
                 "ci_article_review.adapters.citation.resolver.mistral.call",
                 return_value={
                     "failed": False,
-                    "data": {"verdict": "supports", "reason": "matches"},
+                    "data": {
+                        "verdict": "supports",
+                        "reason": "matches",
+                        "quote": "The measured value is documented in detail throughout this report.",
+                    },
                     "model": "mistral-small-latest",
                     "tokens": {"prompt": 10, "completion": 5},
                     "elapsed_seconds": 0.2,
@@ -322,7 +343,7 @@ class TestResolveCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=mock_resp,
             ),
             patch(
@@ -362,7 +383,7 @@ class TestResolveCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=mock_resp,
             ),
             patch(
@@ -399,7 +420,7 @@ class TestResolveCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=mock_resp,
             ),
             patch(
@@ -480,7 +501,13 @@ class TestVerifierSeesReadableContent:
             captured["user"] = user
             return {
                 "failed": False,
-                "data": {"verdict": verdict, "reason": "r"},
+                # A real model quotes the page it was shown; the verifier now
+                # checks that the quote is actually there (audit finding 1).
+                "data": {
+                    "verdict": verdict,
+                    "reason": "r",
+                    "quote": _quote_from_prompt(user),
+                },
                 "model": "mistral-small-latest",
                 "tokens": {},
                 "elapsed_seconds": 0.1,
@@ -488,7 +515,7 @@ class TestVerifierSeesReadableContent:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_page_response(html),
             ),
             patch(
@@ -551,7 +578,11 @@ class TestPdfCitations:
             captured["user"] = user
             return {
                 "failed": False,
-                "data": {"verdict": "supports", "reason": "r"},
+                "data": {
+                    "verdict": "supports",
+                    "reason": "r",
+                    "quote": _quote_from_prompt(user),
+                },
                 "model": "mistral-small-latest",
                 "tokens": {},
                 "elapsed_seconds": 0.1,
@@ -559,7 +590,7 @@ class TestPdfCitations:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_page_response(
                     b"%PDF-1.6 binary body", content_type="application/pdf"
                 ),
@@ -635,7 +666,7 @@ class TestAccessWallIsNotAMismatch:
     def test_wall_reports_unverifiable_and_never_calls_the_verifier(self):
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_page_response(self._WALL),
             ),
             patch(
@@ -686,7 +717,7 @@ class TestKnownUrlWaybackFallback:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 side_effect=[_http_error_response(403), snap_resp],
             ) as mock_get,
             patch(
@@ -712,7 +743,7 @@ class TestKnownUrlWaybackFallback:
     def test_403_with_no_snapshot_reports_unresolved(self):
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_http_error_response(403),
             ),
             patch(
@@ -731,7 +762,7 @@ class TestKnownUrlWaybackFallback:
     def test_404_does_not_attempt_wayback_fallback(self):
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_http_error_response(404),
             ),
             patch(
@@ -751,7 +782,7 @@ class TestKnownUrlWaybackFallback:
         snap_resp = _page_response()
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 side_effect=[exc, snap_resp],
             ) as mock_get,
             patch(
@@ -828,7 +859,7 @@ class TestKnownUrlWaybackFallback:
         archive copy should paper over — see wayback._FALLBACK_STATUSES."""
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_http_error_response(503),
             ),
             patch(
@@ -850,7 +881,7 @@ class TestKnownUrlWaybackFallback:
         snap_resp = _page_response()
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 side_effect=[_http_error_response(429), snap_resp],
             ),
             patch(
@@ -868,6 +899,23 @@ class TestKnownUrlWaybackFallback:
 
 
 class TestArchiveSubmission:
+    @pytest.fixture(autouse=True)
+    def _treat_fixture_urls_as_public(self):
+        """Let the placeholder URLs in this class past the public-host check.
+
+        Submission now skips non-public URLs so an internal hostname is never
+        handed to archive.org (audit finding 20). These tests use unresolvable
+        placeholders like ``https://x``, which the guard correctly rejects.
+        Patching it here keeps the suite offline — the alternative is real DNS
+        in unit tests — while the guard's own behaviour is covered in
+        ``TestArchiveSubmissionSkipsNonPublicUrls`` below.
+        """
+        with patch(
+            "ci_article_review.adapters.citation.resolver.is_public_host",
+            return_value=True,
+        ):
+            yield
+
     def _archived_wayback(self, url, timeout=10):
         return {"archived": True}
 
@@ -1180,7 +1228,7 @@ class TestContentDriftDetection:
         )
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_page_response(),
             ),
             patch(
@@ -1191,7 +1239,11 @@ class TestContentDriftDetection:
                 "ci_article_review.adapters.citation.resolver.mistral.call",
                 return_value={
                     "failed": False,
-                    "data": {"verdict": "supports", "reason": "yes"},
+                    "data": {
+                        "verdict": "supports",
+                        "reason": "yes",
+                        "quote": "The measured value is documented in detail throughout this report.",
+                    },
                     "model": "mistral-small-latest",
                     "tokens": {},
                 },
@@ -1230,7 +1282,7 @@ class TestContentDriftDetection:
 
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_page_response(),
             ),
             patch(
@@ -1241,7 +1293,11 @@ class TestContentDriftDetection:
                 "ci_article_review.adapters.citation.resolver.mistral.call",
                 return_value={
                     "failed": False,
-                    "data": {"verdict": "supports", "reason": "yes"},
+                    "data": {
+                        "verdict": "supports",
+                        "reason": "yes",
+                        "quote": "The measured value is documented in detail throughout this report.",
+                    },
                     "model": "mistral-small-latest",
                     "tokens": {},
                 },
@@ -1276,7 +1332,7 @@ class TestContentDriftDetection:
         )
         with (
             patch(
-                "ci_article_review.adapters.citation.resolver.requests.get",
+                "ci_article_review.adapters.citation.resolver.safe_get",
                 return_value=_page_response(),
             ),
             patch(

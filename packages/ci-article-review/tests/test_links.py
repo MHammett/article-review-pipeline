@@ -128,7 +128,7 @@ class TestWaybackFallbackOnUnreadableOrigin:
                 return_value=self._head_response(403),
             ),
             patch(
-                "ci_article_review.analysis.links.requests.get",
+                "ci_article_review.analysis.links.safe_get",
                 return_value=snap_resp,
             ) as mock_get,
             patch(
@@ -212,7 +212,7 @@ class TestWaybackFallbackOnUnreadableOrigin:
         with (
             patch("ci_article_review.analysis.links.requests.head", side_effect=exc),
             patch(
-                "ci_article_review.analysis.links.requests.get",
+                "ci_article_review.analysis.links.safe_get",
                 return_value=snap_resp,
             ) as mock_get,
             patch(
@@ -301,7 +301,7 @@ class TestWaybackFallbackOnUnreadableOrigin:
                 side_effect=requests.exceptions.Timeout("timed out"),
             ),
             patch(
-                "ci_article_review.analysis.links.requests.get",
+                "ci_article_review.analysis.links.safe_get",
                 return_value=snap_resp,
             ),
             patch("ci_article_review.analysis.links.wayback_check", return_value=wb),
