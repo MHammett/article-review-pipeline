@@ -56,13 +56,11 @@ languagetool:
     - SENTENCE_FRAGMENT
     - EN_UNPAIRED_BRACKETS
 
-citation_sources:
-  - name: AWS_DOCS
-    adapter: generic_url
-    description: AWS documentation
-  - name: CNCF
-    adapter: generic_url
-    description: Cloud Native Computing Foundation
+# No adapter fits a technical blog: every shipped adapter targets US
+# government/regulatory data (see docs/CITATIONS.md). That is fine — claims
+# whose fact-check source names a URL are fetched and verified with no adapter
+# configured at all, which is the main path for a blog like this one.
+citation_sources: []
 
 wordpress:
   site_url: https://yourtechblog.com

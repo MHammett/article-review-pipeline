@@ -334,6 +334,95 @@ def _extract_source_url(source_field: str) -> str | None:
     return m.group(0).rstrip(".,;:)\"'")
 
 
+#: Fact-check buckets fed into citation resolution, mapped to the item key that
+#: may carry a source URL for that bucket.
+#:
+#: ``confirmed`` is here because those are the claims that ship *as written*.
+#: Leaving it out meant the pipeline verified and archived the claims the author
+#: was about to change, and did nothing for the ones about to be published —
+#: which inverts the risk. ``primary_source_needed`` names its URL field
+#: ``best_candidate_source``, not ``source``; reading the wrong key meant the one
+#: bucket that exists to say "here is where to find the primary source" was the
+#: one bucket whose candidate was never fetched.
+_CITATION_CLAIM_BUCKETS = {
+    "confirmed": "source",
+    "outdated": "source",
+    "contradicted": "source",
+    "unverifiable": None,
+    "primary_source_needed": "best_candidate_source",
+}
+
+
+def _collect_grounded_urls(results: dict) -> dict:
+    """Map claim text -> a source URL the *provider's own live search* returned.
+
+    Perplexity returns ``citations`` (flat URLs) and ``search_results`` (richer
+    objects) on its final SSE chunk, and Gemini returns grounding metadata.
+    Both were parsed by the adapters, counted in a log line, and then dropped
+    when the result dict was folded into the report.
+
+    That is worth recovering specifically because of its provenance. The
+    ``known_url`` path exists because a model-supplied URL is usually recalled
+    from training data rather than looked up; these URLs are the opposite —
+    fetched during this run by a live search. They are the better input to the
+    same machinery.
+
+    Grounded citations are returned for the response as a whole, not per claim,
+    so they are only used as a *fallback* for a claim whose own ``source`` field
+    carried no URL, and only from the fact-check domain. Returns
+    ``{claim_text: url}``; an empty dict when nothing grounded came back.
+    """
+    grounded: dict[str, str] = {}
+    for (_model, domain), result in results.items():
+        if domain != "fact_check" or result.get("failed"):
+            continue
+        urls = [u for u in (result.get("citations") or []) if isinstance(u, str)]
+        urls += [
+            sr["url"]
+            for sr in (result.get("search_results") or [])
+            if isinstance(sr, dict) and isinstance(sr.get("url"), str)
+        ]
+        if not urls:
+            continue
+        data = result.get("data") or {}
+        for bucket in _CITATION_CLAIM_BUCKETS:
+            for item in data.get(bucket, []) or []:
+                claim = item.get("claim", "")
+                # Only claims this model itself raised, and only when it did not
+                # already name a URL — a claim-specific source always wins over
+                # a response-level one.
+                if claim and claim not in grounded:
+                    grounded[claim] = urls[0]
+    return grounded
+
+
+def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict]:
+    """Build the Pass 3 claim list from consolidated fact-check output.
+
+    Every bucket contributes its claims. A claim's own source field is preferred;
+    a provider's grounded search result is the fallback (see
+    ``_collect_grounded_urls``). Deduplicated on claim text, first occurrence
+    winning, so a claim raised by two models is resolved once.
+    """
+    claims: list[dict] = []
+    seen: set[str] = set()
+    for bucket, url_key in _CITATION_CLAIM_BUCKETS.items():
+        for item in fact_check.get(bucket, []) or []:
+            claim = item.get("claim", "")
+            if not claim or claim in seen:
+                continue
+            seen.add(claim)
+            known_url = None
+            if url_key:
+                known_url = _extract_source_url(item.get(url_key, ""))
+            if not known_url:
+                known_url = grounded_urls.get(claim)
+            claims.append(
+                {"claim": claim, "known_url": known_url, "fact_check_bucket": bucket}
+            )
+    return claims
+
+
 def _read_handoff_file(path: str) -> str:
     p = Path(path)
     if not p.exists():
@@ -1048,71 +1137,60 @@ def run_draft_pipeline(
     )
 
     # Pass 3: Citation resolution — extract factual claims from fact-check results
+    #
+    # Deliberately NOT gated on citation_sources. The known_url path never reads
+    # that list — _resolve_one branches to _resolve_known_url and returns before
+    # the adapter loop — so gating the whole pass on it meant a publication with
+    # no matching adapter silently lost all citation verification, including the
+    # publication-agnostic half. Every shipped adapter is US-specific and most
+    # are Illinois/energy-specific, so that is the common case for a second user,
+    # not an edge case. The adapter loop itself is still skipped when the list is
+    # empty; see resolve_citations.
     citation_sources = pub_config.get("citation_sources", [])
-    if citation_sources:
-        log.info(
-            "Pass 3: Citation resolution (%d source adapters configured)",
-            len(citation_sources),
-        )
-        from .adapters.citation.resolver import resolve_citations
+    log.info(
+        "Pass 3: Citation resolution (%d source adapter(s) configured)",
+        len(citation_sources),
+    )
+    from .adapters.citation.resolver import resolve_citations
 
-        fact_check = report.get("section_2_fact_check") or {}
-        # Pull claim text from outdated, contradicted, and unverifiable lists.
-        # outdated/contradicted items already carry a model-supplied "source"
-        # field (per prompts/fact_check.txt) — when it contains a URL, use it
-        # directly instead of re-discovering a source via the adapter loop.
-        claims = []
-        seen_claim_text = set()
-        for key in (
-            "outdated",
-            "contradicted",
-            "unverifiable",
-            "primary_source_needed",
-        ):
-            known_url_eligible = key in ("outdated", "contradicted")
-            for item in fact_check.get(key, []):
-                claim = item.get("claim", "")
-                if not claim or claim in seen_claim_text:
-                    continue
-                seen_claim_text.add(claim)
-                known_url = (
-                    _extract_source_url(item.get("source", ""))
-                    if known_url_eligible
-                    else None
-                )
-                claims.append({"claim": claim, "known_url": known_url})
-        if claims:
-            citation_results = resolve_citations(
-                claims,
-                citation_sources,
-                api_keys,
-                verification_call_log=api_call_log,
-                history_root=HISTORY_ROOT,
-            )
-            verified_count = sum(
-                1 for r in citation_results if r.get("verification") == "checksum"
-            )
-            pointer_count = sum(
-                1 for r in citation_results if r.get("verification") == "pointer"
-            )
-            unverifiable_count = sum(
-                1 for r in citation_results if r.get("verification") == "unverifiable"
-            )
-            log.info(
-                "Citations: %d claim(s), %d verified, %d pointer-only, "
-                "%d could not be verified, %d unresolved",
-                len(claims),
-                verified_count,
-                pointer_count,
-                unverifiable_count,
-                len(claims) - verified_count - pointer_count - unverifiable_count,
-            )
-        else:
-            citation_results = []
-            log.info("Citations: no actionable claims to resolve")
-        report["section_9_citations"] = citation_results
+    fact_check = report.get("section_2_fact_check") or {}
+    grounded_urls = _collect_grounded_urls(results)
+    if grounded_urls:
+        log.info(
+            "Citations: %d claim(s) have a provider grounded-search URL available",
+            len(grounded_urls),
+        )
+    claims = _collect_citation_claims(fact_check, grounded_urls)
+    if claims:
+        citation_results = resolve_citations(
+            claims,
+            citation_sources,
+            api_keys,
+            verification_call_log=api_call_log,
+            history_root=HISTORY_ROOT,
+        )
+        verified_count = sum(
+            1 for r in citation_results if r.get("verification") == "checksum"
+        )
+        pointer_count = sum(
+            1 for r in citation_results if r.get("verification") == "pointer"
+        )
+        unverifiable_count = sum(
+            1 for r in citation_results if r.get("verification") == "unverifiable"
+        )
+        log.info(
+            "Citations: %d claim(s), %d verified, %d pointer-only, "
+            "%d could not be verified, %d unresolved",
+            len(claims),
+            verified_count,
+            pointer_count,
+            unverifiable_count,
+            len(claims) - verified_count - pointer_count - unverifiable_count,
+        )
     else:
-        report["section_9_citations"] = []
+        citation_results = []
+        log.info("Citations: no actionable claims to resolve")
+    report["section_9_citations"] = citation_results
 
     # The SEO calls happened back in pre-analysis, before this list existed.
     # Fold their cost in here so each lands in cost_summary under its own pass

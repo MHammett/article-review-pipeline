@@ -94,6 +94,34 @@ _MAX_PARALLEL = 8
 _MAX_SUBMIT_PARALLEL = 2
 
 
+#: Adapter names already warned about, so a 40-claim run logs each once rather
+#: than forty times — this is a config mistake, not a per-claim event.
+_WARNED_ADAPTERS: set = set()
+
+
+def _warn_unresolvable_adapter(adapter_name, source_name):
+    """Say plainly that a configured citation source can never resolve anything."""
+    key = str(adapter_name)
+    if key in _WARNED_ADAPTERS:
+        return
+    _WARNED_ADAPTERS.add(key)
+    label = f"{source_name!r} " if source_name else ""
+    if not adapter_name:
+        log.warning(
+            f"Citation source {label}has no 'adapter' key — it will never resolve "
+            "a claim. Remove it, or set adapter to one of: "
+            f"{', '.join(sorted(ADAPTER_MAP))}."
+        )
+        return
+    log.warning(
+        f"Citation source {label}names adapter {adapter_name!r}, which does not "
+        "exist — it will never resolve a claim. Valid adapters: "
+        f"{', '.join(sorted(ADAPTER_MAP))}. Note that claims carrying a source URL "
+        "are verified without any adapter configured, so an empty citation_sources "
+        "list is a valid configuration."
+    )
+
+
 def _load_adapter(adapter_name):
     module_path = ADAPTER_MAP.get(adapter_name)
     if not module_path:
@@ -511,7 +539,12 @@ def _resolve_one(
 
     for source_config in citation_sources:
         adapter_name = source_config.get("adapter")
-        if not adapter_name or adapter_name == "generic_url":
+        if not adapter_name or adapter_name not in ADAPTER_MAP:
+            # Warn rather than skip in silence. `generic_url` in particular was
+            # accepted, matched nothing, and looked in the config exactly like a
+            # working source — one shipped example configured two of them. A
+            # config naming an adapter that cannot resolve anything should say so.
+            _warn_unresolvable_adapter(adapter_name, source_config.get("name"))
             continue
         source_name = source_config.get("name", adapter_name)
         try:
@@ -600,12 +633,22 @@ def _submit_missing_archives(results, archive_org_creds=None):
 
 
 def _normalize_claim_entry(entry):
-    """Accept either a plain claim string or a dict with an optional
-    already-known source URL: {"claim": str, "known_url": str | None}.
+    """Accept either a plain claim string or a dict:
+    ``{"claim": str, "known_url": str | None, "fact_check_bucket": str | None}``.
+
+    ``fact_check_bucket`` records which fact-check list the claim came from
+    (``confirmed``, ``outdated``, …). It is carried onto the result so the report
+    can distinguish "this source backs a claim that is shipping as written" from
+    "this source backs a claim the author is about to change" — the same URL,
+    verified the same way, means something different in each case.
     """
     if isinstance(entry, str):
-        return entry, None
-    return entry.get("claim", ""), entry.get("known_url")
+        return entry, None, None
+    return (
+        entry.get("claim", ""),
+        entry.get("known_url"),
+        entry.get("fact_check_bucket"),
+    )
 
 
 def resolve_citations(
@@ -669,7 +712,7 @@ def resolve_citations(
                 call_log,
                 checksum_index,
             ): idx
-            for idx, (claim, known_url) in enumerate(normalized)
+            for idx, (claim, known_url, _bucket) in enumerate(normalized)
         }
         ordered: dict[int, dict] = {}
         for future in concurrent.futures.as_completed(futures):
@@ -684,6 +727,12 @@ def resolve_citations(
                     "note": f"Resolution error: {e}",
                 }
 
-    resolved_results = [ordered[i] for i in range(len(normalized))]
+    resolved_results = []
+    for i in range(len(normalized)):
+        result = ordered[i]
+        bucket = normalized[i][2]
+        if bucket:
+            result["fact_check_bucket"] = bucket
+        resolved_results.append(result)
     _submit_missing_archives(resolved_results, (api_keys or {}).get("archive_org"))
     return resolved_results

@@ -417,6 +417,19 @@
         "archived": true,
         "snapshot_age_days": 10
       }
+    },
+    {
+      "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+      "checksum_basis": "extracted_text",
+      "claim": "The grid served 41 percent of load from nuclear.",
+      "resolved": true,
+      "source_name": "fact-check model",
+      "url": "https://example.org/resolved",
+      "verification": "checksum",
+      "wayback": {
+        "archived": true,
+        "snapshot_age_days": 10
+      }
     }
   ],
   "truncated_results": []

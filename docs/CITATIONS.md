@@ -1,6 +1,10 @@
 # Citations (Section 9)
 
-After the fact-check pass, the pipeline takes the claims that came out of it and tries to trace each one to a primary source. The results land in **Section 9** of the report — both in `run_N_<timestamp>_report.json` and in the readable `run_N_<timestamp>_review.md`.
+After the fact-check pass, the pipeline takes the claims that came out of it and tries to trace each one to a primary source.
+
+**Which claims.** All five fact-check buckets are resolved: `confirmed`, `outdated`, `contradicted`, `unverifiable` and `primary_source_needed`. `confirmed` matters most and is easy to overlook — those are the claims that ship *as written*, so they are the ones whose sources most need checksumming and archiving. Each entry records which bucket it came from in `fact_check_bucket`, because the same URL verified the same way means something different behind a claim you are about to publish than behind one you are about to rewrite.
+
+**Which URL.** In order of preference: the URL named in the claim's own source field (`source`, or `best_candidate_source` for `primary_source_needed`); failing that, a URL returned by a provider's live search during this run (Perplexity `citations` / `search_results`). The second is worth having precisely because of its provenance — a model-supplied URL is usually recalled from training data, whereas a grounded one was fetched by a real search while the review ran. The results land in **Section 9** of the report — both in `run_N_<timestamp>_report.json` and in the readable `run_N_<timestamp>_review.md`.
 
 Section 9 is not a pass/fail list. A claim can be resolved at very different levels of confidence, and the difference matters: one tier means a model read the source and confirmed it backs the claim, another means "here is a portal that is probably about the right topic." Reading those as equivalent is exactly the mistake this section is structured to prevent.
 
@@ -164,6 +168,10 @@ citation_sources:
 ```
 
 Adapters are tried in the order listed, and the first one that resolves wins. A claim carrying a `known_url` skips adapter matching entirely.
+
+**`citation_sources` may be empty, and often should be.** Every shipped adapter targets US government or regulatory data, and most target Illinois energy policy specifically. If none fit your publication, leave the list empty — citation resolution still runs. Claims whose fact-check source names a URL are fetched, checksummed, relevance-verified and archived with no adapter configured at all, and for most publications that is the main path. Only the adapter-matching loop is skipped.
+
+A source naming an adapter that does not exist (including `generic_url`, which was never implemented) is reported as a warning at run time and resolves nothing.
 
 | Adapter | Kind | Reaches |
 |---|---|---|
