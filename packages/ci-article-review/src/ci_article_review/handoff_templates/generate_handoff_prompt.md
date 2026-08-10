@@ -4,7 +4,7 @@ properly-structured draft_submission.md for the article review pipeline.
 
 Copy everything between the dashed lines and paste it as a single message.
 Replace the bracketed fields. The model will output a complete handoff document
-you can save as your-article-handoff.md and pass to `python pipeline.py --draft`.
+you can save as your-article-handoff.md and pass to `uv run ci-review --draft`.
 
 TWO-FILE VARIANT: for long articles, chat UIs can truncate or mangle a single
 giant paste that mixes analysis and the full article text. If that's a
@@ -14,7 +14,7 @@ REVIEW MODELS" (see metadata_only.md for the exact shape). Save that as
 your-article-metadata.md, save the raw article text on its own (whatever you
 already have — no wrapping needed) as your-article-draft.md, and run:
 
-    python pipeline.py --raw-draft your-article-draft.md --metadata your-article-metadata.md --publication your_publication_name
+    uv run ci-review --raw-draft your-article-draft.md --metadata your-article-metadata.md --publication your_publication_name
 
 This produces the same result as a single --draft handoff — it's just split
 across two files so the draft never has to survive a round trip through the
@@ -156,7 +156,7 @@ headings, tables, and citation markers exactly as provided]
 AFTER GENERATING: Save the output as your-article-name-handoff.md in
 handoff_templates/ and run:
 
-    python pipeline.py --draft handoff_templates/your-article-name-handoff.md --publication your_publication_name
+    uv run ci-review --draft handoff_templates/your-article-name-handoff.md --publication your_publication_name
 
 The pipeline will tell you if any required sections are missing before running.
 

@@ -6,18 +6,25 @@ Analyzes your writing corpus across multiple platforms and synthesizes a structu
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10+ and [uv](https://docs.astral.sh/uv/) — the package is a member of the
+  workspace at the repository root, installed by `uv sync` there
 - API keys in `configs/user.yaml` (same as the review pipeline — at least one model required)
 - For Twitter: API v2 Basic tier ($100/month) for general corpus access; Free tier is limited to your own recent tweets (last 7 days)
 
 ## Setup
 
-```bash
-# Install dependencies
-pip install -r style-profile-bootstrap/requirements.txt
+All paths below are relative to the workspace root. Dependencies come from the
+workspace, not this package — there's no separate install step.
 
-# Create sources.yaml from the template
-cp style-profile-bootstrap/sources.example.yaml style-profile-bootstrap/sources.yaml
+```bash
+# From the repository root — installs the whole workspace into .venv/
+uv sync
+
+# Create sources.yaml from the template.  Note the two different directories:
+# the template ships at the package root, but the loader reads it from the
+# source tree next to bootstrap.py.
+cp packages/ci-style-profile/sources.example.yaml \
+   packages/ci-style-profile/src/ci_style_profile/sources.yaml
 # Edit sources.yaml — fill in your site URL and credentials
 
 # Set credentials as environment variables (or use .env file)
@@ -31,14 +38,14 @@ export WP_APPLICATION_PASSWORD=your_app_password
 
 ```bash
 # Zero cost — collect, normalize, print stats
-python style-profile-bootstrap/bootstrap.py \
+uv run style-profile-bootstrap \
   --publication mikehammett \
   --sources wordpress \
   --style canonical \
   --dry-run
 
 # Detect mode dry-run runs one detection API call (not free)
-python style-profile-bootstrap/bootstrap.py \
+uv run style-profile-bootstrap \
   --publication mikehammett \
   --sources wordpress \
   --style detect \
@@ -48,7 +55,7 @@ python style-profile-bootstrap/bootstrap.py \
 ### 2. Full run
 
 ```bash
-python style-profile-bootstrap/bootstrap.py \
+uv run style-profile-bootstrap \
   --publication mikehammett \
   --sources wordpress,gmail \
   --style detect \
@@ -58,7 +65,7 @@ python style-profile-bootstrap/bootstrap.py \
 ### 3. Write to a specific file
 
 ```bash
-python style-profile-bootstrap/bootstrap.py \
+uv run style-profile-bootstrap \
   --output-yaml my_profile.yaml \
   --sources textfiles \
   --style canonical
@@ -81,6 +88,7 @@ python style-profile-bootstrap/bootstrap.py \
 --format FORMAT          yaml | markdown | json (default: yaml)
 --overwrite              Skip confirmation prompt when merging into existing file
 --log-level LEVEL        DEBUG | INFO | WARNING | ERROR (overrides sources.yaml)
+--check-draft PATH       Not implemented — accepted by the parser, does nothing yet
 ```
 
 ## Style Modes
@@ -139,17 +147,17 @@ chmod 600 ~/.config/style-bootstrap/gmail_credentials.json
 ## Email Source Privacy
 
 Gmail and Outlook365 sources contain private email text. The tool takes these precautions:
-- Staging files are gitignored (`style-profile-bootstrap/staging/`)
+- Staging files are gitignored (`packages/ci-style-profile/src/ci_style_profile/staging/`)
 - Use `--no-stage` to never persist email text to disk (synthesizes in memory only)
 - Be cautious with cloud sync (Dropbox, iCloud, etc.) on your home directory
 - Staging files contain cleaned plain text, not raw emails
 
 ## Adding a Custom Collector
 
-Drop a Python file in `style-profile-bootstrap/collectors/custom/`:
+Drop a Python file in `packages/ci-style-profile/src/ci_style_profile/collectors/custom/`:
 
 ```python
-from collectors.base import Collector, Document
+from ci_style_profile.collectors.base import Collector, Document
 
 class MyCustomCollector(Collector):
     SOURCE_NAME = "mycustom"
@@ -172,7 +180,7 @@ The collector is auto-discovered — no registration needed.
 
 **`synthesis_notes` log line:** Logged at INFO level, not written to YAML. Contains model agreement notes and detection observations.
 
-**Profile versioning:** Every run saves a timestamped snapshot in `profiles/<publication>/`. Diff consecutive snapshots to track how your profile evolves with more data.
+**Profile versioning:** Every run saves a timestamped snapshot in `packages/ci-style-profile/src/ci_style_profile/profiles/<publication>/` (gitignored). With `--output-yaml` instead of `--publication`, snapshots go under `profiles/_output/<stem>/`. Diff consecutive snapshots to track how your profile evolves with more data.
 
 ## Presets
 

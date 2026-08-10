@@ -1024,7 +1024,11 @@ def run_draft_pipeline(
                 claims.append({"claim": claim, "known_url": known_url})
         if claims:
             citation_results = resolve_citations(
-                claims, citation_sources, api_keys, verification_call_log=api_call_log
+                claims,
+                citation_sources,
+                api_keys,
+                verification_call_log=api_call_log,
+                history_root=HISTORY_ROOT,
             )
             verified_count = sum(
                 1 for r in citation_results if r.get("verification") == "checksum"
@@ -1437,6 +1441,29 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             print(
                 f"  {len(stale)} resolved URL(s) have a stale Wayback snapshot (>180 days)"
             )
+        changed = [c for c in verified if c.get("content_changed_since")]
+        if changed:
+            print(f"\n{'!' * 60}")
+            print(
+                f"WARNING: {len(changed)} verified source(s) have changed content "
+                "since a prior run checksummed them:"
+            )
+            for c in changed:
+                drift = c["content_changed_since"]
+                print(f"  {c.get('url')}")
+                print(
+                    f"    Last matched in run {drift.get('prior_run')} of "
+                    f"'{drift.get('prior_article')}'"
+                    + (
+                        f" on {drift.get('prior_date')}"
+                        if drift.get("prior_date")
+                        else ""
+                    )
+                )
+            print(
+                "Claims previously verified against these sources may need re-checking."
+            )
+            print("!" * 60)
 
     print(
         f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/"
@@ -1518,7 +1545,13 @@ def run_publish_pipeline(
 # ---------------------------------------------------------------------------
 
 
-def main():
+def build_parser():
+    """Construct the CLI parser.
+
+    Split out of main() so tests can introspect the flags without running the
+    pipeline — see tests/test_docs_current.py, which asserts every long-form
+    flag is documented in the README.
+    """
     parser = argparse.ArgumentParser(
         description="Article Review Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1595,7 +1628,11 @@ def main():
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
     )
+    return parser
 
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.publish_live and args.draft:

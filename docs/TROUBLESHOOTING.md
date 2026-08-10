@@ -1,6 +1,12 @@
 # Troubleshooting
 
-Run `python check.py --publication your_publication_name` first. It makes one minimal call to each configured service and tells you exactly what's wrong before you waste a full pipeline run diagnosing it.
+Run the check command first:
+
+```powershell
+uv run ci-check --publication your_publication_name
+```
+
+It makes one minimal call to each configured service and tells you exactly what's wrong before you waste a full pipeline run diagnosing it.
 
 ---
 
@@ -26,13 +32,13 @@ No models passed credential and enabled checks. Make sure at least one model has
 ## Gemini / Google
 
 **Gemini returns 503 (capacity)**  
-AI Studio draws from a shared capacity pool that fills up at peak hours. The pipeline retries once automatically. If 503s are a consistent pattern, switch to Vertex AI. See [PROVIDERS.md](PROVIDERS.md#option-b--vertex-ai-reserved-capacity-no-503s) for setup. Your fact-check pass routes automatically once you update `user.yaml` — `check.py` will confirm.
+AI Studio draws from a shared capacity pool that fills up at peak hours. The pipeline retries once automatically. If 503s are a consistent pattern, switch to Vertex AI. See [PROVIDERS.md](PROVIDERS.md#option-b--vertex-ai-reserved-capacity-no-503s) for setup. Your fact-check pass routes automatically once you update `user.yaml` — the check command will confirm.
 
 **Vertex AI: `No such file or directory` on credentials_file**  
 The path in `credentials_file` doesn't point to the downloaded service account JSON. Move the file and update the path, or remove the key and use Application Default Credentials (`gcloud auth application-default login`) instead.
 
 **Vertex AI: `'parts'` or `KeyError` in response**  
-`gemini-2.5-flash` is a thinking model that returns internal reasoning traces before the actual output. The pipeline filters these out automatically. If you see this in the pipeline adapter (not just `check.py`), update to the latest version.
+`gemini-2.5-flash` is a thinking model that returns internal reasoning traces before the actual output. The pipeline filters these out automatically. If you see this in the pipeline adapter (not just the check command), update to the latest version.
 
 **Vertex AI: `403 Permission denied`**  
 The service account doesn't have the **Agent Platform User** role on the project, or the Agent Platform API isn't enabled. Check IAM in the GCP console and verify the API is enabled at https://console.cloud.google.com/apis/library/aiplatform.googleapis.com.
@@ -48,20 +54,20 @@ Verify you are using the project **ID** (like `my-project-123`), not the display
 Rate limit or insufficient credits. Add credits at https://platform.openai.com/account/billing. The pipeline retries once after a delay.
 
 **OpenAI web search not working**  
-The Responses API with `web_search_preview` falls back silently to standard chat completions if it errors. Check `pipeline.log` in `pipeline_history/` for the specific error. If the Responses API isn't available on your account tier, remove `web_search: true` from the model config.
+The Responses API with `web_search_preview` falls back silently to standard chat completions if it errors. Check `pipeline_<YYYYMMDD>.log` in `pipeline_history/` for the specific error. If the Responses API isn't available on your account tier, remove `web_search: true` from the model config.
 
 ---
 
 ## Perplexity
 
 **Perplexity (or Gemini) returns non-JSON / Malformed JSON**  
-Reasoning and grounded models (sonar-reasoning-pro, gemini-2.5-pro) sometimes wrap responses in markdown fences, prepend a chain-of-thought / `<think>` block, or surround the JSON with prose. All review adapters share a robust extractor (`adapters/review/json_utils.py`) that tries a direct parse, then a fenced block, then the outermost `{…}` span. If none parse, the run continues with that pass marked failed and the other models' results stand.
+Reasoning and grounded models (sonar-reasoning-pro, gemini-2.5-pro) sometimes wrap responses in markdown fences, prepend a chain-of-thought / `<think>` block, or surround the JSON with prose. All review adapters share a robust extractor (`ci_core.llm.json_utils`) that tries a direct parse, then a fenced block, then the outermost `{…}` span. If none parse, the run continues with that pass marked failed and the other models' results stand.
 
 **sonar-reasoning-pro timing out even with a generous `stream_read_timeout` / wall-clock budget**  
 Investigated 2026-08-07 after PRs #19/#20/#23/#26 each raised Perplexity's timeouts and each got outrun within days (calibration 59-141s → 233.93s → 240s ceiling hit → 162s vs 160s read-gap → 282s vs 280s → 352s/354s vs 350s, wall-clock hit directly at 375s for the first time). The pattern — failures landing within a few seconds of whatever the current ceiling happened to be — raised the question of whether something in this codebase was leaking the configured timeout back into the request (e.g. inflating `max_tokens` or reasoning depth), rather than the calls genuinely getting slower.
 
 Findings:
-- The outgoing payload (`adapters/review/perplexity.py:_call_perplexity`) is `model` / `messages` / `temperature: 0.2` / `stream` / `stream_options` only, plus `reasoning_effort` *if the provider config sets one* — and no `economy`/`standard`/`balanced`/`thorough`/`maximum` preset in `configs/presets.yaml` ever sets `reasoning_effort` for perplexity. `stream_read_timeout` (the adapter's own read-gap knob) is read only by `streaming.stream_timeout()` to build the local socket-timeout tuple; it is never written into `payload`. There is no `search_context_size` parameter sent either — the `'search_context_size': 'low'` seen in a past raw usage excerpt is Perplexity's own server-side default, not something this code sets or varies. So the payload is byte-for-byte identical regardless of which timeout tier is configured — ruled out a request-leak bug.
+- The outgoing payload (`ci_core/llm/adapters/perplexity.py:_call_perplexity`) is `model` / `messages` / `temperature: 0.2` / `stream` / `stream_options` only, plus `reasoning_effort` *if the provider config sets one* — and no `economy`/`standard`/`balanced`/`thorough`/`maximum` preset in `configs/presets.yaml` ever sets `reasoning_effort` for perplexity. `stream_read_timeout` (the adapter's own read-gap knob) is read only by `streaming.stream_timeout()` to build the local socket-timeout tuple; it is never written into `payload`. There is no `search_context_size` parameter sent either — the `'search_context_size': 'low'` seen in a past raw usage excerpt is Perplexity's own server-side default, not something this code sets or varies. So the payload is byte-for-byte identical regardless of which timeout tier is configured — ruled out a request-leak bug.
 - `git log` on `perplexity.py`, `streaming.py`, and `prompts/*.txt` since the 2026-06-22 calibration date shows only unrelated fixes (UTF-8 decoding, malformed-JSON hardening, a 400-diagnostics addition) — no change to prompt content, payload construction, or reasoning parameters that could explain a genuine latency shift.
 - Re-ran the exact failing calls live (`--only-model perplexity --only-domain fact_check|completeness --cost-preset maximum --no-timeout`, same 73786-char `dc-environment-v19-handoff.md` doc used throughout this timeline): three calls came back at 95.37s, 86.42s, and 91.55s — back in (or below) the original 59-141s calibration range, with normal token counts (~19-20k prompt / ~3-4k completion) and no retries.
 - Conclusion: the "near-exact match to the current ceiling" pattern across PRs #19-#26 was **not** evidence of a request-side leak or a sustained regression — it was several weeks of a genuinely worsening (and now recovered) tail on Perplexity's side, most likely `sonar-reasoning-pro` capacity/latency variance on their infrastructure, landing right at whatever ceiling we'd most recently raised because each bump was sized to the last failure rather than to a stable distribution. No code change was needed. `stream_read_timeout: 500` / `sonar` `model_multiplier: 7.0` (from PR #26) are being left as-is: they're a legitimate safety margin now that the read-gap correctly no longer masks whether a stall is a real hang vs. one long silent reasoning+search stretch (see the `stream_read_timeout` note in `presets.yaml`), and reverting them would just reopen the near-miss risk if Perplexity's latency drifts back up.
@@ -154,15 +160,15 @@ At `standard` thoroughness, consensus requires the same passage to be flagged by
 A model returned 503 capacity errors and the pipeline fell back to a less capable variant (e.g., `gemini-2.5-flash-lite` instead of `gemini-2.5-flash`). The findings are valid but may be less thorough. Re-run when the preferred model is available to confirm.
 
 **MODEL CURRENCY warning in summary**  
-One of your configured model IDs has been superseded by a newer model. The old model still works; this is informational. Update `user.yaml` to the replacement model shown. The registry tracking this lives in `model_registry.py` — if you're confident the current model is still the best choice, you can remove its entry from `_SUPERSEDED`.
+One of your configured model IDs has been superseded by a newer model. The old model still works; this is informational. Update `user.yaml` to the replacement model shown. The registry tracking this lives in [`ci-core`'s `model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml) — if you're confident the current model is still the best choice, you can remove its entry from `superseded:`.
 
 **Model registry staleness notice**  
-The built-in model registry hasn't been updated in 60+ days. Provider APIs change frequently. Re-check [PROVIDERS.md](PROVIDERS.md) against current provider documentation, update `_SUPERSEDED` / `_NEWER_AVAILABLE` in `model_registry.py`, and bump `REGISTRY_DATE` to today. This resets the staleness clock.
+The built-in model registry hasn't been updated in 60+ days. Provider APIs change frequently. Re-check [PROVIDERS.md](PROVIDERS.md) against current provider documentation, update `superseded:` / `newer_available:` in [`ci-core`'s `model_registry.yaml`](../packages/ci-core/src/ci_core/configs/model_registry.yaml), and bump `registry_date:` to today. This resets the staleness clock. No code change is needed — the pipeline reloads the YAML each run.
 
-**`discover.py` shows no models for a provider**  
-Check that the provider's API key is valid (run `check.py` first). For Gemini configured via Vertex AI, model listing is not supported — check https://ai.google.dev/models manually. For Perplexity, model listing isn't available from their API; the script shows a static documented list.
+**Model discovery shows no models for a provider**  
+Check that the provider's API key is valid (run the check command first). For Gemini configured via Vertex AI, model listing is not supported — check https://ai.google.dev/models manually. For Perplexity, model listing isn't available from their API; the script shows a static documented list.
 
-**`discover.py` shows NEW models but `check.py` fails with 404 on the new model**  
+**Model discovery shows NEW models but the check command fails with 404 on the new model**  
 The new model exists in the provider's catalog but may require a different API access tier, may be in preview, or the model ID in the discovery list may not match exactly what the API accepts for inference. Check the provider's documentation for the exact model ID and any access requirements.
 
 **Link validation takes a long time**  
@@ -184,10 +190,22 @@ The most recent Wayback snapshot is more than `wayback_snapshot_stale_days` old 
 The cited URL is itself a `web.archive.org` snapshot. The pipeline recognizes this from the URL's embedded timestamp (it does not look for an archive *of* an archive), reports the snapshot's own age, and flags it `archive link STALE (Nd)` if older than the stale threshold. Whether the archive link actually resolves is the normal HTTP status check — `OK` means it works, `BROKEN` means the snapshot URL itself is dead.
 
 **Section 9 — Citations shows 0 resolved**  
-Either: (a) no `citation_sources` are configured in your publication config, (b) no claims from the fact-check results matched the source adapters' keyword rules, or (c) the API keys for those sources aren't set (e.g., `FRED_API_KEY` env var). Check `pipeline.log` for "Citation adapter … failed" messages.
+Either: (a) no `citation_sources` are configured in your publication config, (b) no claims from the fact-check results matched the source adapters' keyword rules, or (c) the API keys for those sources aren't set (e.g., `FRED_API_KEY` env var). Check `pipeline_<YYYYMMDD>.log` for "Citation adapter … failed" messages. Note that `topic_match` deliberately suppresses keyword hits occurring in credential phrases ("credentials in air quality analysis"), so some claims a human would match land unresolved on purpose — see [CITATIONS.md](CITATIONS.md#pointer-only--verification-pointer).
+
+**Section 9 — everything comes back "pointer-only"**  
+Pointer-only is what the `epa`, `ferc`, `fhwa`, `icc`, `ilga`, and `pjm` adapters return by design — they name a portal, they don't retrieve or check the data. Only `census`, `crossref`, `eia`, `fred`, and fact-check-supplied `known_url` citations can reach the verified tier. If you expected verified results, check that a data-fetching adapter is listed in `citation_sources` and that its API key is set.
+
+**A "verified" citation carries a `relevance_check` note**  
+The content-relevance model call that normally gates the verified tier didn't run — usually no `mistral` API key configured, otherwise a call failure or an unparseable verdict. The entry was fetched and checksummed but *not* relevance-confirmed, and the note says which. This is a deliberate graceful degradation, not an error, but treat those entries as fetch-only until a key is configured.
+
+**Section 9 — `content_mismatch`**  
+The source URL fetched and checksummed fine, but the relevance check found the page does not support the claim. The entry records a `contradicts`, `not_addressed`, or `inconclusive` verdict plus a one-sentence reason, and appears under *Unresolved* in the readable report. Worth more attention than an ordinary unresolved entry — `contradicts` in particular is a signal about the claim itself, not just about the citation.
+
+**Wayback submissions don't show up as archived**  
+Expected on the same run. Save Page Now captures run asynchronously on archive.org's side and can take seconds to minutes; the pipeline submits and moves on without polling. A later run's availability check picks up the snapshot. If submissions are failing outright rather than pending, you're likely hitting unauthenticated rate limits — configure `api_keys.archive_org` ([CONFIGURATION.md](CONFIGURATION.md#api-keys)).
 
 **Custom domain prompt_file not found**  
-The `prompt_file` path in `custom_domains` must be relative to your project root or an absolute path. Run `check.py` to verify paths resolve before a full pipeline run. If the file doesn't exist, the custom domain is silently skipped with a warning in `pipeline.log`.
+The `prompt_file` path in `custom_domains` must be relative to your project root or an absolute path. Run the check command to verify paths resolve before a full pipeline run. If the file doesn't exist, the custom domain is silently skipped with a warning in `pipeline_<YYYYMMDD>.log`.
 
 **Fact-check CONTRADICTIONS banner in summary**  
 Two or more models reviewed the same claim and disagreed — one marked it confirmed, another marked it outdated or contradicted. This is expected when models have different training data cutoffs or search grounding. Manually verify the claim against a primary source before publishing. The contradiction is saved in the report under the `contradictions` key.
