@@ -789,10 +789,22 @@ seo_rules:
 ### SEO suggestions
 
 The pre-analysis SEO pass reports what's missing. The suggestion pass proposes
-values for it: **3–5 focus keyword candidates** with a one-line rationale each,
-a **draft meta description** under `seo_rules.meta_description_max_chars`, and —
-only when the article title exceeds `seo_rules.title_max_chars` — a shorter
-**OG title**.
+values for it, covering every field in the publication handoff's SEO METADATA
+block — the same fields `adapters/cms/wordpress.py` pushes to Rank Math:
+
+| Field | What you get | Pushed as |
+|---|---|---|
+| Focus keyword | **3–5 candidates**, strongest first, each with a one-line rationale — including whether the article actually uses the phrase | `rank_math_focus_keyword` |
+| Meta description | A draft under `seo_rules.meta_description_max_chars` | `rank_math_description` |
+| OG title | A shorter title, but only when the article title exceeds `seo_rules.title_max_chars` — otherwise the field reports that the article title is used as-is | `rank_math_og_title` |
+| OG description | Social-card text, but only when a distinctly social framing beats reusing the meta description — otherwise the field reports that the meta description is used. Held to the same character limit | `rank_math_og_description` |
+| Schema type | `Article`, `NewsArticle`, or `BlogPosting` with a one-line rationale, flagged when it differs from `rank_math.default_schema_type` | `rank_math_schema_type` |
+
+Every field reports an outcome. The two with defaults in the push (OG title, OG
+description) name the default that would take effect rather than going silent,
+so you can see the field was considered. A value over its character limit is
+reported with its count and flagged — never truncated into a dangling clause,
+and never dropped.
 
 It runs during a `--draft` review, not at publish time, so the output feeds the
 [revision round-trip](../packages/ci-article-review/src/ci_article_review/handoff_templates/revise_after_review_prompt.md)
@@ -811,7 +823,10 @@ can cancel, fill the handoff in, and re-run.
 
 **Nothing here is applied automatically** — not to a config, not to a handoff,
 not to WordPress. Keyword choice is a strategic decision about what you want to
-rank for, so the candidates are yours to pick from.
+rank for, so the candidates are yours to pick from. (Older configs carried
+`rank_math.derive_focus_keyword_if_missing` and
+`derive_meta_description_if_missing`; no code ever read them, and they have
+been removed rather than wired up to write values on your behalf.)
 
 **Cost and failure behavior.** One call to a small fast model
 (`mistral-small-latest`, the same model the citation relevance verifier uses),

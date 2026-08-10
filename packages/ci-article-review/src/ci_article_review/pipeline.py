@@ -1179,31 +1179,35 @@ def _print_seo_suggestions(suggestions):
             rationale = f" — {c['rationale']}" if c.get("rationale") else ""
             print(f"    {i}. {c['keyword']}{rationale}")
 
-    meta = suggestions.get("meta_description")
-    if meta:
-        over = (
-            " — OVER LIMIT, trim before use"
-            if suggestions.get("meta_description_over_limit")
-            else ""
-        )
-        print(
-            f"  Meta description ({suggestions.get('meta_description_chars')}/"
-            f"{suggestions.get('meta_description_limit')} chars){over}:"
-        )
-        print(f"    {meta}")
+    fields = suggestions.get("fields") or {}
+    for name in seo_suggest.FIELD_ORDER:
+        field = fields.get(name)
+        if not field:
+            continue
+        label = field.get("label", name)
+        if not field.get("value"):
+            # Every field reports an outcome; for these two the outcome is
+            # which default the WordPress push would apply.
+            print(f"  {label}: {field.get('default_note', 'not proposed')}")
+            continue
 
-    og_title = suggestions.get("og_title")
-    if og_title:
-        over = (
-            " — OVER LIMIT, trim before use"
-            if suggestions.get("og_title_over_limit")
+        measured = (
+            f" ({field['chars']}/{field['limit']} chars)"
+            if field.get("limit") is not None
             else ""
         )
-        print(
-            f"  OG title ({suggestions.get('og_title_chars')}/"
-            f"{suggestions.get('og_title_limit')} chars){over}:"
-        )
-        print(f"    {og_title}")
+        over = " — OVER LIMIT, trim before use" if field.get("over_limit") else ""
+        print(f"  {label}{measured}{over}:")
+        print(f"    {field['value']}")
+        if field.get("rationale"):
+            print(f"      {field['rationale']}")
+        if field.get("recognized") is False:
+            print("      Unrecognized type — confirm Rank Math accepts it")
+        elif field.get("differs_from_default"):
+            print(
+                f"      Differs from the configured default: "
+                f"{field['configured_default']}"
+            )
 
 
 def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=None):
@@ -1616,10 +1620,12 @@ def _suggest_seo_for_publish(pub_handoff, pub_config, api_keys):
     "derive from primary claim" placeholders (``_parse_seo_block`` drops those,
     so they arrive here as absent rather than as literal text).
 
-    Only runs when something is actually missing, so a fully-filled handoff
-    pays for no call. Printed before the WordPress checklist so the author can
-    decline the push, paste a value into the handoff, and re-run: the values
-    are NOT applied to the post.
+    Triggered by the two SEO METADATA fields the push has no fallback for —
+    focus keyword and meta description. The other three resolve to sensible
+    defaults on their own (OG title to the article title, OG description to
+    the meta description, schema type to the configured default), so a blank
+    one is not a hole worth paying for a call over. Once the call is made
+    though, all five fields report, since they cost nothing extra.
     """
     seo_meta = pub_handoff.get("seo") or {}
     if seo_meta.get("focus_keyword") and seo_meta.get("meta_description"):

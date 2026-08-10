@@ -332,10 +332,17 @@ class TestSeoSuggestionsAtPublishTime:
     _SUGGESTIONS = {
         "status": "ok",
         "keyword_candidates": [{"keyword": "a phrase", "rationale": "why"}],
-        "meta_description": "A drafted description.",
-        "meta_description_chars": 22,
-        "meta_description_limit": 155,
-        "meta_description_over_limit": False,
+        "fields": {
+            "meta_description": {
+                "label": "Meta description",
+                "value": "A drafted description.",
+                "rationale": "",
+                "chars": 22,
+                "limit": 155,
+                "over_limit": False,
+                "default_note": "",
+            }
+        },
     }
 
     def _handoff(self, seo):
@@ -404,10 +411,47 @@ class TestSeoSuggestionConsoleOutput:
         "keyword_candidates": [
             {"keyword": "interconnection queue", "rationale": "what officials search"}
         ],
-        "meta_description": "Queues, not generation, decide the timeline.",
-        "meta_description_chars": 44,
-        "meta_description_limit": 155,
-        "meta_description_over_limit": False,
+        "fields": {
+            "meta_description": {
+                "label": "Meta description",
+                "value": "Queues, not generation, decide the timeline.",
+                "rationale": "",
+                "chars": 44,
+                "limit": 155,
+                "over_limit": False,
+                "default_note": "",
+            },
+            "og_title": {
+                "label": "OG title",
+                "value": "",
+                "rationale": "",
+                "chars": None,
+                "limit": None,
+                "over_limit": False,
+                "default_note": "The article title is used as-is.",
+            },
+            "og_description": {
+                "label": "OG description",
+                "value": "",
+                "rationale": "",
+                "chars": None,
+                "limit": None,
+                "over_limit": False,
+                "default_note": "The meta description is used.",
+            },
+            "schema_type": {
+                "label": "Schema type",
+                "value": "NewsArticle",
+                "rationale": "reporting tied to a pending vote",
+                "chars": 11,
+                "limit": None,
+                "over_limit": False,
+                "default_note": "",
+                "recognized": True,
+                "configured_default": "BlogPosting",
+                "differs_from_default": True,
+            },
+        },
     }
 
     def _summary(self, suggestions):
@@ -448,6 +492,18 @@ class TestSeoSuggestionConsoleOutput:
         assert "Queues, not generation, decide the timeline." in out
         assert "44/155 chars" in out
         assert "interconnection queue" in out
+
+    def test_every_metadata_field_reaches_the_console(self, capsys):
+        self._summary(self._SUGGESTIONS)
+        out = capsys.readouterr().out
+
+        # Proposed values and applied defaults both report.
+        assert "Meta description" in out
+        assert "OG title: The article title is used as-is." in out
+        assert "OG description: The meta description is used." in out
+        assert "Schema type" in out and "NewsArticle" in out
+        assert "reporting tied to a pending vote" in out
+        assert "Differs from the configured default: BlogPosting" in out
 
     def test_unavailable_suggestions_still_leave_a_finding_that_makes_sense(
         self, capsys

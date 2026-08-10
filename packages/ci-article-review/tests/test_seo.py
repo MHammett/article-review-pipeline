@@ -189,10 +189,17 @@ class TestApplySuggestions:
     _SUGGESTIONS = {
         "status": "ok",
         "keyword_candidates": [{"keyword": "a phrase", "rationale": "why"}],
-        "meta_description": "A drafted description.",
-        "meta_description_chars": 22,
-        "meta_description_limit": 155,
-        "meta_description_over_limit": False,
+        "fields": {
+            "meta_description": {
+                "label": "Meta description",
+                "value": "A drafted description.",
+                "rationale": "",
+                "chars": 22,
+                "limit": 155,
+                "over_limit": False,
+                "default_note": "",
+            }
+        },
     }
 
     def test_attaches_the_block(self):
@@ -214,6 +221,22 @@ class TestApplySuggestions:
         result = analyze(_GOOD_ARTICLE, {"title": "Fine", "seo": {}}, mode=PUBLISH_MODE)
         apply_suggestions(result, self._SUGGESTIONS)
         assert "suggested draft" in _meta_issue(result)["detail"]
+
+    def test_meta_description_field_without_a_value_does_not_rewrite(self):
+        # The pass ran but proposed nothing for this field — the finding must
+        # not promise a draft that is not there.
+        result = analyze(_GOOD_ARTICLE, {"title": "Fine", "seo": {}})
+        before = _meta_issue(result)["detail"]
+        apply_suggestions(
+            result,
+            {
+                "status": "ok",
+                "fields": {
+                    "meta_description": {"label": "Meta description", "value": ""}
+                },
+            },
+        )
+        assert _meta_issue(result)["detail"] == before
 
     def test_unavailable_suggestions_leave_the_standalone_wording(self):
         result = analyze(_GOOD_ARTICLE, {"title": "Fine", "seo": {}})

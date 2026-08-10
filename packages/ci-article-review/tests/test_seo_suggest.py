@@ -82,11 +82,10 @@ class TestGenerateHappyPath:
             "northern illinois data center power",
         ]
         assert all(c["rationale"] for c in suggestions["keyword_candidates"])
-        assert suggestions["meta_description"] == _GOOD_DATA["meta_description"]
-        assert suggestions["meta_description_chars"] == len(
-            _GOOD_DATA["meta_description"]
-        )
-        assert suggestions["meta_description_over_limit"] is False
+        meta = suggestions["fields"]["meta_description"]
+        assert meta["value"] == _GOOD_DATA["meta_description"]
+        assert meta["chars"] == len(_GOOD_DATA["meta_description"])
+        assert meta["over_limit"] is False
 
     def test_call_log_entry_is_attributable_and_priced(self):
         from ci_core.llm import cost as cost_analysis
@@ -165,7 +164,7 @@ class TestMetaDescriptionLengthConstraint:
             )
 
         assert "under 120 characters" in mock_call.call_args.args[1]
-        assert suggestions["meta_description_limit"] == 120
+        assert suggestions["fields"]["meta_description"]["limit"] == 120
 
     def test_over_limit_description_is_flagged_not_silently_shipped(self):
         long_description = "x" * 200
@@ -179,12 +178,13 @@ class TestMetaDescriptionLengthConstraint:
                 _ARTICLE, handoff=_HANDOFF, pub_config=_PUB_CONFIG, api_keys=_KEYS
             )
 
-        assert suggestions["meta_description_over_limit"] is True
-        assert suggestions["meta_description_chars"] == 200
-        assert suggestions["meta_description_limit"] == 155
+        meta = suggestions["fields"]["meta_description"]
+        assert meta["over_limit"] is True
+        assert meta["chars"] == 200
+        assert meta["limit"] == 155
         # Reported in full rather than truncated into a dangling clause — the
         # author trims it.
-        assert suggestions["meta_description"] == long_description
+        assert meta["value"] == long_description
 
     def test_description_at_the_limit_is_not_flagged(self):
         exact = "x" * 155
@@ -196,7 +196,7 @@ class TestMetaDescriptionLengthConstraint:
                 _ARTICLE, handoff=_HANDOFF, pub_config=_PUB_CONFIG, api_keys=_KEYS
             )
 
-        assert suggestions["meta_description_over_limit"] is False
+        assert suggestions["fields"]["meta_description"]["over_limit"] is False
 
 
 class TestOgTitle:
@@ -221,9 +221,10 @@ class TestOgTitle:
             )
 
         assert "OG TITLE REQUESTED" in mock_call.call_args.args[1]
-        assert suggestions["og_title"] == "A Shorter Title"
-        assert suggestions["og_title_chars"] == len("A Shorter Title")
-        assert suggestions["og_title_over_limit"] is False
+        og = suggestions["fields"]["og_title"]
+        assert og["value"] == "A Shorter Title"
+        assert og["chars"] == len("A Shorter Title")
+        assert og["over_limit"] is False
 
     def test_over_long_og_title_is_flagged(self):
         handoff, seo_result = self._long_title_seo_result()
@@ -239,8 +240,8 @@ class TestOgTitle:
                 seo_result=seo_result,
             )
 
-        assert suggestions["og_title_over_limit"] is True
-        assert suggestions["og_title_limit"] == 60
+        assert suggestions["fields"]["og_title"]["over_limit"] is True
+        assert suggestions["fields"]["og_title"]["limit"] == 60
 
     def test_not_requested_when_the_title_fits(self):
         seo_result = seo_analysis.analyze(_ARTICLE, _HANDOFF)
@@ -257,7 +258,10 @@ class TestOgTitle:
             )
 
         assert "OG TITLE REQUESTED" not in mock_call.call_args.args[1]
-        assert "og_title" not in suggestions
+        # The field still reports an outcome — the article-title default.
+        og = suggestions["fields"]["og_title"]
+        assert og["value"] == ""
+        assert "article title is used as-is" in og["default_note"]
 
 
 class TestGracefulDegradation:
@@ -281,6 +285,7 @@ class TestGracefulDegradation:
         assert suggestions["status"] == "failed"
         assert "503" in suggestions["reason"]
         assert "keyword_candidates" not in suggestions
+        assert "fields" not in suggestions
         # The attempt still cost something, so it is still logged.
         assert call_log["pass"] == "seo_suggestions"
         assert call_log["failed"] is True
@@ -413,6 +418,141 @@ class TestCandidateNormalization:
         # No candidates survived, but the description did, so this is still ok.
         assert suggestions["status"] == "ok"
         assert suggestions["keyword_candidates"] == []
+
+
+def _generate(data, pub_config=None, **kwargs):
+    with patch(
+        "ci_article_review.analysis.seo_suggest.mistral.call",
+        return_value=_model_response({**_GOOD_DATA, **data}),
+    ) as mock_call:
+        suggestions, _ = seo_suggest.generate(
+            _ARTICLE,
+            handoff=_HANDOFF,
+            pub_config=pub_config if pub_config is not None else _PUB_CONFIG,
+            api_keys=_KEYS,
+            **kwargs,
+        )
+    return suggestions, mock_call
+
+
+class TestEveryFieldReportsAnOutcome:
+    """The SEO METADATA block has five fields. A field with no proposal still
+    has to say which default the WordPress push would apply — silence reads as
+    'not considered'."""
+
+    def test_all_single_value_fields_are_present(self):
+        suggestions, _ = _generate({})
+        assert set(suggestions["fields"]) == set(seo_suggest.FIELD_ORDER)
+        assert set(seo_suggest.FIELD_ORDER) == {
+            "meta_description",
+            "og_title",
+            "og_description",
+            "schema_type",
+        }
+
+    def test_every_field_has_a_value_or_a_default_note(self):
+        suggestions, _ = _generate({})
+        for name, field in suggestions["fields"].items():
+            assert field["value"] or field["default_note"], name
+            assert field["label"], name
+
+    def test_field_order_matches_the_renderer(self):
+        # report_markdown duplicates this order to stay import-free.
+        from ci_article_review.report_markdown import _SEO_FIELD_ORDER
+
+        assert _SEO_FIELD_ORDER == seo_suggest.FIELD_ORDER
+
+
+class TestOgDescription:
+    def test_distinct_social_framing_is_kept(self):
+        suggestions, _ = _generate(
+            {"og_description": "A punchier hook for the social card."}
+        )
+        field = suggestions["fields"]["og_description"]
+        assert field["value"] == "A punchier hook for the social card."
+        assert field["limit"] == 155
+
+    def test_absent_means_the_meta_description_is_used(self):
+        suggestions, _ = _generate({})
+        field = suggestions["fields"]["og_description"]
+        assert field["value"] == ""
+        assert "meta description is used" in field["default_note"]
+
+    def test_near_copy_of_the_meta_description_is_not_offered_twice(self):
+        # The push already falls back to the meta description; a reworded copy
+        # is not a second option, it is noise.
+        restated = "  " + _GOOD_DATA["meta_description"].upper() + " "
+        suggestions, _ = _generate({"og_description": restated})
+        field = suggestions["fields"]["og_description"]
+        assert field["value"] == ""
+        assert "meta description is used" in field["default_note"]
+
+    def test_over_limit_is_flagged(self):
+        suggestions, _ = _generate({"og_description": "y" * 200})
+        assert suggestions["fields"]["og_description"]["over_limit"] is True
+
+
+class TestSchemaType:
+    def test_recognized_type_carries_its_rationale(self):
+        suggestions, _ = _generate(
+            {
+                "schema_type": "NewsArticle",
+                "schema_type_rationale": "reporting tied to a pending vote",
+            }
+        )
+        field = suggestions["fields"]["schema_type"]
+        assert field["value"] == "NewsArticle"
+        assert field["rationale"] == "reporting tied to a pending vote"
+        assert field["recognized"] is True
+
+    def test_compared_against_the_configured_default(self):
+        pub_config = {**_PUB_CONFIG, "rank_math": {"default_schema_type": "Article"}}
+        suggestions, mock_call = _generate(
+            {"schema_type": "NewsArticle"}, pub_config=pub_config
+        )
+        field = suggestions["fields"]["schema_type"]
+        assert field["configured_default"] == "Article"
+        assert field["differs_from_default"] is True
+        # The model is told what the default is, so confirming it is an option.
+        assert "default schema type is Article" in mock_call.call_args.args[1]
+
+    def test_agreeing_with_the_default_is_not_flagged_as_a_change(self):
+        pub_config = {
+            **_PUB_CONFIG,
+            "rank_math": {"default_schema_type": "BlogPosting"},
+        }
+        suggestions, _ = _generate(
+            {"schema_type": "BlogPosting"}, pub_config=pub_config
+        )
+        assert suggestions["fields"]["schema_type"]["differs_from_default"] is False
+
+    def test_default_falls_back_to_the_wordpress_adapter_default(self):
+        # Same fallback as _build_post_payload, so the report describes what
+        # would actually be pushed.
+        suggestions, _ = _generate({"schema_type": "Article"}, pub_config={})
+        assert (
+            suggestions["fields"]["schema_type"]["configured_default"] == "BlogPosting"
+        )
+
+    def test_casing_is_canonicalized_not_rejected(self):
+        suggestions, _ = _generate({"schema_type": "newsarticle"})
+        field = suggestions["fields"]["schema_type"]
+        assert field["value"] == "NewsArticle"
+        assert field["recognized"] is True
+
+    def test_unrecognized_type_is_kept_but_flagged(self):
+        # Rank Math accepts more types than the template lists, so an unusual
+        # answer may be right — it just can't be acted on unchecked.
+        suggestions, _ = _generate({"schema_type": "TechArticle"})
+        field = suggestions["fields"]["schema_type"]
+        assert field["value"] == "TechArticle"
+        assert field["recognized"] is False
+
+    def test_missing_type_reports_the_default(self):
+        suggestions, _ = _generate({"schema_type": ""})
+        field = suggestions["fields"]["schema_type"]
+        assert field["value"] == ""
+        assert "BlogPosting" in field["default_note"]
 
 
 class TestOutline:

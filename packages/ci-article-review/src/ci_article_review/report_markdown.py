@@ -10,6 +10,13 @@ gap, following the SECTION 1-8 structure documented in
 the pipeline after that template was written).
 """
 
+#: Order the SEO METADATA fields render in, matching publication.md's block.
+#: Duplicated from ``analysis.seo_suggest.FIELD_ORDER`` rather than imported so
+#: this module stays a dependency-free renderer over a plain dict — importing
+#: the suggestion module would pull the provider adapters in behind it. A test
+#: asserts the two stay in step.
+_SEO_FIELD_ORDER = ("meta_description", "og_title", "og_description", "schema_type")
+
 
 def _kv_lines(d, exclude=()):
     """Render remaining key/value pairs of a flag dict as indented bullets."""
@@ -308,40 +315,57 @@ def _render_seo_suggestions(pre_analysis):
             lines.append(f"- **{c['keyword']}**{rationale}")
         lines.append("")
 
-    meta = suggestions.get("meta_description")
-    if meta:
-        over = (
-            " — **over the limit, trim before use**"
-            if suggestions.get("meta_description_over_limit")
-            else ""
-        )
+    fields = suggestions.get("fields") or {}
+    if fields:
+        lines.append("### SEO METADATA fields")
+        lines.append("")
+        for name in _SEO_FIELD_ORDER:
+            field = fields.get(name)
+            if field:
+                lines.extend(_render_seo_field(field))
+
+    return lines
+
+
+def _render_seo_field(field):
+    """One row of the SEO METADATA table of outcomes.
+
+    Fields with no proposed value still render. Two of them (OG title, OG
+    description) have defaults the WordPress push applies on its own, and
+    naming the default that would take effect is more use to the author than
+    omitting the field and leaving them to wonder whether it was considered.
+    """
+    label = field.get("label", "")
+    if not field.get("value"):
+        return [f"**{label}:** {field.get('default_note', '_not proposed_')}", ""]
+
+    measured = (
+        f" ({field['chars']}/{field['limit']} chars)"
+        if field.get("limit") is not None
+        else ""
+    )
+    over = " — **over the limit, trim before use**" if field.get("over_limit") else ""
+    lines = [f"**{label}**{measured}{over}", ""]
+
+    if field.get("recognized") is False:
         lines.append(
-            f"### Draft meta description "
-            f"({suggestions.get('meta_description_chars')}/"
-            f"{suggestions.get('meta_description_limit')} chars){over}"
+            "_Not one of the types this publication's template lists — confirm "
+            "Rank Math accepts it before using._"
         )
-        lines.append(f"> {meta}")
+        lines.append("")
+    elif field.get("differs_from_default"):
+        lines.append(
+            f"_Differs from the configured default "
+            f"(`{field['configured_default']}`), which is what the push would "
+            f"set if this field is left blank._"
+        )
         lines.append("")
 
-    og_title = suggestions.get("og_title")
-    if og_title:
-        over = (
-            " — **over the limit, trim before use**"
-            if suggestions.get("og_title_over_limit")
-            else ""
-        )
-        lines.append(
-            f"### Suggested OG title "
-            f"({suggestions.get('og_title_chars')}/"
-            f"{suggestions.get('og_title_limit')} chars){over}"
-        )
-        lines.append(
-            "_The article title is over this publication's ceiling; OG title is "
-            "the field for a shorter one._"
-        )
-        lines.append(f"> {og_title}")
+    lines.append(f"> {field['value']}")
+    if field.get("rationale"):
         lines.append("")
-
+        lines.append(f"_{field['rationale']}_")
+    lines.append("")
     return lines
 
 

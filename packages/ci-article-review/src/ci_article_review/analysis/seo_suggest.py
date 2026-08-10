@@ -12,6 +12,14 @@ This module fills both: it drafts the values, at draft-review time, where they
 feed the chat revision round-trip and where seeing the intended keyword early
 can reveal that the article never actually uses the phrase it should rank for.
 
+It covers the whole SEO METADATA block, not a subset — every field
+``handoff_parser._parse_seo_block`` reads and ``adapters/cms/wordpress.py``
+pushes to Rank Math. Two of those fields have sensible defaults in the push
+(OG title falls back to the article title, OG description to the meta
+description), so for those a suggestion is offered only when it would beat the
+default; the field still reports an outcome either way, because "the default
+applies, and here is what it is" is information and silence is not.
+
 Everything here is advisory. Keyword choice is strategic — what the author
 wants to rank for — so candidates are returned for a human to pick from, and
 nothing is written into any config, handoff, or WordPress metadata.
@@ -54,6 +62,21 @@ _MAX_OUTLINE_ENTRIES = 40
 #: Model is asked for 3-5; this is the hard cap applied to whatever comes back.
 _MAX_KEYWORD_CANDIDATES = 5
 
+#: Schema types publication.md offers the author. Rank Math accepts more, so
+#: anything outside this set is surfaced rather than dropped — flagged as
+#: needing confirmation instead of silently discarded.
+_KNOWN_SCHEMA_TYPES = ("Article", "NewsArticle", "BlogPosting")
+
+#: Fallback when the publication config sets no rank_math.default_schema_type.
+#: Matches the same fallback in adapters/cms/wordpress.py, so what the report
+#: says would be pushed is what would actually be pushed.
+_DEFAULT_SCHEMA_TYPE = "BlogPosting"
+
+#: Single-value SEO METADATA fields, in the order publication.md lists them.
+#: The focus keyword is handled separately — it is a set of candidates for a
+#: human to choose between, not one proposed value.
+FIELD_ORDER = ("meta_description", "og_title", "og_description", "schema_type")
+
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
 
 _SYSTEM_PROMPT = (
@@ -63,7 +86,8 @@ _SYSTEM_PROMPT = (
     "Respond with ONLY a JSON object of the form "
     '{"keyword_candidates": [{"keyword": "<focus keyword or key phrase>", '
     '"rationale": "<one line>"}], "meta_description": "<one sentence or two>", '
-    '"og_title": "<shorter title>"}.\n'
+    '"og_title": "<shorter title>", "og_description": "<social-card text>", '
+    '"schema_type": "<type>", "schema_type_rationale": "<one line>"}.\n'
     "Rules:\n"
     "- Give 3 to 5 keyword candidates, strongest first. Each must be a phrase "
     "a real reader would type into a search engine, specific to what THIS "
@@ -75,7 +99,18 @@ _SYSTEM_PROMPT = (
     "- The meta description must read as prose that describes what the article "
     "establishes. It is not a keyword list, and it must not oversell: no "
     '"everything you need to know", no invented findings.\n'
-    "- Omit the og_title key entirely unless the prompt explicitly asks for one."
+    "- Omit the og_title key entirely unless the prompt explicitly asks for "
+    "one.\n"
+    "- og_description is the social-card text. It defaults to the meta "
+    "description, and that default is usually right. Omit the key unless a "
+    "distinctly social framing — a hook rather than a summary — would "
+    "genuinely serve the piece better. Do not return a reworded near-copy of "
+    "the meta description.\n"
+    "- schema_type classifies the article for structured data. Choose from "
+    f"{', '.join(_KNOWN_SCHEMA_TYPES)}: NewsArticle for reporting tied to a "
+    "current event, Article for reference or explanatory writing, BlogPosting "
+    "for commentary and opinion in a personal voice. Give a one-line "
+    "schema_type_rationale saying which kind of piece this is."
 )
 
 
@@ -89,7 +124,9 @@ def _outline(text):
     return "\n".join(lines)
 
 
-def _build_user_prompt(text, handoff, pub_config, meta_limit, og_title_request):
+def _build_user_prompt(
+    text, handoff, pub_config, meta_limit, og_title_request, schema_default
+):
     handoff = handoff or {}
     pub_config = pub_config or {}
 
@@ -115,7 +152,14 @@ def _build_user_prompt(text, handoff, pub_config, meta_limit, og_title_request):
     )
 
     parts.append(
-        f"\nThe meta description must be under {meta_limit} characters — count them."
+        f"\nThe meta description must be under {meta_limit} characters — count "
+        f"them. An og_description, if you offer one, is held to the same limit."
+    )
+    parts.append(
+        f"This publication's configured default schema type is "
+        f"{schema_default}. Say so if that default is right for this piece; "
+        f"name a different type only when the piece is genuinely a different "
+        f"kind of writing."
     )
     if og_title_request:
         parts.append(og_title_request)
@@ -147,17 +191,67 @@ def _clean_candidates(raw):
     return candidates
 
 
-def _measured(value, limit):
-    """``(text, chars, over_limit)`` for a length-constrained suggestion.
+def _field(label, value="", limit=None, rationale="", default_note=""):
+    """One SEO METADATA field's outcome, in the shape every renderer expects.
 
-    An over-limit value is reported, not silently truncated and not silently
-    dropped. Cutting at a word boundary produces a dangling clause that reads
-    worse than the author trimming it themselves, and dropping it throws away
-    the only draft the run produced — so the length is stated and flagged, and
-    the author decides.
+    A field always reports something. Either ``value`` holds a proposal — with
+    its length measured against ``limit`` where one applies — or
+    ``default_note`` explains which default takes effect instead. An
+    over-limit value is reported with its count, not truncated into a dangling
+    clause and not dropped: cutting at a word boundary reads worse than the
+    author trimming it, and dropping throws away the only draft the run made.
     """
-    text = str(value or "").strip()
-    return text, len(text), len(text) > limit
+    value = str(value or "").strip()
+    return {
+        "label": label,
+        "value": value,
+        "rationale": str(rationale or "").strip(),
+        "chars": len(value) if value else None,
+        "limit": limit if value else None,
+        "over_limit": bool(value and limit is not None and len(value) > limit),
+        "default_note": "" if value else str(default_note or ""),
+    }
+
+
+def _normalized(text):
+    """Casefolded, whitespace-collapsed text, for near-duplicate comparison."""
+    return " ".join(str(text or "").split()).casefold()
+
+
+def _schema_type_field(data, schema_default):
+    """Classify the article for structured data, against the configured default.
+
+    Always reports: confirming that the publication's default is right for
+    this piece is as useful as naming a different type, and the author has no
+    other prompt to think about it. A type outside the set publication.md
+    offers is kept but flagged — Rank Math accepts more types than the
+    template lists, so an unfamiliar answer may be right, but it is not
+    something to act on unchecked.
+    """
+    raw = str(data.get("schema_type") or "").strip()
+    rationale = str(data.get("schema_type_rationale") or "").strip()
+
+    if not raw:
+        return _field(
+            "Schema type",
+            default_note=(
+                f"No type proposed — the configured default ({schema_default}) "
+                f"is what the push would set."
+            ),
+        )
+
+    # Match case-insensitively so "newsarticle" resolves to the canonical
+    # spelling Rank Math expects rather than being flagged as unrecognized.
+    canonical = next(
+        (t for t in _KNOWN_SCHEMA_TYPES if t.casefold() == raw.casefold()), None
+    )
+    field = _field("Schema type", value=canonical or raw, rationale=rationale)
+    field["recognized"] = canonical is not None
+    field["configured_default"] = schema_default
+    field["differs_from_default"] = (field["value"] or "").casefold() != str(
+        schema_default
+    ).casefold()
+    return field
 
 
 def _skipped(reason):
@@ -165,19 +259,26 @@ def _skipped(reason):
     return {"status": "skipped", "reason": reason}, None
 
 
+def _failed(reason, call_log_entry=None):
+    log.warning("SEO suggestions unavailable — %s", reason)
+    return {"status": "failed", "reason": reason}, call_log_entry
+
+
 def generate(text, handoff=None, pub_config=None, api_keys=None, seo_result=None):
     """Draft SEO metadata for ``text``. Returns ``(suggestions, call_log_entry)``.
 
     ``seo_result`` is the dict from ``seo.analyze`` for the same article; an
-    OG title is only requested when it flagged the title as too long, since
-    that is the case OG title exists to solve.
+    OG title is only *requested* when it flagged the title as too long, since
+    that is the case OG title exists to solve. The field is still reported
+    either way — as the article-title default when no override is needed.
 
     ``suggestions`` always has a ``status``: ``ok`` when the model answered
     usefully, ``skipped`` when no call was made (disabled, or no credentials),
     ``failed`` when the call ran and didn't produce anything usable. The two
-    non-ok states carry a ``reason``. ``call_log_entry`` is a cost-tracking
-    dict in the pipeline's ``api_call_log`` shape when a call was attempted,
-    else None.
+    non-ok states carry a ``reason``. An ``ok`` result carries
+    ``keyword_candidates`` plus a ``fields`` map keyed by ``FIELD_ORDER``, each
+    entry shaped by ``_field``. ``call_log_entry`` is a cost-tracking dict in
+    the pipeline's ``api_call_log`` shape when a call was attempted, else None.
 
     Never raises — a suggestion is a nicety, and no failure here may cost the
     author a review run.
@@ -192,6 +293,9 @@ def generate(text, handoff=None, pub_config=None, api_keys=None, seo_result=None
 
     meta_limit = seo_analysis.meta_description_limit(seo_rules)
     title_limit = seo_analysis.title_limit(seo_rules)
+    schema_default = ((pub_config or {}).get("rank_math") or {}).get(
+        "default_schema_type"
+    ) or _DEFAULT_SCHEMA_TYPE
 
     seo_result = seo_result or {}
     title_too_long = any(
@@ -208,7 +312,7 @@ def generate(text, handoff=None, pub_config=None, api_keys=None, seo_result=None
         )
 
     user_prompt = _build_user_prompt(
-        text, handoff, pub_config, meta_limit, og_title_request
+        text, handoff, pub_config, meta_limit, og_title_request, schema_default
     )
 
     try:
@@ -232,50 +336,85 @@ def generate(text, handoff=None, pub_config=None, api_keys=None, seo_result=None
     }
 
     if result.get("failed"):
-        reason = f"suggestion call failed: {result.get('error', 'unknown error')}"
-        log.warning("SEO suggestions unavailable — %s", reason)
-        return {"status": "failed", "reason": reason}, call_log_entry
+        return _failed(
+            f"suggestion call failed: {result.get('error', 'unknown error')}",
+            call_log_entry,
+        )
 
     data = result.get("data")
     if not isinstance(data, dict):
-        reason = "suggestion call returned no usable JSON object"
-        log.warning("SEO suggestions unavailable — %s", reason)
-        return {"status": "failed", "reason": reason}, call_log_entry
+        return _failed("suggestion call returned no usable JSON object", call_log_entry)
 
     candidates = _clean_candidates(data.get("keyword_candidates"))
-    meta, meta_chars, meta_over = _measured(data.get("meta_description"), meta_limit)
+    meta_field = _field(
+        "Meta description", value=data.get("meta_description"), limit=meta_limit
+    )
 
-    if not candidates and not meta:
-        reason = "suggestion call returned neither keyword candidates nor a description"
-        log.warning("SEO suggestions unavailable — %s", reason)
-        return {"status": "failed", "reason": reason}, call_log_entry
+    if not candidates and not meta_field["value"]:
+        return _failed(
+            "suggestion call returned neither keyword candidates nor a description",
+            call_log_entry,
+        )
+
+    if title_too_long:
+        og_title_field = _field(
+            "OG title",
+            value=data.get("og_title"),
+            limit=title_limit,
+            default_note=(
+                "No shorter title proposed — the push would use the article "
+                f"title as-is, at {seo_result.get('title_length', 0)} characters."
+            ),
+        )
+    else:
+        og_title_field = _field(
+            "OG title",
+            default_note=(
+                f"The article title is used as-is — it is within the "
+                f"{title_limit}-character ceiling, so no override is needed."
+            ),
+        )
+
+    og_description = str(data.get("og_description") or "").strip()
+    if og_description and _normalized(og_description) == _normalized(
+        meta_field["value"]
+    ):
+        # A reworded copy of the meta description is not a second option, and
+        # the push already falls back to the meta description on its own.
+        og_description = ""
+    og_description_field = _field(
+        "OG description",
+        value=og_description,
+        limit=meta_limit,
+        default_note=(
+            "The meta description is used — no separate social-card framing "
+            "was worth proposing."
+        ),
+    )
 
     suggestions = {
         "status": "ok",
         "model": call_log_entry["model"],
         "keyword_candidates": candidates,
-        "meta_description": meta,
-        "meta_description_chars": meta_chars,
-        "meta_description_limit": meta_limit,
-        "meta_description_over_limit": meta_over,
+        "fields": {
+            "meta_description": meta_field,
+            "og_title": og_title_field,
+            "og_description": og_description_field,
+            "schema_type": _schema_type_field(data, schema_default),
+        },
     }
 
-    if title_too_long:
-        og_title, og_chars, og_over = _measured(data.get("og_title"), title_limit)
-        if og_title:
-            suggestions.update(
-                {
-                    "og_title": og_title,
-                    "og_title_chars": og_chars,
-                    "og_title_limit": title_limit,
-                    "og_title_over_limit": og_over,
-                }
-            )
-
+    proposed = [name for name in FIELD_ORDER if suggestions["fields"][name]["value"]]
     log.info(
-        "SEO suggestions: %d keyword candidate(s), meta description %d chars%s",
+        "SEO suggestions: %d keyword candidate(s); proposed %s",
         len(candidates),
-        meta_chars,
-        f" (OVER the {meta_limit}-char limit)" if meta_over else "",
+        ", ".join(proposed) if proposed else "no single-value fields",
     )
+    over = [
+        suggestions["fields"][name]["label"]
+        for name in FIELD_ORDER
+        if suggestions["fields"][name]["over_limit"]
+    ]
+    if over:
+        log.warning("SEO suggestions over their character limit: %s", ", ".join(over))
     return suggestions, call_log_entry

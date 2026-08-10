@@ -131,7 +131,10 @@ def apply_suggestions(seo_result, suggestions):
         return seo_result
 
     seo_result["suggestions"] = suggestions
-    if not suggestions.get("meta_description"):
+    # Read through the fields map rather than importing seo_suggest for an
+    # accessor — that module imports this one, and the shape is one key deep.
+    meta_field = (suggestions.get("fields") or {}).get("meta_description") or {}
+    if not meta_field.get("value"):
         return seo_result
 
     mode = seo_result.get("mode", DRAFT_MODE)
