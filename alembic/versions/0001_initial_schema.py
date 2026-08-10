@@ -5,13 +5,13 @@ Revises:
 Create Date: 2026-06-24
 
 """
+
 from __future__ import annotations
 
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -69,7 +69,9 @@ def upgrade() -> None:
         "document_runs",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("source_url", sa.String(2048), nullable=True),
-        sa.Column("source_type", sa.String(64), nullable=False, server_default="article"),
+        sa.Column(
+            "source_type", sa.String(64), nullable=False, server_default="article"
+        ),
         sa.Column("status", sa.String(32), nullable=False, server_default="pending"),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
@@ -162,7 +164,9 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(["document_run_id"], ["document_runs.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["document_run_id"], ["document_runs.id"], ondelete="SET NULL"
+        ),
         sa.ForeignKeyConstraint(["target_id"], ["targets.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -215,7 +219,9 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.ForeignKeyConstraint(["competitor_id"], ["competitors.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["competitor_id"], ["competitors.id"], ondelete="SET NULL"
+        ),
         sa.ForeignKeyConstraint(["run_id"], ["runs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["target_id"], ["targets.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),

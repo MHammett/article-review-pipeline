@@ -23,10 +23,7 @@ target_metadata = Base.metadata
 
 def _build_url() -> str:
     db = get_settings().database
-    return (
-        f"postgresql+asyncpg://{db.user}:{db.password}"
-        f"@{db.host}:{db.port}/{db.name}"
-    )
+    return f"postgresql+asyncpg://{db.user}:{db.password}@{db.host}:{db.port}/{db.name}"
 
 
 def run_migrations_offline() -> None:
