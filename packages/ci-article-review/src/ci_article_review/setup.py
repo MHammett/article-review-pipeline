@@ -81,6 +81,14 @@ _WORKING_TEMPLATES = (
     "publication.md",
 )
 
+#: Filled-in versions of the above, copied alongside them. Reference material,
+#: not starting points — each template names its example so the distinction is
+#: visible in the working directory rather than only in the docs.
+_WORKED_EXAMPLES = (
+    "draft_submission.filled-example.md",
+    "metadata_only.filled-example.md",
+)
+
 
 def _copy_handoff_templates(dest_dir: Path) -> None:
     """Put the fill-in templates somewhere the user can actually edit them."""
@@ -92,13 +100,10 @@ def _copy_handoff_templates(dest_dir: Path) -> None:
         src = _TEMPLATE_DIR / name
         if src.exists():
             _copy_if_missing(src, dest_dir / name, f"{dest_dir}/{name}")
-    example = _TEMPLATE_DIR / "examples" / "draft_submission.filled-example.md"
-    if example.exists():
-        _copy_if_missing(
-            example,
-            dest_dir / "draft_submission.filled-example.md",
-            f"{dest_dir}/draft_submission.filled-example.md",
-        )
+    for name in _WORKED_EXAMPLES:
+        src = _TEMPLATE_DIR / "examples" / name
+        if src.exists():
+            _copy_if_missing(src, dest_dir / name, f"{dest_dir}/{name}")
 
 
 def _validate_publication_name(name: str) -> bool:
