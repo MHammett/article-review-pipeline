@@ -8,7 +8,13 @@ only aggregate counts are printed to the console. This module fills that
 gap, following the SECTION 1-8 structure documented in
 ``handoff_templates/review_report.md`` (section 9, citations, was added to
 the pipeline after that template was written).
+
+Kept close to a plain-dict renderer: the one module import is ``wayback``, for
+its ``format_summary``, so the "we never asked" wording lives in one place
+rather than being restated here and drifting from it.
 """
+
+from .adapters.citation import wayback
 
 #: Order the SEO METADATA fields render in, matching publication.md's block.
 #: Duplicated from ``analysis.seo_suggest.FIELD_ORDER`` rather than imported so
@@ -19,10 +25,19 @@ _SEO_FIELD_ORDER = ("meta_description", "og_title", "og_description", "schema_ty
 
 
 def _kv_lines(d, exclude=()):
-    """Render remaining key/value pairs of a flag dict as indented bullets."""
+    """Render remaining key/value pairs of a flag dict as indented bullets.
+
+    ``wayback`` gets its own rendering. Dumping the raw dict put
+    ``'archived': None`` in front of the reader beside a 200-character 429
+    error, where it reads as "not archived" — a claim the pipeline never made.
+    ``format_summary`` says "NOT CHECKED" instead.
+    """
     lines = []
     for key, value in d.items():
         if key in exclude or value in (None, "", [], {}):
+            continue
+        if key == "wayback" and isinstance(value, dict):
+            lines.append(f"  - Wayback: {wayback.format_summary(value)}")
             continue
         label = key.replace("_", " ").capitalize()
         lines.append(f"  - {label}: {value}")
@@ -217,6 +232,33 @@ def _render_section_9(citations):
         f"— {len(citations)} claim(s) total"
     )
     lines.append("")
+
+    # A wholesale archive-lookup failure is invisible per-entry: every citation
+    # just says "NOT CHECKED" and a reader skimming for archive coverage
+    # concludes nothing is archived. Say it once, up front, with a count.
+    unchecked = [
+        c
+        for c in citations
+        if isinstance(c.get("wayback"), dict)
+        and c["wayback"].get("archived") is None
+        and c.get("url")
+    ]
+    if unchecked:
+        rate_limited = sum(1 for c in unchecked if c["wayback"].get("rate_limited"))
+        reason = (
+            " archive.org rate-limited this run (HTTP 429)"
+            if rate_limited == len(unchecked)
+            else f" {rate_limited} of them to archive.org rate limiting"
+            if rate_limited
+            else ""
+        )
+        lines.append(
+            f"> **Archive status unknown for {len(unchecked)} of these "
+            f"citations.**{reason}. `archived: null` here means the lookup did "
+            f"not complete, **not** that the page is unarchived — and nothing "
+            f"was submitted for archiving on that basis."
+        )
+        lines.append("")
 
     changed = [c for c in verified if c.get("content_changed_since")]
     if changed:

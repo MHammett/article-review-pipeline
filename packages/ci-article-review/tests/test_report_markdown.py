@@ -270,6 +270,53 @@ class TestSection8Additional:
         assert "fact_check" in md
 
 
+class TestUncheckedArchivesAreNotReportedAsUnarchived:
+    """``archived: null`` after a failed lookup is "we never asked".
+
+    Rendering the raw wayback dict put that null in front of the reader beside
+    a 200-character 429 error, where it reads as a finding about the page. In
+    the run this was written for, all 65 lookups failed that way.
+    """
+
+    def _report(self, **wb):
+        return _base_report(
+            section_9_citations=[
+                {
+                    "claim": "A claim.",
+                    "resolved": True,
+                    "url": "https://example.gov/doc.pdf",
+                    "verification": "checksum",
+                    "wayback": {"url": "https://example.gov/doc.pdf", **wb},
+                }
+            ]
+        )
+
+    def test_a_rate_limited_lookup_says_not_checked(self):
+        md = render_report_markdown(
+            self._report(archived=None, checked=False, rate_limited=True, error="429")
+        )
+        assert "NOT CHECKED" in md
+        assert "rate-limited" in md
+
+    def test_a_genuinely_unarchived_page_still_says_so(self):
+        md = render_report_markdown(self._report(archived=False, checked=True))
+        assert "Not archived in Wayback Machine" in md
+        assert "NOT CHECKED" not in md
+
+    def test_the_count_is_called_out_once_at_the_top(self):
+        md = render_report_markdown(
+            self._report(archived=None, checked=False, rate_limited=True, error="429")
+        )
+        assert "Archive status unknown for 1 of these citations" in md
+        assert "not** that the page is unarchived" in md
+
+    def test_a_clean_run_gets_no_warning(self):
+        md = render_report_markdown(
+            self._report(archived=True, checked=True, snapshot_age_days=10)
+        )
+        assert "Archive status unknown" not in md
+
+
 class TestSection9Citations:
     def test_resolved_and_unresolved_separated(self):
         report = _base_report(

@@ -110,6 +110,17 @@ Every resolved citation URL is checked against the Wayback Machine, and the pipe
 
 **Availability check.** Each resolved URL is looked up via archive.org's availability API. The result records whether a snapshot exists, its timestamp, its age in days, and whether it's stale. "Stale" defaults to older than 180 days and is set by `pipeline.wayback_snapshot_stale_days` in `user.yaml`. If the cited URL is itself a `web.archive.org` link, its date is read straight from the URL and no archive-of-an-archive lookup happens.
 
+**"Not checked" is not "not archived."** A lookup that never completed records `archived: null` with `checked: false`, and the readable report says **NOT CHECKED** rather than "Not archived in Wayback Machine". These are different facts and a reader acts on them differently: one is a reason to go archive the page, the other is not a finding at all. Nothing is submitted for archiving on the strength of a `null` — Save Page Now only fires on a confirmed `archived: false`.
+
+This distinction earns its keep under rate limiting. Two pools call the availability API (citation resolution at 8 workers, link analysis at 10) and archive.org sees one client; in one run every single lookup came back HTTP 429 and the whole report read as unarchived. Lookups are now held to 3 at a time process-wide and retried with exponential backoff, honouring `Retry-After` up to 10 seconds. When they still don't complete, Section 9 opens with a count:
+
+```
+> **Archive status unknown for 65 of these citations.** archive.org rate-limited
+> this run (HTTP 429). `archived: null` here means the lookup did not complete,
+> **not** that the page is unarchived — and nothing was submitted for archiving
+> on that basis.
+```
+
 **Save Page Now submission.** After resolution finishes, any resolved citation whose URL is *not* yet archived gets submitted to archive.org's Save Page Now API. This runs as a follow-up pass at a lower concurrency than resolution itself (2 vs. 8), because each submission triggers a real page capture on archive.org's side rather than a cheap read.
 
 Submission is **fire-and-forget by design**. Captures run asynchronously and can take seconds to minutes, and the pipeline does not poll for completion — it won't block your run on someone else's crawler. The console reports it plainly:

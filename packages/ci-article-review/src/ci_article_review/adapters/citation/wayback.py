@@ -2,6 +2,8 @@
 
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -14,6 +16,31 @@ log = logging.getLogger(__name__)
 
 _AVAILABILITY_API = "https://archive.org/wayback/available"
 _SAVE_API = "https://web.archive.org/save"
+
+#: Bound on concurrent availability lookups across the whole process.
+#:
+#: Two independent pools call ``check`` — citation resolution (8 workers) and
+#: link analysis (10) — and neither knows about the other. archive.org sees one
+#: client, and in a real run every one of 65 lookups came back HTTP 429. The
+#: result was a report where every citation read ``archived: None``, which is
+#: "we never found out", displayed where a reader looks for "is this archived".
+#:
+#: The semaphore is module-level for the same reason the problem is: the limit
+#: belongs to archive.org's view of us, not to any one caller's pool.
+_MAX_PARALLEL_CHECKS = 3
+_CHECK_SEMAPHORE = threading.Semaphore(_MAX_PARALLEL_CHECKS)
+
+#: Retries for a rate-limited availability lookup, and the base for exponential
+#: backoff between them. A ``Retry-After`` header wins over the computed delay.
+#: Kept small: this is a nice-to-have enrichment on a citation, and a run should
+#: not spend minutes waiting on it.
+_CHECK_RETRIES = 3
+_CHECK_BACKOFF_SECONDS = 2.0
+
+#: Longest we will honour a ``Retry-After`` for. archive.org has been known to
+#: send minutes; waiting that long per URL would stall the run for something
+#: that is not load-bearing.
+_MAX_RETRY_AFTER_SECONDS = 10.0
 _STALE_DAYS = (
     180  # default — overridden by pipeline.wayback_snapshot_stale_days in user.yaml
 )
@@ -101,6 +128,57 @@ def _age_days_from_timestamp(ts):
     return None
 
 
+def _retry_after_seconds(resp):
+    """Seconds to wait per the response's ``Retry-After``, if it has a usable one."""
+    raw = (resp.headers or {}).get("Retry-After") if resp is not None else None
+    if not raw:
+        return None
+    try:
+        return min(float(str(raw).strip()), _MAX_RETRY_AFTER_SECONDS)
+    except (TypeError, ValueError):
+        # The HTTP-date form is legal and archive.org does not use it. Fall back
+        # to computed backoff rather than parsing a format we never see.
+        return None
+
+
+def _get_availability(url, timeout):
+    """Fetch the availability API, retrying while archive.org rate-limits us.
+
+    Only 429 is retried. A 5xx is archive.org's own problem and retrying inside
+    a run rarely helps; anything else is not transient.
+    """
+    last_exc = None
+    for attempt in range(_CHECK_RETRIES):
+        with _CHECK_SEMAPHORE:
+            resp = requests.get(
+                _AVAILABILITY_API,
+                params={"url": url},
+                timeout=timeout,
+                headers=DEFAULT_HEADERS,
+            )
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp
+            last_exc = requests.exceptions.HTTPError(
+                f"429 Client Error: Too Many Requests for url: {_AVAILABILITY_API}",
+                response=resp,
+            )
+        # Sleep outside the semaphore so a waiting thread can take the slot.
+        if attempt < _CHECK_RETRIES - 1:
+            delay = _retry_after_seconds(resp)
+            if delay is None:
+                delay = _CHECK_BACKOFF_SECONDS * (2**attempt)
+            log.debug(
+                "Wayback rate-limited for %s; retrying in %.1fs (attempt %d/%d)",
+                url,
+                delay,
+                attempt + 1,
+                _CHECK_RETRIES,
+            )
+            time.sleep(delay)
+    raise last_exc
+
+
 def check(url, timeout=10, stale_days=None):
     """Check if a URL has a Wayback Machine snapshot and how fresh it is.
 
@@ -110,14 +188,22 @@ def check(url, timeout=10, stale_days=None):
     archive link actually resolves is verified separately by the HTTP status check
     in analysis/links.py (the ``ok`` field on the link result).
 
+    Rate-limited lookups are retried with backoff and, across the process, held
+    to ``_MAX_PARALLEL_CHECKS`` at a time. When the lookup still does not
+    complete, the result says so: ``archived`` is None and ``checked`` is False.
+    Those two are not the same claim as ``archived: False`` and must never be
+    read as one — see ``format_summary``.
+
     Returns a dict with:
-      archived        bool | None  — True/False, or None on network error
+      archived        bool | None  — True/False, or None when the check couldn't run
+      checked         bool         — False when archive.org was never successfully asked
       is_archive_url  bool         — True when the link itself is a web.archive.org URL
       snapshot_url    str          — direct https://web.archive.org/web/... URL
       snapshot_ts     str          — raw Wayback timestamp (YYYYMMDDHHMMSS)
       snapshot_age_days  int       — days since the snapshot was taken
       snapshot_stale  bool         — True when older than the stale threshold
       error           str          — set only on network/parse failure
+      rate_limited    bool         — set when the failure was archive.org throttling us
     """
     stale_threshold = stale_days if stale_days is not None else _STALE_DAYS
 
@@ -129,6 +215,7 @@ def check(url, timeout=10, stale_days=None):
         return {
             "url": url,
             "archived": True,
+            "checked": True,
             "is_archive_url": True,
             "snapshot_url": url,
             "snapshot_ts": ts,
@@ -137,21 +224,23 @@ def check(url, timeout=10, stale_days=None):
         }
 
     try:
-        resp = requests.get(
-            _AVAILABILITY_API,
-            params={"url": url},
-            timeout=timeout,
-            headers=DEFAULT_HEADERS,
-        )
-        resp.raise_for_status()
+        resp = _get_availability(url, timeout)
         data = resp.json()
     except Exception as exc:
         log.debug("Wayback availability check failed for %s: %s", url, exc)
-        return {"url": url, "archived": None, "error": str(exc)}
+        result = {
+            "url": url,
+            "archived": None,
+            "checked": False,
+            "error": str(exc),
+        }
+        if isinstance(exc, requests.exceptions.HTTPError) and "429" in str(exc):
+            result["rate_limited"] = True
+        return result
 
     closest = data.get("archived_snapshots", {}).get("closest", {})
     if not closest.get("available"):
-        return {"url": url, "archived": False}
+        return {"url": url, "archived": False, "checked": True}
 
     ts = closest.get("timestamp", "")
     snapshot_url = closest.get("url", "")
@@ -168,6 +257,7 @@ def check(url, timeout=10, stale_days=None):
     return {
         "url": url,
         "archived": True,
+        "checked": True,
         "snapshot_url": snapshot_url,
         "snapshot_ts": ts,
         "snapshot_age_days": snapshot_age_days,
@@ -226,9 +316,24 @@ def submit(url, timeout=30, access_key=None, secret_key=None):
 
 
 def format_summary(wb):
-    """One-line human-readable summary of a wayback result."""
+    """One-line human-readable summary of a wayback result.
+
+    The first branch is the point of this function. "We never asked" and "we
+    asked and there is no snapshot" are different facts, and a reader scanning
+    a citation list will act on them differently — the second is a reason to go
+    archive the page, the first is not a finding at all.
+    """
     if wb.get("archived") is None:
-        return f"Wayback check failed: {wb.get('error', 'unknown error')}"
+        if wb.get("rate_limited"):
+            return (
+                "NOT CHECKED — archive.org rate-limited this run (HTTP 429). "
+                "This says nothing about whether the page is archived."
+            )
+        return (
+            f"NOT CHECKED — the archive.org lookup failed "
+            f"({wb.get('error', 'unknown error')}). This says nothing about "
+            f"whether the page is archived."
+        )
     if not wb.get("archived"):
         return "Not archived in Wayback Machine"
     age = wb.get("snapshot_age_days")

@@ -186,6 +186,110 @@ class TestWaybackCheck:
         assert "[STALE]" not in summary
 
 
+def _rate_limited_response():
+    m = MagicMock()
+    m.status_code = 429
+    m.headers = {}
+    return m
+
+
+class TestRateLimitedLookupsAreRetriedAndLabelled:
+    """A 429 is archive.org throttling *us*, not a fact about the page.
+
+    In one real run all 65 lookups came back 429 and every citation recorded
+    ``archived: None``, which reads as "not archived" everywhere a human or a
+    later pass looks at it.
+    """
+
+    def setup_method(self):
+        self.sleeps = []
+
+    def _run(self, responses):
+        it = iter(responses)
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                side_effect=lambda *a, **kw: next(it),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.wayback.time.sleep",
+                side_effect=self.sleeps.append,
+            ),
+        ):
+            return wayback.check("https://example.com")
+
+    def test_a_rate_limited_lookup_is_retried(self):
+        ok = _mock_response(
+            {
+                "archived_snapshots": {
+                    "closest": {
+                        "available": True,
+                        "url": "https://web.archive.org/web/20250101000000/x",
+                        "timestamp": "20250101000000",
+                    }
+                }
+            }
+        )
+        result = self._run([_rate_limited_response(), ok])
+        assert result["archived"] is True
+        assert len(self.sleeps) == 1
+
+    def test_backoff_grows_between_attempts(self):
+        self._run([_rate_limited_response()] * wayback._CHECK_RETRIES)
+        assert self.sleeps == sorted(self.sleeps)
+        assert len(set(self.sleeps)) > 1
+
+    def test_a_retry_after_header_is_honoured(self):
+        throttled = _rate_limited_response()
+        throttled.headers = {"Retry-After": "4"}
+        self._run([throttled] * wayback._CHECK_RETRIES)
+        assert self.sleeps[0] == 4.0
+
+    def test_an_absurd_retry_after_is_capped(self):
+        throttled = _rate_limited_response()
+        throttled.headers = {"Retry-After": "600"}
+        self._run([throttled] * wayback._CHECK_RETRIES)
+        assert self.sleeps[0] == wayback._MAX_RETRY_AFTER_SECONDS
+
+    def test_exhausted_retries_report_not_checked_not_not_archived(self):
+        result = self._run([_rate_limited_response()] * wayback._CHECK_RETRIES)
+        assert result["archived"] is None
+        assert result["checked"] is False
+        assert result["rate_limited"] is True
+
+    def test_the_summary_never_reads_as_a_finding_about_the_page(self):
+        result = self._run([_rate_limited_response()] * wayback._CHECK_RETRIES)
+        summary = wayback.format_summary(result)
+        assert "NOT CHECKED" in summary
+        assert "Not archived" not in summary
+
+    def test_a_successful_lookup_is_marked_checked(self):
+        payload = {"archived_snapshots": {}}
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
+            result = wayback.check("https://example.com")
+        assert result["archived"] is False
+        assert result["checked"] is True
+
+    def test_a_non_429_error_is_not_retried(self):
+        calls = []
+
+        def _boom(*a, **kw):
+            calls.append(1)
+            raise requests.exceptions.ConnectionError("dns")
+
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            side_effect=_boom,
+        ):
+            result = wayback.check("https://example.com")
+        assert len(calls) == 1
+        assert result["checked"] is False
+        assert "rate_limited" not in result
+
+
 class TestWaybackSubmit:
     def test_unauthenticated_submit_success(self):
         resp = _mock_response({})
