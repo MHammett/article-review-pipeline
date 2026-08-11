@@ -64,6 +64,13 @@ def _iso(ts):
         except (OSError, OverflowError, ValueError):
             return None
     if isinstance(ts, str):
+        # An empty string used to fall through to strptime("", "") — which
+        # returns 1900-01-01 rather than raising. That fabricated a date for a
+        # model that simply had none, printing a wrong one and feeding a false
+        # value into the newer-than-configured comparison. No date is not a
+        # very old date.
+        if not ts.strip():
+            return None
         for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%d"):
             try:
                 return datetime.datetime.strptime(ts[:26], fmt[: len(ts)]).date()
