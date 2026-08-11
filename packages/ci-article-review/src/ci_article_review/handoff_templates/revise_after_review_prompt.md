@@ -17,8 +17,15 @@ Copy everything between the dashed lines into the SAME chat thread that has
 the article's context (or paste the CURRENT metadata file if starting fresh),
 then open the pipeline run's `run_N_<timestamp>_review.md` file (saved next
 to the JSON report in `pipeline_history/<article-slug>/`) and paste its
-SECTION 1 through SECTION 8 content below it, plus the SEO SUGGESTIONS block
-at the end of that file if the run produced one.
+SECTION 1 through SECTION 9 content below it, plus the SEO SUGGESTIONS and
+SEO STRUCTURE REVIEW blocks at the end of that file if the run produced them.
+
+Paste SECTION 9 too — it is easy to skip because it is long, and it is where
+the citation work lands. In particular its "Unresolved" block contains
+content-mismatch entries: sources that were fetched and read, where a model
+found the page does not actually support the claim it was cited for. Those are
+among the most actionable findings a run produces, and they are invisible in
+SECTIONS 1-8.
 
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -44,6 +51,19 @@ Rules for the metadata update:
   what you didn't.
 - TARGET AUDIENCE and ADDITIONAL CONTEXT FOR REVIEW MODELS: leave unchanged
   unless a finding specifically implicates audience fit or context accuracy.
+- SECTION 9 (Citations): the tiers mean different things and must be treated
+  differently. "Verified" means a model read the source and confirmed it backs
+  the claim, quoting the supporting sentence — those need nothing from you.
+  "Content mismatch" entries (inside the Unresolved block) mean the source was
+  read and does NOT support the claim: either re-source the claim, soften it to
+  what the source actually says, or drop it. "Pointer-only" and "Could not be
+  verified" establish nothing either way — do not treat them as either
+  confirmation or refutation; flag them in your summary as needing a human
+  check. Never present an unverified citation as verified in the revision.
+- SEO STRUCTURE REVIEW (if present): heading, opening, and title-promise
+  findings from a search-reader's perspective. Apply the ones you agree with.
+  A title_promise finding is worth real attention — it means the piece does not
+  deliver what its title claims, which no amount of body editing fixes.
 - SEO SUGGESTIONS (if the review file has that block): treat it as reading
   material, not instructions. Do NOT pick a focus keyword, and do not add SEO
   fields to the metadata — the metadata format has no SEO section, and which
@@ -54,7 +74,7 @@ Rules for the metadata update:
 - Increment "Pipeline run" by 1.
 
 Here are the consolidated review findings:
-[paste SECTION 1 through SECTION 8 from the run's `run_N_<timestamp>_review.md`
+[paste SECTION 1 through SECTION 9 from the run's `run_N_<timestamp>_review.md`
 file here]
 
 Here is the current metadata (paste your metadata_only.md content, or the

@@ -30,14 +30,14 @@ handoff text.
 
 ARTICLE TITLE: [paste the article's title here]
 
-PUBLICATION: [mikehammett, or your publication config name]
+PUBLICATION: [your publication config name, i.e. the NAME in configs/NAME.yaml]
 
 PRIMARY CLAIM (one or two sentences — the core argument the piece is built on):
 [paste or describe the thesis]
 
 ABOUT THIS PUBLICATION:
 [One short paragraph: what you cover, who reads it, your editorial standards.
-Example: "mikehammett.net covers data center infrastructure, ISP operations, and
+Example: "example.com covers data center infrastructure, ISP operations, and
 Northern Illinois community impact from a technically literate but non-trade
 perspective. The primary reader is a technically credible practitioner or local
 official who will verify primary sources."]

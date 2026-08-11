@@ -167,7 +167,7 @@ Readable review (paste into chat): pipeline_history/my-article/run_1_20260809_14
 
 1. **Run the pipeline** on your draft handoff (`--draft`) or a plain draft file (`--raw-draft`).
 2. **Open the `review.md`.** Read it directly, or hand it to a model.
-3. **Paste `handoff_templates/revise_after_review_prompt.md` into the same chat thread** that has the article's context, followed by the review's SECTION 1 through SECTION 8 content. That prompt has the model revise the draft *and* regenerate the metadata in one pass — so PRIMARY CLAIM, UNCERTAIN SECTIONS, KNOWN GAPS and the rest don't silently go stale against the revised text. Those sections are fed straight to the review models, so a stale KNOWN GAPS entry gets re-flagged on every subsequent run.
+3. **Paste `handoff_templates/revise_after_review_prompt.md` into the same chat thread** that has the article's context, followed by the review's SECTION 1 through SECTION 9 content, plus the SEO blocks at the end of the file. Include SECTION 9 — it is long and easy to skip, but its content-mismatch entries (sources read and found *not* to support the claim they were cited for) are among the most actionable findings a run produces, and they appear nowhere in SECTIONS 1-8. That prompt has the model revise the draft *and* regenerate the metadata in one pass — so PRIMARY CLAIM, UNCERTAIN SECTIONS, KNOWN GAPS and the rest don't silently go stale against the revised text. Those sections are fed straight to the review models, so a stale KNOWN GAPS entry gets re-flagged on every subsequent run.
 4. **Save what comes back** as two files: the revised draft, and the metadata block (the format matches `handoff_templates/metadata_only.md`).
 5. **Re-run:**
 
