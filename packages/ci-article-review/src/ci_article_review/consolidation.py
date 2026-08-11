@@ -73,6 +73,22 @@ _DEFAULT_CONSENSUS_THRESHOLD = 2.0
 #: Partial vote weight added when LanguageTool also flagged a passage.
 _DEFAULT_LT_WEIGHT = 0.5
 
+#: Which report section each domain feeds, so a failed pass can name the section
+#: it left short-handed rather than only the pass that died. Section 1 draws on
+#: every domain and is reported separately.
+#:
+#: These strings are the readable report's own headings, verbatim — a reader
+#: told "SECTION 6 was built without this model" has to be able to find SECTION
+#: 6. A test in test_report_markdown asserts they stay in step with the
+#: renderer.
+_DOMAIN_SECTIONS = {
+    "fact_check": "SECTION 2: Factual Verification",
+    "voice_style": "SECTION 3: Voice and AI-Speak",
+    "completeness": "SECTION 5: Completeness and Framing",
+    "argument_integrity": "SECTION 4: Argument Integrity",
+    "red_team": "SECTION 6: Red Team Findings",
+}
+
 
 def _get_weight(model_name, domain, ensemble_cfg):
     """Return effective weight for a (model, domain) pair.
@@ -660,6 +676,23 @@ def build_report(
         for (model, domain), r in results.items()
         if r.get("failed") and not r.get("skipped")
     ]
+    # …and what actually happened, plus which section is short a model as a
+    # result. The bare "openai:fact_check" in the header said a pass failed but
+    # not why, and nothing downstream said that Section 2 was consequently built
+    # from four models instead of five — which is what changes how its consensus
+    # counts should be read.
+    model_failure_details = [
+        {
+            "pass": f"{model}:{domain}",
+            "model": r.get("model") or model,
+            "domain": domain,
+            "section": _DOMAIN_SECTIONS.get(domain),
+            "error": r.get("error") or "no error recorded",
+            "elapsed_seconds": r.get("elapsed_seconds"),
+        }
+        for (model, domain), r in results.items()
+        if r.get("failed") and not r.get("skipped")
+    ]
 
     # Calls that succeeded but had to be salvaged from a truncated response —
     # some findings were recovered, but some were genuinely lost. Not a failure
@@ -713,6 +746,7 @@ def build_report(
         "section_8_additional": section_8_additional,
         "contradictions": contradictions,
         "model_failures": model_failures,
+        "model_failure_details": model_failure_details,
         "truncated_results": truncated_results,
         "ensemble": {
             "thoroughness": ensemble_cfg.get("thoroughness", "standard"),

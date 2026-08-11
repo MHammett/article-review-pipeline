@@ -157,6 +157,7 @@
     "registry_warning": false,
     "warnings": []
   },
+  "model_failure_details": [],
   "model_failures": [],
   "pre_analysis": {
     "links": [],
