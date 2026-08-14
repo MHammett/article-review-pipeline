@@ -14,10 +14,25 @@
 # (escape hatch). Otherwise the pipeline computes each model's backstop from the
 # draft's character count and the model + reasoning effort.
 #
-# CALIBRATION NOTE: all calibration data came from one ~62,000-char document, so
-# the model_multipliers and effort_multipliers are anchored at the "≤80000" size
-# bucket (size_mult = 1.0). The OTHER size buckets are reasoned extrapolation, not
-# measured — revisit them once short/long documents have been run.
+# CALIBRATION NOTE: the model_multipliers and effort_multipliers are anchored at
+# the "≤80000" size bucket (size_mult = 1.0), from one ~62,000-char document.
+#
+# The 150000 bucket (mult 1.4) HAS now been exercised: a full maximum-preset run on
+# a 130,190-char draft (2026-08-12). Budget utilisation, worst call per provider:
+#
+#   grok        126s budget   126.0s used   100%   ← timed out
+#   openai     1085s budget   426.1s used    39%
+#   gemini      420s budget   162.1s used    39%
+#   mistral     624s budget   138.4s used    22%
+#   perplexity  735s budget   138.6s used    19%
+#
+# The size axis itself held up: doubling the document did NOT double elapsed time,
+# because generation is driven by OUTPUT length, and output is bounded by what each
+# domain prompt asks for rather than by how much input it read. A sub-linear size
+# multiplier is therefore right in principle, and 1.4 is defensible.
+#
+# What that run exposed is a single miscalibrated CELL, not a broken model: every
+# provider but grok finished inside 39% of its budget. See model_multipliers.
 #
 # Observed at ~74k chars, for reference:
 #   grok 16-51s · gpt-5.4 none 20-28 · gpt-5.4 high 107-120
@@ -57,7 +72,15 @@ size_multipliers:
 # Grounded models (gemini, sonar) carry a high base because their search latency
 # is large and variable by domain, and isn't captured by a reasoning-effort knob.
 model_multipliers:
-  grok:               1.2
+  grok:               2.0   # was 1.2 (-> 126s at the 1.4 size bucket), which grok used
+                            # 100% of on a 130k-char run: completeness timed out at 126s
+                            # and two more domains landed within 14s of the ceiling
+                            # (111.8s, 112.83s). The 1.2 was set when grok ran 16-51s at
+                            # ~74k chars; the grok-4.x reasoning variant is far slower
+                            # than that figure. 2.0 -> 210s, ~1.85x the slowest call that
+                            # actually completed — the same margin gpt-5.5 xhigh carries
+                            # (819s budget vs 456s observed). The true completeness time
+                            # is still unknown: it was cut off, not measured.
   gpt-5.4:            1.0
   gpt-5.5:            1.3
   mistral-small:      0.8
