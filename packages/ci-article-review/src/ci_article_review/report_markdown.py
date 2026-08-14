@@ -265,34 +265,45 @@ def _render_archive_pair(citation, indent="  "):
 #: reader meets them: "we fetched and read the document" before "we never looked
 #: it up", so the section opens on its best evidence and degrades honestly.
 #:
-#: Keyed by ``verification`` tier; anything with no tier is ``no_source``, which
-#: is not a failure of retrieval so much as retrieval never having been
-#: attempted — a distinction the old renderer lost by folding it in with
-#: content mismatches under one "Unresolved" heading.
+#: Keyed by ``verification`` tier, with the untiered entries split in two. That
+#: split matters: an entry with no tier but a URL was a real fetch that was
+#: refused (403, 404, DNS), which is a different fact about the claim than never
+#: having had a URL at all — and it is usually actionable, because a publisher
+#: that refuses an automated fetch will often serve the same page to a person.
 _DISPOSITIONS = (
-    ("checksum", "Read and confirmed"),
+    ("checksum", "Read, and supports the claim"),
     ("content_mismatch", "Read, and does NOT support the claim"),
     ("unverifiable", "Fetched, but could not be read"),
+    ("fetch_failed", "Source URL identified, but the fetch was refused"),
     ("pointer", "Pointer only — nothing retrieved"),
-    ("no_source", "No source retrieved"),
+    ("no_source", "No source identified"),
 )
+
+#: The two dispositions where a document was genuinely retrieved *and* its text
+#: read by the relevance check. "Checked" means these and only these — the
+#: verdict then splits them. Conflating "checked" with "supports" is the same
+#: mistake this section exists to stop a reader making, one level up.
+_READ_DISPOSITIONS = ("checksum", "content_mismatch")
 
 
 def _disposition(citation):
     """Which ``_DISPOSITIONS`` bucket a citation belongs in.
 
-    Anything that never reached a verification tier is ``no_source`` regardless
-    of ``resolved``, because the reader's question is "was a document read for
-    this claim", and for these nothing was ever fetched to read.
+    Anything that never reached a verification tier is one of the two "nothing
+    was read" buckets, regardless of ``resolved``: ``fetch_failed`` when a URL
+    was identified and the fetch did not succeed, ``no_source`` when there was
+    no URL to try.
     """
     tier = citation.get("verification")
-    return tier if tier in {k for k, _ in _DISPOSITIONS} else "no_source"
+    if tier in {k for k, _ in _DISPOSITIONS}:
+        return tier
+    return "fetch_failed" if citation.get("url") else "no_source"
 
 
 def _render_section_9(citations):
     # The heading carries the framing deliberately. "Citations" alone reads as a
     # list of sources backing the article, which invites more confidence than
-    # the tiers below have earned — in a real run 9 of 144 claims had a document
+    # the tiers below have earned — in a real run 18 of 144 claims had a document
     # fetched and read, and the rest rested on a model asserting a source
     # exists. "SECTION 9" and "Citations" both stay greppable: the paste-based
     # revision loop in handoff_templates/revise_after_review_prompt.md refers to
@@ -309,25 +320,34 @@ def _render_section_9(citations):
     verified = grouped["checksum"]
     mismatch = grouped["content_mismatch"]
     unverifiable = grouped["unverifiable"]
+    fetch_failed = grouped["fetch_failed"]
     pointer = grouped["pointer"]
     no_source = grouped["no_source"]
     total = len(citations)
+    checked = len(verified) + len(mismatch)
 
     # Lead with the fraction, not a tier breakdown. The breakdown was accurate
     # but made the reader do arithmetic across four numbers to learn the one
     # thing that governs how much of this section to trust.
-    checked_pct = round(100 * len(verified) / total)
+    #
+    # "Checked" counts both read dispositions, not just the supporting one. A
+    # claim whose source was fetched, read, and found not to back it was checked
+    # — the check returned "no". Reporting only the confirmations as "checked"
+    # would repeat, in the summary line, exactly the conflation between "a model
+    # says so" and "a document was read" that the tiers below exist to separate.
     lines.append(
-        f"**{len(verified)} of {total} claim(s) ({checked_pct}%) were checked "
-        f"against a document the pipeline fetched and read.**"
+        f"**{checked} of {total} claim(s) ({round(100 * checked / total)}%) were "
+        f"checked against a document the pipeline fetched and read** — "
+        f"{len(verified)} where the document supported the claim, "
+        f"{len(mismatch)} where it did not."
     )
     lines.append("")
     lines.append(
-        f"For the other {total - len(verified)}, what stands behind the claim is "
-        "a model asserting that a source exists and supports it — recalled from "
-        "training data or read off a search result. That is a research lead, not "
-        "a verification. The table says which is which; every claim is in "
-        "exactly one row."
+        f"For the other {total - checked}, no document was read. What stands "
+        "behind those claims is a model asserting that a source exists and "
+        "supports it — recalled from training data or read off a search result. "
+        "That is a research lead, not a verification. The table says which is "
+        "which; every claim is in exactly one row."
     )
     lines.append("")
     lines.append("| What happened | Claims |")
@@ -340,23 +360,20 @@ def _render_section_9(citations):
     # These are independent — one is model judgment, the other is retrieval — and
     # a reader who sees "Bucket: confirmed" beside a claim with no URL reasonably
     # reads it as corroboration. In the run that motivated this, 85 claims came
-    # back "confirmed" and 50 of those had no source fetched at all.
+    # back "confirmed"; 9 were read and supported, 9 were read and were not, and
+    # for the remaining 67 no document was read at all.
     confirmed = [c for c in citations if c.get("fact_check_bucket") == "confirmed"]
     if confirmed:
-        confirmed_read = sum(1 for c in confirmed if _disposition(c) == "checksum")
-        confirmed_none = sum(1 for c in confirmed if _disposition(c) == "no_source")
+        supported = sum(1 for c in confirmed if _disposition(c) == "checksum")
+        refuted = sum(1 for c in confirmed if _disposition(c) == "content_mismatch")
+        unread = len(confirmed) - supported - refuted
         lines.append(
             f"> **The fact-check pass called {len(confirmed)} of these claims "
-            f'"confirmed"; {confirmed_read} of those had a supporting document '
-            f"fetched and read here"
-            + (
-                f", and {confirmed_none} had no source retrieved at all"
-                if confirmed_none
-                else ""
-            )
-            + ".** A `confirmed` bucket is that pass's judgment about the claim, "
-            "not a retrieval result. Where the two disagree, this section is the "
-            "one that opened the document."
+            f'"confirmed." Of those, {supported} had a document fetched and read '
+            f"here that supports the claim, {refuted} had one that does not, and "
+            f"for {unread} no document was read at all.** A `confirmed` bucket is "
+            "that pass's judgment about the claim, not a retrieval result. Where "
+            "the two disagree, this section is the one that opened the document."
         )
         lines.append("")
 
@@ -380,8 +397,8 @@ def _render_section_9(citations):
         # the reader meets them here first, and "Verified" alone invites more
         # trust than the tier earns (audit finding 18).
         lines.append(
-            f"### Read and confirmed ({len(verified)}) — checksummed against "
-            "fetched content"
+            f"### Read, and supports the claim ({len(verified)}) — checksummed "
+            "against fetched content"
         )
         lines.append(
             "_Source fetched, checksummed, and a model confirmed the extracted "
@@ -478,13 +495,37 @@ def _render_section_9(citations):
                 lines.append(kv)
         lines.append("")
 
-    if no_source:
-        # Previously "Unresolved", which quietly also held every content
-        # mismatch. Naming it for what happened keeps the bucket honest: nothing
-        # was retrieved, so nothing here is evidence either way.
-        lines.append(f"### No source retrieved ({len(no_source)})")
+    if fetch_failed:
+        # Split out of the old "Unresolved" pile because it is the one bucket in
+        # the section a reader can usually clear by hand: the exact document is
+        # named, and a publisher that refuses an automated fetch (403) will often
+        # serve the same page to a person in a browser. Lumping it in with claims
+        # that never had a URL hid that.
         lines.append(
-            "_No URL was resolved for these claims, so nothing was fetched and "
+            f"### Source URL identified, but the fetch was refused "
+            f"({len(fetch_failed)}) — worth opening by hand"
+        )
+        lines.append(
+            "_A specific URL was named for these claims and the fetch did not "
+            "succeed: refused (403), missing (404), or unreachable. A 403 is a "
+            "statement about automated access, not about the document — these are "
+            "often readable in a browser, and academic publishers in particular "
+            "refuse every automated tier. Nothing here is evidence either way._"
+        )
+        lines.append("")
+        for c in fetch_failed:
+            lines.append(f'- "{c.get("claim", "")}"')
+            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+                lines.append(kv)
+        lines.append("")
+
+    if no_source:
+        # Previously "Unresolved", which quietly also held every content mismatch
+        # and every refused fetch. Naming it for what happened keeps the bucket
+        # honest: no URL was ever found, so nothing here is evidence either way.
+        lines.append(f"### No source identified ({len(no_source)})")
+        lines.append(
+            "_No URL was found for these claims, so nothing was fetched and "
             "nothing was checked. This is not evidence against the claims — it is "
             "the absence of evidence about them. Usually the largest group, and "
             "the one most worth reading as "

@@ -294,8 +294,8 @@ class TestSection9Citations:
             ]
         )
         md = render_report_markdown(report)
-        assert "### Read and confirmed" in md
-        assert "### No source retrieved" in md
+        assert "### Read, and supports the claim" in md
+        assert "### No source identified" in md
         assert "The bridge cost $4 million." in md
         assert "https://example.gov/budget.pdf" in md
         assert "The plan was approved in 2021." in md
@@ -328,11 +328,11 @@ class TestSection9Citations:
             ]
         )
         md = render_report_markdown(report)
-        assert "### Read and confirmed" in md
+        assert "### Read, and supports the claim" in md
         assert "### Pointer only" in md
         assert "not independently verified" in md.lower()
 
-        verified_section = md.split("### Read and confirmed")[1].split(
+        verified_section = md.split("### Read, and supports the claim")[1].split(
             "### Pointer only"
         )[0]
         pointer_section = md.split("### Pointer only")[1]
@@ -421,14 +421,17 @@ class TestSection9Citations:
         assert "### ⚠ Content changed since prior checksum (1)" in md
 
         drift_section = md.split("### ⚠ Content changed")[1].split(
-            "### Read and confirmed"
+            "### Read, and supports the claim"
         )[0]
         assert "https://example.gov/budget.pdf" in drift_section
         assert "run 4 of 'prior-article' on 2026-01-01T00:00:00" in drift_section
         assert "may need re-checking" in drift_section
         # The entry still renders in its tier; it is not moved out of the
         # confirmed block.
-        assert "The bridge cost $4 million." in md.split("### Read and confirmed")[1]
+        assert (
+            "The bridge cost $4 million."
+            in md.split("### Read, and supports the claim")[1]
+        )
 
     def test_no_drift_block_when_nothing_changed(self):
         report = _base_report(
@@ -480,7 +483,8 @@ class TestSection9Citations:
 
         counts = [int(n) for n in re.findall(r"^\| .+ \| (\d+) \|$", md, re.M)]
         assert sum(counts) == len(citations)
-        assert counts == [1, 1, 1, 1, 2]
+        # checksum, mismatch, unverifiable, fetch_failed, pointer, no_source
+        assert counts == [1, 1, 1, 0, 1, 2]
 
     def test_content_mismatch_is_not_buried_with_never_looked_up_claims(self):
         """A source fetched, read, and found not to support the claim is the
@@ -509,7 +513,7 @@ class TestSection9Citations:
         # The claim nothing was fetched for must not be in there with it.
         assert "The plan was approved in 2021." not in mismatch_section
         assert (
-            "The plan was approved in 2021." in md.split("### No source retrieved")[1]
+            "The plan was approved in 2021." in md.split("### No source identified")[1]
         )
 
     def test_mismatch_distinguishes_contradicts_from_not_addressed(self):
@@ -559,9 +563,51 @@ class TestSection9Citations:
         ]
         md = render_report_markdown(_base_report(section_9_citations=citations))
 
-        assert 'called 5 of these claims "confirmed"' in md
-        assert "1 of those had a supporting document fetched and read" in md
-        assert "4 had no source retrieved at all" in md
+        assert 'called 5 of these claims "confirmed."' in md
+        assert "1 had a document fetched and read here that supports the claim" in md
+        assert "for 4 no document was read at all" in md
+
+    def test_checked_count_includes_mismatches_not_just_confirmations(self):
+        """ "Checked" means a document was fetched and read — which is true of a
+        mismatch too; the check simply returned "no". Counting only the
+        confirmations as checked would repeat, in the summary line, the exact
+        conflation between "a model says so" and "a document was read" that the
+        tiers below exist to separate."""
+        citations = [
+            {"claim": "a", "resolved": True, "verification": "checksum"},
+            {"claim": "b", "resolved": False, "verification": "content_mismatch"},
+            {"claim": "c", "resolved": False},
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        assert "2 of 3 claim(s) (67%) were checked" in md
+        assert "1 where the document supported the claim, 1 where it did not" in md
+
+    def test_refused_fetch_is_not_reported_as_no_source(self):
+        """A URL that was identified and refused (403/404/DNS) is a different
+        fact about a claim than never having had a URL, and a more actionable
+        one: a publisher that blocks an automated fetch usually still serves the
+        page to a person. Both used to land in one "Unresolved" pile."""
+        citations = [
+            {
+                "claim": "The ASME study measured neighbourhood warming.",
+                "resolved": False,
+                "url": "https://asmedigitalcollection.asme.org/article/7/2/024501",
+                "note": "Known source URL could not be fetched: 403 Client Error",
+            },
+            {"claim": "Nothing was ever found for this one.", "resolved": False},
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        assert "### Source URL identified, but the fetch was refused (1)" in md
+        refused = md.split("### Source URL identified, but the fetch was refused")[
+            1
+        ].split("###")[0]
+        assert "asmedigitalcollection" in refused
+        assert "Nothing was ever found" not in refused
+
+        assert "### No source identified (1)" in md
+        assert "Nothing was ever found" in md.split("### No source identified")[1]
 
     def test_no_confirmed_reconciliation_when_the_bucket_is_absent(self):
         """Reports whose fact-check pass produced no confirmed bucket must not
@@ -571,7 +617,7 @@ class TestSection9Citations:
         assert "The fact-check pass called" not in md
         # The disposition label still says "confirmed" — that is the tier name,
         # not the reconciliation callout.
-        assert "| Read and confirmed | 1 |" in md
+        assert "| Read, and supports the claim | 1 |" in md
 
 
 def _field(label, value="", limit=None, rationale="", default_note="", **extra):
