@@ -513,6 +513,45 @@ def _run_domain(
 # ---------------------------------------------------------------------------
 
 
+def _stagger_offsets(runner_names, stagger_seconds):
+    """Return ``{runner_name: seconds to wait before starting}``.
+
+    Providers rate-limit per account, not per call, so firing all five of a
+    provider's domain calls in the same instant makes them compete for one
+    quota. Observed 2026-08-12: two Perplexity calls returned HTTP 429 within a
+    second of each other, and the one whose retry also hit the limit failed
+    outright — which then silently cost Section 9 its grounded-search URLs,
+    since perplexity:fact_check is their only supplier (see
+    :func:`_collect_grounded_urls`).
+
+    Only calls sharing a provider are spread; calls to *different* providers all
+    start at 0, because the parallelism that matters is across providers, not
+    within one. The cost is negligible — these calls run 60-400s, so a few
+    seconds of offset is noise against the total.
+
+    ``stagger_seconds`` of 0 disables it and every offset is 0.
+    """
+    offsets = {}
+    seen: dict[str, int] = {}
+    for name in runner_names:
+        provider = name.split(":")[0]
+        offsets[name] = stagger_seconds * seen.get(provider, 0)
+        seen[provider] = seen.get(provider, 0) + 1
+    return offsets
+
+
+def _delay_start(fn, delay):
+    """Wrap ``fn`` so it sleeps ``delay`` seconds before running."""
+    if not delay:
+        return fn
+
+    def _delayed():
+        time.sleep(delay)
+        return fn()
+
+    return _delayed
+
+
 def _global_ceiling(per_task_timeouts, retry_delay):
     """Outer wall-clock bound for the whole parallel batch.
 
@@ -923,7 +962,25 @@ def run_draft_pipeline(
             m = runner_name.split(":")[0]
             return model_configs.get(m, {}).get("model", m)
 
-        runner_timeouts = [(name, fn, _per_model_timeout(name)) for name, fn in runners]
+        stagger = pipeline_cfg.get("provider_stagger_seconds", 3)
+        offsets = _stagger_offsets([name for name, _ in runners], stagger)
+        # The offset is added to the budget, not spent from it: a staggered call
+        # still gets the full timeout its model was calibrated for.
+        runner_timeouts = [
+            (
+                name,
+                _delay_start(fn, offsets[name]),
+                _per_model_timeout(name) + offsets[name],
+            )
+            for name, fn in runners
+        ]
+        if any(offsets.values()):
+            log.info(
+                "Staggering same-provider calls by %ss to avoid self-inflicted "
+                "rate limiting (max offset %ss)",
+                stagger,
+                max(offsets.values()),
+            )
         global_ceiling = _global_ceiling(
             [t for _, _, t in runner_timeouts],
             pipeline_cfg.get("retry_delay_seconds", 10),
