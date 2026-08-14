@@ -456,22 +456,6 @@ def _render_section_9(citations):
         lines.append("")
         for c in mismatch:
             lines.append(f'- "{c.get("claim", "")}"')
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
-                lines.append(kv)
-        lines.append("")
-
-    if pointer:
-        lines.append(
-            f"### Pointer only ({len(pointer)}) — topic-relevant source "
-            "identified, NOT independently verified (confirm manually before citing)"
-        )
-        lines.append(
-            "_A keyword match pointed at a portal that is probably about the right "
-            "topic. Nothing was retrieved or confirmed. Treat as a research lead._"
-        )
-        lines.append("")
-        for c in pointer:
-            lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)
@@ -491,6 +475,7 @@ def _render_section_9(citations):
         lines.append("")
         for c in unverifiable:
             lines.append(f'- "{c.get("claim", "")}"')
+            lines.extend(_render_archive_pair(c))
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)
         lines.append("")
@@ -510,11 +495,31 @@ def _render_section_9(citations):
             "succeed: refused (403), missing (404), or unreachable. A 403 is a "
             "statement about automated access, not about the document — these are "
             "often readable in a browser, and academic publishers in particular "
-            "refuse every automated tier. Nothing here is evidence either way._"
+            "refuse every automated tier. Where an archive copy exists it is "
+            "listed below, and for a refused URL that copy may be the only "
+            "readable version. Nothing here is evidence either way._"
         )
         lines.append("")
         for c in fetch_failed:
             lines.append(f'- "{c.get("claim", "")}"')
+            lines.extend(_render_archive_pair(c))
+            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+                lines.append(kv)
+        lines.append("")
+
+    if pointer:
+        lines.append(
+            f"### Pointer only ({len(pointer)}) — topic-relevant source "
+            "identified, NOT independently verified (confirm manually before citing)"
+        )
+        lines.append(
+            "_A keyword match pointed at a portal that is probably about the right "
+            "topic. Nothing was retrieved or confirmed. Treat as a research lead._"
+        )
+        lines.append("")
+        for c in pointer:
+            lines.append(f'- "{c.get("claim", "")}"')
+            lines.extend(_render_archive_pair(c))
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)
         lines.append("")

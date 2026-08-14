@@ -609,6 +609,54 @@ class TestSection9Citations:
         assert "### No source identified (1)" in md
         assert "Nothing was ever found" in md.split("### No source identified")[1]
 
+    def test_refused_fetch_is_paired_with_its_archive_copy(self):
+        """The archive pairing was added for the tiers that existed at the time.
+        A refused fetch is the case that needs it most — the live URL is exactly
+        the one that did not load, so the snapshot may be the only readable copy
+        — and that bucket did not exist to be wired up."""
+        citations = [
+            {
+                "claim": "The ASME study measured neighbourhood warming.",
+                "resolved": False,
+                "url": "https://asmedigitalcollection.asme.org/article/7/2/024501",
+                "note": "Known source URL could not be fetched: 403 Client Error",
+                "wayback": {
+                    "archived": True,
+                    "snapshot_url": "https://web.archive.org/web/2026/asme",
+                },
+            }
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        refused = md.split("### Source URL identified, but the fetch was refused")[
+            1
+        ].split("###")[0]
+        assert "https://web.archive.org/web/2026/asme" in refused
+        assert "Cite both" in refused
+
+    def test_detail_blocks_render_in_the_same_order_as_the_table(self):
+        """The table is the section's index. If the blocks below it run in a
+        different order the reader cannot navigate from one to the other, which
+        is most of what the table is for."""
+        citations = [
+            {"claim": "a", "resolved": True, "verification": "checksum"},
+            {"claim": "b", "resolved": False, "verification": "content_mismatch"},
+            {"claim": "c", "resolved": True, "verification": "unverifiable"},
+            {"claim": "d", "resolved": False, "url": "https://example.gov/403"},
+            {"claim": "e", "resolved": True, "verification": "pointer"},
+            {"claim": "f", "resolved": False},
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        section = md.split("## SECTION 9")[1]
+
+        # A table label may carry a trailing gloss its heading does not repeat
+        # ("Pointer only — nothing retrieved"), so match on the stable prefix.
+        heads = [
+            label.split(" — ")[0]
+            for _, label in report_markdown._DISPOSITIONS  # noqa: SLF001
+        ]
+        positions = [section.index(f"### {h}") for h in heads]
+        assert positions == sorted(positions), dict(zip(heads, positions))
+
     def test_no_confirmed_reconciliation_when_the_bucket_is_absent(self):
         """Reports whose fact-check pass produced no confirmed bucket must not
         grow an empty callout."""

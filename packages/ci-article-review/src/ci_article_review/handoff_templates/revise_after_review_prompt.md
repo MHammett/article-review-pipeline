@@ -54,14 +54,19 @@ Rules for the metadata update:
 - SECTION 9 (Citations): the dispositions mean different things and must be
   treated differently. Read the opening line first — it says how many claims
   were actually checked against a fetched document, and it is usually a small
-  fraction of the total. "Read and confirmed" means a model read the source and
+  fraction of the total, and it counts a source that was read and did NOT back
+  the claim as checked too. "Read, and supports the claim" means a model read the source and
   confirmed it backs the claim, quoting the supporting sentence — those need
   nothing from you. "Read, and does NOT support the claim" means the source was
   fetched and read and does not back it; check the verdict, because
   `contradicts` means the source says otherwise (re-source the claim, soften it
   to what the source actually says, or drop it) while `not_addressed` usually
   means the wrong URL was checked (fix the citation, not the sentence).
-  "Pointer only", "Fetched, but could not be read", and "No source retrieved"
+  "Source URL identified, but the fetch was refused" names a document that
+  exists but did not load for an automated fetch — usually a 403, and usually
+  still readable in a browser or via the archive copy listed beside it; those
+  are worth opening by hand rather than treating as unsourced. "Pointer only",
+  "Fetched, but could not be read", and "No source identified"
   establish nothing either way — do not treat them as either confirmation or
   refutation; flag them in your summary as needing a human check. In
   particular, a claim the fact-check pass called "confirmed" may still have had
