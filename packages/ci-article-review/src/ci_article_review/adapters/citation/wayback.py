@@ -1,6 +1,8 @@
 """Wayback Machine availability checker (archive.org CDX API)."""
 
 import logging
+import threading
+import time
 import re
 from datetime import datetime, timezone
 
@@ -101,6 +103,99 @@ def _age_days_from_timestamp(ts):
     return None
 
 
+# archive.org throttles the availability API at IP level with a long window, not
+# per-second. Measured 2026-08-12: 12 consecutive requests all returned 429 —
+# including the first — and it was still 429 after a 45s cooldown at one request
+# every 6 seconds. The pipeline had no pacing and no backoff at all, and the
+# result was an archive thread that had been dead for at least two runs: 49
+# resolved citations, 0 archived, ~49 rate-limited.
+#
+# Two mechanisms, because one is not enough:
+#   * a process-wide minimum interval between calls, serialised on a lock. Claim
+#     resolution runs in a thread pool, so without this the pool's width decides
+#     the request rate.
+#   * retry with backoff that honours Retry-After, and a circuit breaker: once
+#     archive.org has said 429 repeatedly, further calls in the same run are
+#     skipped rather than spending the run's time collecting more 429s.
+_MIN_INTERVAL_SECONDS = 3.0
+_MAX_ATTEMPTS = 3
+_BACKOFF_BASE_SECONDS = 5.0
+_CIRCUIT_TRIP_AFTER = 5
+
+_pace_lock = threading.Lock()
+_last_call_at = 0.0
+_consecutive_rate_limits = 0
+
+
+def reset_rate_limit_state():
+    """Clear the pacing clock and circuit breaker. For tests and new runs."""
+    global _last_call_at, _consecutive_rate_limits
+    with _pace_lock:
+        _last_call_at = 0.0
+        _consecutive_rate_limits = 0
+
+
+def rate_limited_out():
+    """True once the circuit breaker has tripped for this run."""
+    return _consecutive_rate_limits >= _CIRCUIT_TRIP_AFTER
+
+
+def _pace():
+    """Block until at least _MIN_INTERVAL_SECONDS since the last call."""
+    global _last_call_at
+    with _pace_lock:
+        wait = _MIN_INTERVAL_SECONDS - (time.monotonic() - _last_call_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call_at = time.monotonic()
+
+
+def _retry_after_seconds(resp, attempt):
+    """Seconds to wait before retrying, preferring the server's own answer."""
+    header = (resp.headers or {}).get("Retry-After") if resp is not None else None
+    if header:
+        try:
+            return min(float(header), 60.0)
+        except (TypeError, ValueError):
+            pass
+    return _BACKOFF_BASE_SECONDS * (2**attempt)
+
+
+def _get_availability(url, timeout):
+    """GET the availability API with pacing, backoff, and a circuit breaker.
+
+    Raises the last exception if every attempt fails, so the caller's existing
+    error handling is unchanged.
+    """
+    global _consecutive_rate_limits
+    last_exc = None
+    for attempt in range(_MAX_ATTEMPTS):
+        _pace()
+        try:
+            resp = requests.get(
+                _AVAILABILITY_API,
+                params={"url": url},
+                timeout=timeout,
+                headers=DEFAULT_HEADERS,
+            )
+        except Exception as exc:
+            last_exc = exc
+            continue
+        if resp.status_code == 429:
+            _consecutive_rate_limits += 1
+            last_exc = requests.HTTPError(
+                f"429 Client Error: Too Many Requests for url: {resp.url}",
+                response=resp,
+            )
+            if attempt < _MAX_ATTEMPTS - 1:
+                time.sleep(_retry_after_seconds(resp, attempt))
+            continue
+        resp.raise_for_status()
+        _consecutive_rate_limits = 0
+        return resp
+    raise last_exc
+
+
 def check(url, timeout=10, stale_days=None):
     """Check if a URL has a Wayback Machine snapshot and how fresh it is.
 
@@ -136,14 +231,19 @@ def check(url, timeout=10, stale_days=None):
             "snapshot_stale": age is not None and age > stale_threshold,
         }
 
+    # Once archive.org has refused repeatedly, stop asking: every further call
+    # costs the run several seconds of pacing to collect another 429.
+    if rate_limited_out():
+        return {
+            "url": url,
+            "archived": None,
+            "error": (
+                "skipped: archive.org rate limit tripped earlier this run "
+                "(no snapshot lookup attempted)"
+            ),
+        }
     try:
-        resp = requests.get(
-            _AVAILABILITY_API,
-            params={"url": url},
-            timeout=timeout,
-            headers=DEFAULT_HEADERS,
-        )
-        resp.raise_for_status()
+        resp = _get_availability(url, timeout)
         data = resp.json()
     except Exception as exc:
         log.debug("Wayback availability check failed for %s: %s", url, exc)

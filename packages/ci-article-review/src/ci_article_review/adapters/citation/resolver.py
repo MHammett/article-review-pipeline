@@ -762,12 +762,22 @@ def _submit_missing_archives(results, archive_org_creds=None):
     access_key = creds.get("access_key")
     secret_key = creds.get("secret_key")
 
+    # A stale snapshot is submitted for re-capture alongside an absent one. The
+    # run already detects staleness and reported it ("N resolved URL(s) have a
+    # stale Wayback snapshot") without acting, which is the weaker half of the
+    # job: the point of archiving a citation is that the page you cited is still
+    # readable later, and a snapshot older than the threshold predates whatever
+    # the page says now. Submitting is fire-and-forget and costs nothing but the
+    # request, so the only reason not to was that nobody wired it up.
     targets = [
         r
         for r in results
         if r.get("resolved")
         and r.get("url")
-        and r.get("wayback", {}).get("archived") is False
+        and (
+            r.get("wayback", {}).get("archived") is False
+            or r.get("wayback", {}).get("snapshot_stale")
+        )
         # Never hand a non-public URL to archive.org. It could not archive one
         # anyway, so the only effect would be transmitting an internal hostname
         # and path to a third party that logs it.
