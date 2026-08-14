@@ -6,7 +6,7 @@ import re
 
 import requests
 
-from ci_core.http import DEFAULT_HEADERS, safe_get
+from ci_core.http import DEFAULT_HEADERS, impersonating_get, safe_get
 from ci_core.http import is_public_host as _core_is_public_host
 
 from ..adapters.citation.wayback import (
@@ -124,15 +124,41 @@ def _check_http(url, timeout=_HEAD_TIMEOUT):
             timeout=timeout,
             headers=DEFAULT_HEADERS,
         )
-        if resp.status_code == 405:
+        # 405 means HEAD is not allowed. 403 often means the same thing in
+        # practice: some servers and WAFs reject HEAD specifically while serving
+        # GET to the identical client. Retrying with GET is a method change, not
+        # an identity change — the honest User-Agent is unchanged, so a site with
+        # a deliberate bot policy still gets to enforce it (see ci_core.http).
+        #
+        # Measured on six real 403s from the 2026-08-12 run: one was served
+        # normally on GET, and one turned out to be a genuine 404 that HEAD had
+        # been reporting as 403. That second case is why this matters most —
+        # a dead link was being excused as "403 blocked, likely still valid".
+        if resp.status_code in (403, 405):
             with requests.get(
                 url,
                 allow_redirects=True,
                 timeout=timeout,
                 headers=DEFAULT_HEADERS,
                 stream=True,
-            ) as resp:
-                return _finalize_http_result(url, resp, timeout)
+            ) as get_resp:
+                # Last tier: a browser TLS fingerprint. Only for a link still
+                # refusing an honest request, and only to confirm a source the
+                # article already cites is real — an unverifiable citation is a
+                # worse outcome than a spoofed handshake. Returns None when
+                # curl_cffi is absent or the block holds, in which case the
+                # original result stands and the Wayback fallback runs as before.
+                if get_resp.status_code == 403:
+                    impersonated = impersonating_get(url, timeout=timeout)
+                    if impersonated is not None:
+                        return {
+                            "status_code": impersonated.status_code,
+                            "ok": True,
+                            "error": None,
+                            "verified_via": "tls_impersonation",
+                            "final_url": str(getattr(impersonated, "url", url)),
+                        }
+                return _finalize_http_result(url, get_resp, timeout)
         return _finalize_http_result(url, resp, timeout)
     except Exception as exc:
         return _finalize_error_result(url, exc, timeout)
