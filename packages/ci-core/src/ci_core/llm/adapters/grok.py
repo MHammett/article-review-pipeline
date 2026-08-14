@@ -2,7 +2,7 @@ import time
 import logging
 import requests
 
-from .. import streaming
+from .. import schema_format, streaming
 from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
 from ..tokens import normalize_tokens
 from ... import redact
@@ -15,6 +15,10 @@ _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 
 # Fallback chain tried in order when primary model returns a capacity error (503).
 _FALLBACK_MODELS = ["grok-build-0.1"]
+
+# Explicit output ceiling. Grok sent none, leaving the provider default in
+# play as an unmeasured variable; see the note in _call_model.
+DEFAULT_MAX_TOKENS = 32000
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +47,8 @@ def call(
     cfg = provider_config or {}
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     reasoning_effort = cfg.get("reasoning_effort")
+    response_schema = cfg.get("response_schema")
+    max_tokens = cfg.get("max_tokens", DEFAULT_MAX_TOKENS)
     models_to_try = [requested_model] + [
         m for m in _FALLBACK_MODELS if m != requested_model
     ]
@@ -61,6 +67,8 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
+            response_schema=response_schema,
+            max_tokens=max_tokens,
             timeout=timeout,
         )
         if not result.get("failed"):
@@ -94,6 +102,8 @@ def _call_model(
     retry_delay=10,
     reasoning_effort=None,
     timeout=None,
+    response_schema=None,
+    max_tokens=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
@@ -107,11 +117,24 @@ def _call_model(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json_object"},  # upgraded below when a
+        # domain schema is supplied — json_object only promises *some*
+        # JSON, json_schema pins the shape server-side.
         "temperature": 0.2,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    # Grok was the only adapter sending no output cap, and its output volume is
+    # far below the others on identical domains (602 completion tokens on
+    # voice_style where Gemini wrote 9,377 and Mistral 22,414, 2026-08-12).
+    # Making the ceiling explicit removes the provider default as a suspect;
+    # whether Grok is simply terse is then measurable rather than confounded.
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if response_schema:
+        payload["response_format"] = schema_format.chat_completions_response_format(
+            response_schema
+        )
     if reasoning_effort:
         # reasoning_effort: "none" | "low" | "medium" | "high"
         # grok-4.3 supports this via Chat Completions; response_format can coexist with it.

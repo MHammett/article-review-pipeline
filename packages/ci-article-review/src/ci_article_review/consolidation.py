@@ -695,6 +695,10 @@ def build_report(
         "lt_corrections_applied": lt_result.get("change_log", []) if lt_result else [],
         "lt_failed": lt_result.get("failed", False) if lt_result else True,
         "lt_skipped": lt_result.get("skipped", False) if lt_result else False,
+        # "disabled" (grammar_pass: false) or "no_credentials" — the summary
+        # named the wrong one for either, sending operators to configure
+        # credentials they already had.
+        "lt_skipped_reason": lt_result.get("skipped_reason") if lt_result else None,
         "corrected_draft": corrected_draft,
         "primary_claim": primary_claim,
         "api_call_log": api_call_log,

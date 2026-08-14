@@ -30,7 +30,7 @@ import time
 import logging
 import requests
 
-from .. import streaming
+from .. import schema_format, streaming
 from ..tokens import normalize_tokens
 from ... import redact
 from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
@@ -56,6 +56,80 @@ def _redact_key(text, api_key):
     if api_key and api_key in str(text):
         return str(text).replace(api_key, "[REDACTED]")
     return str(text)
+
+
+#: Gemini hands back grounding sources as redirect wrappers on this host rather
+#: than as the source URLs themselves.
+_GROUNDING_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+
+
+def resolve_grounding_urls(chunks, timeout=20, cache=None):
+    """Turn Gemini grounding chunks into real source URLs.
+
+    ``chunks`` is what :func:`ci_core.llm.streaming.accumulate_gemini` collected:
+    ``[{"uri", "title"}, ...]`` where each ``uri`` is a
+    ``vertexaisearch.cloud.google.com/grounding-api-redirect/...`` wrapper. Each
+    one has to be followed to learn the URL it stands for.
+
+    Why the wrapper must never be stored: those redirect links expire after
+    roughly 30 days. Putting one in the drift index or handing it to Wayback
+    preserves a link that will be dead by the time anyone follows it, which is
+    worse than having no URL — it looks like a citation and isn't one. So a chunk
+    whose redirect cannot be resolved is **dropped**, not downgraded: ``title``
+    carries only a bare domain ("epa.gov"), and a homepage is not the source the
+    claim rests on. No URL beats a wrong one.
+
+    Resolution is deliberately off the streaming path — it is one HTTP request
+    per chunk, and doing it inside the model call would spend the call's timeout
+    budget on it. ``cache`` (a dict) is shared across calls in a run so the same
+    redirect is followed once.
+
+    Returns the resolved source URLs in first-seen order.
+    """
+    from ...http import DEFAULT_HEADERS
+
+    if cache is None:
+        cache = {}
+    resolved = []
+    for chunk in chunks or []:
+        uri = chunk.get("uri")
+        if not isinstance(uri, str) or not uri:
+            continue
+        if uri not in cache:
+            cache[uri] = _follow_redirect(uri, timeout, DEFAULT_HEADERS)
+        final = cache[uri]
+        if final and final not in resolved:
+            resolved.append(final)
+    dropped = len([c for c in chunks or [] if c.get("uri")]) - len(resolved)
+    if dropped > 0:
+        log.debug(
+            f"Gemini grounding: {len(resolved)} source URL(s) resolved, "
+            f"{dropped} redirect(s) unresolvable and dropped."
+        )
+    return resolved
+
+
+def _follow_redirect(uri, timeout, headers):
+    """Return the final URL behind a grounding redirect, or None.
+
+    ``None`` for anything that did not land on a real source: a network failure,
+    an error status, or a URL still on the redirect host (meaning the redirect
+    did not actually go anywhere). Some of these legitimately fail — a redirect
+    can land on a bot-detection interstitial — and that is a drop, not an error
+    worth failing the run over.
+    """
+    try:
+        resp = requests.get(uri, timeout=timeout, allow_redirects=True, headers=headers)
+    except requests.RequestException as e:
+        log.debug(f"Gemini grounding redirect failed ({type(e).__name__}): {uri[:80]}")
+        return None
+    if resp.status_code >= 400:
+        log.debug(f"Gemini grounding redirect returned {resp.status_code}: {uri[:80]}")
+        return None
+    final = resp.url or ""
+    if not final or _GROUNDING_REDIRECT_HOST in final:
+        return None
+    return final
 
 
 def _is_capacity_error(exc):
@@ -329,6 +403,16 @@ def _execute_request(
     _grounded_gen_config = {"temperature": 0.2}
     # responseMimeType is incompatible with grounding — used only on plain payload.
     _plain_gen_config = {"temperature": 0.2, "responseMimeType": "application/json"}
+    # A response schema is a stronger form of the same constraint and inherits the
+    # same limitation: Gemini rejects it alongside google_search with HTTP 400
+    # ("Tool use with a response mime type: 'application/json' is unsupported",
+    # verified live 2026-08-12). So the grounded fact-check keeps asking for JSON
+    # in the prompt, and only the ungrounded fallback gets it enforced.
+    _schema = (provider_config or {}).get("response_schema")
+    if _schema:
+        _converted = schema_format.gemini_response_schema(_schema)
+        if _converted:
+            _plain_gen_config.update(_converted)
 
     # Optional thinking budget from provider_config (e.g. thinking_budget: 8192).
     # gemini-2.5-flash already uses dynamic thinking by default; setting an explicit
@@ -565,6 +649,9 @@ def _execute_request(
         "model": model,
         "tokens": normalize_tokens(usage),
         "grounding_available": grounding_available,
+        # Raw redirect wrappers, not source URLs. The caller resolves them with
+        # resolve_grounding_urls() once per run, off the timed call path.
+        "grounding_chunks": assembled.get("grounding_chunks") or [],
         "elapsed_seconds": elapsed,
     }
     if truncated:

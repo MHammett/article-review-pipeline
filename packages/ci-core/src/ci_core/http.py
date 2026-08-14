@@ -21,15 +21,25 @@ except metadata.PackageNotFoundError:  # pragma: no cover - source/dev checkout
 #: Outbound HTTP User-Agent shared by all Content Intelligence packages.
 USER_AGENT = f"content-intelligence/{_VERSION}"
 
-# DEFAULT_HEADERS keeps the honest platform User-Agent (see docstring above —
-# it's an intentional identity string, not something to spoof) but adds the
-# Accept / Accept-Language headers a real browser always sends. A bare
-# User-Agent-only request is itself a bot signal to some WAFs regardless of
-# the UA string's contents; several of the 403s that motivated this constant
-# came from sites that just wanted *a* plausible Accept header. This resolves
-# some blocks without impersonating a browser, which is a smaller step than
-# UA spoofing and carries a lot less risk of quietly evading a site's
-# deliberate bot policy.
+# DEFAULT_HEADERS keeps the honest platform User-Agent (see docstring above)
+# plus the Accept / Accept-Language headers a real browser always sends. A bare
+# User-Agent-only request is itself a bot signal to some WAFs regardless of the
+# UA string's contents.
+#
+# This is the DEFAULT identity, not a policy ceiling. Citation verification is
+# allowed to escalate past it — see ``impersonating_get`` below — because the
+# job is checking that sources an article already cites say what it claims, and
+# an unverifiable citation is a worse outcome than a spoofed User-Agent.
+#
+# What escalation actually buys, measured 2026-08-12 against six real 403s:
+#   * browser headers alone:  0/6.  The hard blocks are Cloudflare, which
+#     returns 403 to a full browser header set on the domain root — it
+#     fingerprints the TLS handshake, and no header string changes that.
+#   * TLS impersonation:      2/5.  congress.gov (488 KB) and a CDC PDF
+#     (661 KB) came back in full.
+# Three academic publishers (ASME, Wiley/AGU, Royal Society) refuse all of it
+# and return a ~6 KB challenge page. Those are not solvable by fingerprinting
+# and are very likely subscription gates rather than bot gates.
 DEFAULT_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -208,3 +218,60 @@ __all__ = [
     "safe_get",
     "safe_head",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Escalated fetching for citation verification
+# ---------------------------------------------------------------------------
+
+#: Browser-shaped headers used with TLS impersonation. Pointless on their own —
+#: see the measurement above — but a fingerprinted request that still announces
+#: itself as a script gets refused by some WAFs on the mismatch alone.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def impersonating_get(url, timeout=30):
+    """Fetch ``url`` with a browser TLS fingerprint, or return ``None``.
+
+    The last escalation tier for a link that refuses an honest request. Uses
+    ``curl_cffi`` to reproduce Chrome's TLS handshake, which is what Cloudflare
+    actually fingerprints — plain ``requests`` is identifiable no matter what
+    headers it sends.
+
+    ``None`` when ``curl_cffi`` is not installed (it is an optional extra), when
+    the fetch raises, or when the response is still an error. Callers treat that
+    exactly as they treated the original block, so nothing regresses if the
+    dependency is absent.
+
+    This does not defeat a genuine paywall or a JS/CAPTCHA challenge, and no
+    attempt is made to: the three academic publishers in the measurement above
+    return a challenge page to this too.
+    """
+    try:
+        from curl_cffi import requests as _cffi
+    except ImportError:
+        return None
+    try:
+        resp = _cffi.get(
+            url,
+            impersonate="chrome",
+            timeout=timeout,
+            headers=BROWSER_HEADERS,
+            allow_redirects=True,
+        )
+    except Exception:
+        return None
+    if resp.status_code >= 400:
+        return None
+    return resp

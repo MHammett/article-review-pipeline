@@ -27,7 +27,7 @@ import time
 import logging
 import requests
 
-from .. import streaming
+from .. import schema_format, streaming
 from ..tokens import normalize_tokens
 from ..json_utils import extract_json_with_salvage
 from ... import redact
@@ -117,6 +117,7 @@ def call(
     # --- La Plateforme path with fallback chain ---
     requested_model = _resolve_model(model, cfg)
     reasoning_effort = cfg.get("reasoning_effort")
+    response_schema = cfg.get("response_schema")
     max_tokens = cfg.get("max_tokens", DEFAULT_MAX_TOKENS)
     models_to_try = [requested_model] + [
         m for m in _FALLBACK_MODELS if m != requested_model
@@ -132,6 +133,7 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
+            response_schema=response_schema,
             max_tokens=max_tokens,
             timeout=timeout,
         )
@@ -170,6 +172,7 @@ def _call_laplateforme(
     retry=True,
     retry_delay=10,
     reasoning_effort=None,
+    response_schema=None,
     max_tokens=None,
     timeout=None,
 ):
@@ -184,6 +187,7 @@ def _call_laplateforme(
         reasoning_effort=reasoning_effort,
         max_tokens=max_tokens,
         timeout=timeout,
+        response_schema=response_schema,
     )
 
 
@@ -244,6 +248,7 @@ def _execute_request(
     reasoning_effort=None,
     max_tokens=None,
     timeout=None,
+    response_schema=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
@@ -271,6 +276,13 @@ def _execute_request(
         else:
             p["response_format"] = {"type": "json_object"}
             p["temperature"] = 0.2
+        # A schema supersedes json_object, and unlike temperature it is
+        # accepted in reasoning mode too, so reasoning calls stop being the
+        # ones with no enforcement at all.
+        if response_schema:
+            p["response_format"] = schema_format.chat_completions_response_format(
+                response_schema
+            )
         return p
 
     session = requests.Session()

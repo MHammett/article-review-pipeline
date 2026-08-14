@@ -64,9 +64,11 @@ from .handoff_parser import (
 )
 from . import history as hist
 from . import consolidation
+from . import response_schemas
 from ci_core import redact
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
+from ci_core.llm.adapters import gemini as gemini_adapter
 from .analysis import readability as readability_analysis
 from .analysis import seo as seo_analysis
 from .analysis import seo_content
@@ -291,6 +293,33 @@ def _render_prompt(template: str, **kwargs) -> str:
     return template
 
 
+#: Constant system prompt used by the cache-friendly layout. It has to be
+#: identical for every domain — that is the whole point — so it carries no task
+#: content and only points at where the task now lives.
+_CACHE_LAYOUT_SYSTEM = (
+    "You are a meticulous editorial reviewer. The article and its context come "
+    "first; your specific review task is stated at the end of this message. "
+    "Follow that task exactly and return only the JSON it specifies."
+)
+
+
+def _cache_friendly_layout(system: str, user: str) -> tuple[str, str]:
+    """Move the domain instruction after the draft so the prefix is shareable.
+
+    Returns ``(system, user)`` with the per-domain text relocated to the end of
+    ``user``. The model still receives the entire domain prompt — only its
+    position changes — and putting the task after a long document is a normal
+    long-context arrangement rather than an exotic one.
+
+    The shared prefix is ``_CACHE_LAYOUT_SYSTEM`` plus the article, which is
+    byte-identical across all five domains of a run.
+    """
+    return (
+        _CACHE_LAYOUT_SYSTEM,
+        f"{user}\n\n{'=' * 60}\nYOUR REVIEW TASK\n{'=' * 60}\n{system}",
+    )
+
+
 def _build_user_prompt(draft: str, handoff: dict) -> str:
     parts = [f"ARTICLE TITLE: {handoff['title']}\n"]
     if handoff.get("target_audience"):
@@ -372,9 +401,21 @@ def _collect_grounded_urls(results: dict) -> dict:
     """Map claim text -> a source URL the *provider's own live search* returned.
 
     Perplexity returns ``citations`` (flat URLs) and ``search_results`` (richer
-    objects) on its final SSE chunk, and Gemini returns grounding metadata.
-    Both were parsed by the adapters, counted in a log line, and then dropped
-    when the result dict was folded into the report.
+    objects) on its final SSE chunk. Those were parsed by the adapter, counted
+    in a log line, and then dropped when the result dict was folded into the
+    report.
+
+    Gemini contributes too, via ``candidates[].groundingMetadata.groundingChunks``.
+    It had been the only grounded provider whose sources were never read, which
+    made perplexity:fact_check a single point of failure: when it was rate-limited
+    on 2026-08-12 the grounded-URL count went 18 -> 0 *even though*
+    gemini:fact_check had succeeded, and citation resolution fell from 48% to 22%.
+    With both wired in, losing one provider degrades this rather than empties it.
+
+    Gemini is not a drop-in, hence :func:`resolve_grounding_urls`: its chunk URIs
+    are ``vertexaisearch.cloud.google.com/grounding-api-redirect/...`` wrappers
+    that must each be followed to reach the source, and that expire after roughly
+    30 days — so the wrapper must never be what gets stored.
 
     That is worth recovering specifically because of its provenance. The
     ``known_url`` path exists because a model-supplied URL is usually recalled
@@ -385,9 +426,17 @@ def _collect_grounded_urls(results: dict) -> dict:
     Grounded citations are returned for the response as a whole, not per claim,
     so they are only used as a *fallback* for a claim whose own ``source`` field
     carried no URL, and only from the fact-check domain. Returns
-    ``{claim_text: url}``; an empty dict when nothing grounded came back.
+    ``{claim_key: url}`` keyed by :func:`_claim_key` — the same normalised key
+    claim dedup uses, so the two cannot disagree about whether two phrasings are
+    the same claim. An empty dict when nothing grounded came back.
     """
-    grounded: dict[str, str] = {}
+    # Keyed by _claim_key (a frozenset of content words), not raw claim text —
+    # the same key claim dedup uses, so the two cannot disagree about whether
+    # two phrasings are the same claim.
+    grounded: dict[frozenset, str] = {}
+    # One cache for the whole run: the five Gemini domains cite overlapping
+    # sources, so the same redirect would otherwise be followed repeatedly.
+    redirect_cache: dict[str, str] = {}
     for (_model, domain), result in results.items():
         if domain != "fact_check" or result.get("failed"):
             continue
@@ -397,6 +446,14 @@ def _collect_grounded_urls(results: dict) -> dict:
             for sr in (result.get("search_results") or [])
             if isinstance(sr, dict) and isinstance(sr.get("url"), str)
         ]
+        # Gemini's grounded search returns redirect wrappers rather than source
+        # URLs, so they are resolved here — once per run, after the calls are
+        # done, sharing one cache — instead of inside the timed model call.
+        # Unresolvable ones are dropped by the resolver; see its docstring.
+        if result.get("grounding_chunks"):
+            urls += gemini_adapter.resolve_grounding_urls(
+                result["grounding_chunks"], cache=redirect_cache
+            )
         if not urls:
             continue
         data = result.get("data") or {}
@@ -406,9 +463,54 @@ def _collect_grounded_urls(results: dict) -> dict:
                 # Only claims this model itself raised, and only when it did not
                 # already name a URL — a claim-specific source always wins over
                 # a response-level one.
-                if claim and claim not in grounded:
-                    grounded[claim] = urls[0]
+                # Keyed on the normalised claim key, not the raw text: claim
+                # dedup collapses paraphrases, so a URL registered under the
+                # phrasing that loses the tie would never be found again by the
+                # phrasing that wins it.
+                key = _claim_key(claim)
+                if key and key not in grounded:
+                    grounded[key] = urls[0]
     return grounded
+
+
+#: Function words dropped before comparing two claims. They carry no identity —
+#: "The Virginia grid runs below average" and "Virginia grid runs below average"
+#: are one claim, and five models will phrase it five ways.
+_CLAIM_STOPWORDS = frozenset(
+    "the a an of in to and is are was were that for on at by its with as from".split()
+)
+
+#: Token-overlap threshold above which two claims are treated as the same one.
+#: Calibrated on the 2026-08-12 run (144 claims): 0.9 collapses 7 and every pair
+#: it merges is a genuine restatement; 0.8 collapses 12 but starts reaching for
+#: claims that differ in a material number. Set high deliberately — merging two
+#: distinct claims silently drops one from verification, which is worse than
+#: verifying a near-duplicate twice.
+_CLAIM_SIMILARITY = 0.9
+
+
+def _claim_key(claim: str) -> frozenset:
+    """Content words of a claim, for identity comparison."""
+    words = re.sub(r"[^a-z0-9 ]", " ", claim.lower()).split()
+    return frozenset(w for w in words if w not in _CLAIM_STOPWORDS)
+
+
+def _is_duplicate_claim(key: frozenset, seen_keys: list) -> bool:
+    """True if ``key`` restates a claim already collected.
+
+    Exact match after normalisation catches the common case — the same sentence
+    with a trailing period, or a leading "The". The Jaccard pass catches the rest:
+    five models independently paraphrasing one fact.
+    """
+    if not key:
+        return False
+    for other in seen_keys:
+        if key == other:
+            return True
+        union = len(key | other)
+        if union and len(key & other) / union >= _CLAIM_SIMILARITY:
+            return True
+    return False
 
 
 def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict]:
@@ -416,22 +518,30 @@ def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict
 
     Every bucket contributes its claims. A claim's own source field is preferred;
     a provider's grounded search result is the fallback (see
-    ``_collect_grounded_urls``). Deduplicated on claim text, first occurrence
-    winning, so a claim raised by two models is resolved once.
+    ``_collect_grounded_urls``).
+
+    Deduplication is on claim *meaning*, not exact text. It used to be exact text,
+    which meant five models paraphrasing one fact produced five claims: the
+    2026-08-12 run carried 29 near-duplicate pairs among 144 claims, one differing
+    from its twin only by a trailing full stop. Each duplicate bought its own
+    resolution fetch, its own verification call, and its own line in Section 9.
     """
     claims: list[dict] = []
-    seen: set[str] = set()
+    seen_keys: list[frozenset] = []
     for bucket, url_key in _CITATION_CLAIM_BUCKETS.items():
         for item in fact_check.get(bucket, []) or []:
             claim = item.get("claim", "")
-            if not claim or claim in seen:
+            if not claim:
                 continue
-            seen.add(claim)
+            key = _claim_key(claim)
+            if _is_duplicate_claim(key, seen_keys):
+                continue
+            seen_keys.append(key)
             known_url = None
             if url_key:
                 known_url = _extract_source_url(item.get(url_key, ""))
             if not known_url:
-                known_url = grounded_urls.get(claim)
+                known_url = grounded_urls.get(key)
             claims.append(
                 {"claim": claim, "known_url": known_url, "fact_check_bucket": bucket}
             )
@@ -493,7 +603,33 @@ def _run_domain(
         pre_draft_analysis=handoff.get("pre_draft_analysis", ""),
     )
     user = _build_user_prompt(draft, handoff)
+
+    # Prompt-cache layout. Providers cache on an exact leading prefix, and the
+    # per-domain system prompt sits ahead of the draft, so five calls that share
+    # a 33k-token article share no prefix at all and every one is billed in full.
+    # Measured on the Responses API 2026-08-12: current layout 0 cached tokens on
+    # every call; with the domain text moved after the draft, calls 2+ cached
+    # 1792/2368 (76%). Across the whole ensemble that is roughly $0.56/run at a
+    # 50% cached-token discount, ~$1.01 at 90%. Grok already does this for us —
+    # it cached 2496/2531 on a second identical-prefix call with no changes.
+    #
+    # Off by default: it relocates the domain instruction from before the article
+    # to after it, and this pipeline's output is the product. Turn it on, diff a
+    # run against the golden report, and keep it if the findings hold up.
+    if pipeline_cfg.get("prompt_cache_layout", False):
+        system, user = _cache_friendly_layout(system, user)
+
     api_key = api_keys.get(model_name, {}).get("api_key", "")
+
+    # Attach this domain's response schema so the provider enforces the shape
+    # server-side instead of the pipeline hoping the prompt was obeyed. Carried
+    # on provider_config so no adapter signature has to change. None for custom
+    # publication domains — their prompt is user-written, so there is no shape to
+    # enforce, and those keep the previous prose-requested-JSON behaviour.
+    provider_config = dict(model_configs.get(model_name, {}))
+    schema = response_schemas.for_domain(domain) if prompt_str is None else None
+    if schema:
+        provider_config["response_schema"] = schema
 
     result = adapter.call(
         system,
@@ -501,7 +637,7 @@ def _run_domain(
         api_key,
         retry=pipeline_cfg.get("retry_on_failure", True),
         retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
-        provider_config=model_configs.get(model_name, {}),
+        provider_config=provider_config,
     )
     result["_model"] = model_name
     result["_domain"] = domain
@@ -511,6 +647,45 @@ def _run_domain(
 # ---------------------------------------------------------------------------
 # Draft mode
 # ---------------------------------------------------------------------------
+
+
+def _stagger_offsets(runner_names, stagger_seconds):
+    """Return ``{runner_name: seconds to wait before starting}``.
+
+    Providers rate-limit per account, not per call, so firing all five of a
+    provider's domain calls in the same instant makes them compete for one
+    quota. Observed 2026-08-12: two Perplexity calls returned HTTP 429 within a
+    second of each other, and the one whose retry also hit the limit failed
+    outright — which then silently cost Section 9 its grounded-search URLs,
+    since perplexity:fact_check is their only supplier (see
+    :func:`_collect_grounded_urls`).
+
+    Only calls sharing a provider are spread; calls to *different* providers all
+    start at 0, because the parallelism that matters is across providers, not
+    within one. The cost is negligible — these calls run 60-400s, so a few
+    seconds of offset is noise against the total.
+
+    ``stagger_seconds`` of 0 disables it and every offset is 0.
+    """
+    offsets = {}
+    seen: dict[str, int] = {}
+    for name in runner_names:
+        provider = name.split(":")[0]
+        offsets[name] = stagger_seconds * seen.get(provider, 0)
+        seen[provider] = seen.get(provider, 0) + 1
+    return offsets
+
+
+def _delay_start(fn, delay):
+    """Wrap ``fn`` so it sleeps ``delay`` seconds before running."""
+    if not delay:
+        return fn
+
+    def _delayed():
+        time.sleep(delay)
+        return fn()
+
+    return _delayed
 
 
 def _global_ceiling(per_task_timeouts, retry_delay):
@@ -637,7 +812,22 @@ def run_draft_pipeline(
         sys.exit(1)
 
     run_start_ts = datetime.now(timezone.utc)
+    # The handoff declares the run number, so re-running without editing it
+    # writes a second report with the same number — pipeline_history ended up
+    # with two run_16_* files for one article, and the later one is not
+    # obviously the later one. Trust the handoff unless history already has that
+    # number, and say so rather than silently renumbering.
     run_number = handoff.get("run_number", 1)
+    _existing = hist.existing_run_numbers(HISTORY_ROOT, handoff.get("title", ""))
+    if run_number in _existing:
+        _next = max(_existing) + 1
+        log.warning(
+            "Run %d already exists for this article; using %d instead. Update "
+            "the handoff's 'Run:' line so the two agree.",
+            run_number,
+            _next,
+        )
+        run_number = _next
     article_title = handoff.get("title", "Untitled")
     lt_config = pub_config.get("languagetool", {})
 
@@ -651,6 +841,10 @@ def run_draft_pipeline(
         lt_result = {
             "failed": True,
             "skipped": True,
+            # Both skip paths set skipped=True, and the summary used to print the
+            # credentials message for either — telling an operator with working
+            # credentials in .env to go and configure credentials. Record which.
+            "skipped_reason": "disabled",
             "change_log": [],
             "flagged_matches": [],
         }
@@ -662,6 +856,7 @@ def run_draft_pipeline(
         lt_result = {
             "failed": True,
             "skipped": True,
+            "skipped_reason": "no_credentials",
             "change_log": [],
             "flagged_matches": [],
         }
@@ -923,7 +1118,25 @@ def run_draft_pipeline(
             m = runner_name.split(":")[0]
             return model_configs.get(m, {}).get("model", m)
 
-        runner_timeouts = [(name, fn, _per_model_timeout(name)) for name, fn in runners]
+        stagger = pipeline_cfg.get("provider_stagger_seconds", 3)
+        offsets = _stagger_offsets([name for name, _ in runners], stagger)
+        # The offset is added to the budget, not spent from it: a staggered call
+        # still gets the full timeout its model was calibrated for.
+        runner_timeouts = [
+            (
+                name,
+                _delay_start(fn, offsets[name]),
+                _per_model_timeout(name) + offsets[name],
+            )
+            for name, fn in runners
+        ]
+        if any(offsets.values()):
+            log.info(
+                "Staggering same-provider calls by %ss to avoid self-inflicted "
+                "rate limiting (max offset %ss)",
+                stagger,
+                max(offsets.values()),
+            )
         global_ceiling = _global_ceiling(
             [t for _, _, t in runner_timeouts],
             pipeline_cfg.get("retry_delay_seconds", 10),
@@ -1113,6 +1326,7 @@ def run_draft_pipeline(
                     f"{log_entry['error_body_excerpt']}"
                 )
 
+    report_baseline_warning = None
     all_failed = all(r.get("failed") for r in results.values())
     if all_failed and pipeline_cfg.get("abort_if_all_provider_calls_fail", False):
         log.error("All review model calls failed. Aborting.")
@@ -1132,6 +1346,31 @@ def run_draft_pipeline(
         )
     elif prior_report is not None:
         log.info(f"Comparing against prior run: {Path(prior_report_path).name}")
+        # A baseline that was itself missing model passes makes the delta
+        # unreadable. On 2026-08-12 the comparison ran against a run whose five
+        # OpenAI passes had all failed on a dead API key, so nine "new consensus
+        # flags" were mostly OpenAI voting for the first time — with the draft
+        # unchanged at 0.0% word change, and a "re-run after editing"
+        # recommendation on top. Name it, so the numbers below are read as a
+        # coverage difference rather than as movement in the article.
+        prior_failures = prior_report.get("model_failures") or []
+        if prior_failures:
+            log.warning(
+                "Baseline run was incomplete — %d pass(es) failed in it (%s). "
+                "Findings that look new may simply be those models voting for "
+                "the first time; treat the delta as indicative, not as movement "
+                "in the draft.",
+                len(prior_failures),
+                ", ".join(prior_failures),
+            )
+            report_baseline_warning = (
+                f"Baseline run {Path(prior_report_path).name} was itself missing "
+                f"{len(prior_failures)} model pass(es) ({', '.join(prior_failures)}). "
+                f"New findings below may be those models voting for the first time "
+                f"rather than changes in the draft."
+            )
+        else:
+            report_baseline_warning = None
 
     # Tag ensemble config with thoroughness for the report
     ensemble_cfg_tagged = {**ensemble_cfg, "thoroughness": thoroughness}
@@ -1170,10 +1409,39 @@ def run_draft_pipeline(
 
     fact_check = report.get("section_2_fact_check") or {}
     grounded_urls = _collect_grounded_urls(results)
+    failed_fact_check = sorted(
+        f"{model}:{domain}"
+        for (model, domain), r in results.items()
+        if domain == "fact_check" and r.get("failed") and not r.get("skipped")
+    )
     if grounded_urls:
         log.info(
             "Citations: %d claim(s) have a provider grounded-search URL available",
             len(grounded_urls),
+        )
+    elif failed_fact_check:
+        # A failed pass in one section quietly degrades another. Only a live-search
+        # fact-check pass returns response-level citations, so when one fails there
+        # is nothing to fall back on for claims that named no URL of their own, and
+        # Section 9 resolves materially fewer of them. Measured 2026-08-12:
+        # perplexity:fact_check was rate-limited, grounded URLs went 18 -> 0, and
+        # citation resolution fell from 48% (49/101) to 22% (32/144). Nothing in the
+        # output connected those two facts, so the drop read as a mystery.
+        note = (
+            f"Section 9 degraded: no grounded-search URLs were available because "
+            f"{', '.join(failed_fact_check)} failed. A live-search fact-check pass "
+            f"is their only source, so claims that named no URL of their own could "
+            f"not be resolved. Citation coverage below is lower than a clean run "
+            f"would produce — re-run once that provider recovers before treating it "
+            f"as final."
+        )
+        log.warning("Citations: %s", note)
+        report.setdefault("degradations", []).append(
+            {
+                "section": "SECTION 9: Citations",
+                "caused_by": failed_fact_check,
+                "detail": note,
+            }
         )
     claims = _collect_citation_claims(fact_check, grounded_urls)
     if claims:
@@ -1240,6 +1508,9 @@ def run_draft_pipeline(
     ]
     if fallback_warnings:
         report["fallback_warnings"] = fallback_warnings
+
+    if report_baseline_warning:
+        report["baseline_warning"] = report_baseline_warning
 
     # Attach currency check results so they appear in the saved report JSON
     # and can be rendered by _print_draft_summary.
@@ -1392,10 +1663,20 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     print(f"Thoroughness: {thoroughness} ({n_calls} model-domain calls)")
     print("=" * 60)
 
+    if report.get("baseline_warning"):
+        print(f"\nWARNING: {report['baseline_warning']}")
+
     if report.get("model_failures"):
         print(
             f"\nWARNING: These model passes failed: {', '.join(report['model_failures'])}"
         )
+
+    # Knock-on effects of those failures. Printed adjacent to the failure list
+    # because the two are only useful together: "perplexity:fact_check failed"
+    # and "9 claims verified" are separately unremarkable, and it is the link
+    # between them that tells a reader which numbers below to distrust.
+    for degradation in report.get("degradations") or []:
+        print(f"\nWARNING: {degradation['detail']}")
 
     if report.get("fallback_warnings"):
         print(f"\n{'!' * 60}")
@@ -1450,8 +1731,17 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             )
 
     if report.get("lt_skipped"):
+        # Both skip paths set lt_skipped, and this printed the credentials
+        # message for either — telling an operator whose credentials are sitting
+        # in .env and working to go and configure credentials, when the actual
+        # cause was grammar_pass: false in the config.
+        if report.get("lt_skipped_reason") == "disabled":
+            why = "grammar_pass is set to false in the pipeline config"
+        else:
+            why = "no LanguageTool credentials configured"
         print(
-            "\nGrammar pass: skipped (no LanguageTool credentials — run manual Grammarly pass before publishing)"
+            f"\nGrammar pass: skipped ({why} — run a manual Grammarly pass "
+            f"before publishing)"
         )
     elif report.get("lt_failed"):
         print("\nWARNING: LanguageTool failed — draft not grammar-corrected")

@@ -8,7 +8,7 @@ import requests
 
 from ci_core import extract
 
-from ci_article_review.adapters.citation import resolver
+from ci_article_review.adapters.citation import resolver, wayback
 
 
 _SOURCES = [{"name": "FRED", "adapter": "fred"}]
@@ -1443,3 +1443,111 @@ class TestChecksumIndexTierFiltering:
             "run_number": 7,
             "generated": "2026-01-01T00:00:00",
         }
+
+
+class TestStaleSnapshotsAreResubmitted:
+    """Staleness was detected, reported, and then ignored.
+
+    The point of archiving a citation is that the page is still readable later.
+    A snapshot older than the staleness threshold predates whatever the page
+    says now, so it needs re-capturing just as much as a missing one does.
+    """
+
+    def _entry(self, **wayback):
+        return {
+            "resolved": True,
+            "url": "https://example.org/report",
+            "wayback": wayback,
+        }
+
+    def test_a_stale_snapshot_is_submitted(self):
+        entries = [self._entry(archived=True, snapshot_stale=True)]
+        with patch.object(
+            resolver.wayback, "submit", return_value={"submitted": True}
+        ) as mock_submit:
+            resolver._submit_missing_archives(entries, {})
+        mock_submit.assert_called_once()
+
+    def test_a_fresh_snapshot_is_left_alone(self):
+        entries = [self._entry(archived=True, snapshot_stale=False)]
+        with patch.object(resolver.wayback, "submit") as mock_submit:
+            resolver._submit_missing_archives(entries, {})
+        mock_submit.assert_not_called()
+
+    def test_an_absent_snapshot_is_still_submitted(self):
+        entries = [self._entry(archived=False)]
+        with patch.object(
+            resolver.wayback, "submit", return_value={"submitted": True}
+        ) as mock_submit:
+            resolver._submit_missing_archives(entries, {})
+        mock_submit.assert_called_once()
+
+    def test_a_private_host_is_never_sent_even_when_stale(self):
+        """Submitting would transmit an internal hostname to a third party."""
+        entries = [
+            {
+                "resolved": True,
+                "url": "http://10.1.8.25/internal/report",
+                "wayback": {"archived": True, "snapshot_stale": True},
+            }
+        ]
+        with patch.object(resolver.wayback, "submit") as mock_submit:
+            resolver._submit_missing_archives(entries, {})
+        mock_submit.assert_not_called()
+
+
+class TestWaybackRateLimitHandling:
+    """archive.org throttled every lookup and nothing backed off.
+
+    Measured 2026-08-12: 12 consecutive availability requests all 429, the first
+    included, still 429 after a 45s cooldown at 1 req/6s. The 2026-08-11 run
+    archived 0 of 49 resolved citations. After pacing + backoff, 6 of 6 live
+    lookups succeeded in 19.8s.
+    """
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def test_calls_are_paced_apart(self):
+        seen = []
+        with patch.object(wayback.time, "sleep", side_effect=seen.append):
+            wayback._pace()
+            wayback._pace()
+        assert seen and seen[-1] > 0, "second call must wait for the interval"
+
+    def test_a_429_is_retried_with_backoff(self):
+        resp = MagicMock(status_code=429, headers={}, url="https://archive.org/x")
+        with patch.object(wayback.requests, "get", return_value=resp) as mock_get:
+            with patch.object(wayback.time, "sleep"):
+                with pytest.raises(Exception):
+                    wayback._get_availability("https://example.org", 10)
+        assert mock_get.call_count == wayback._MAX_ATTEMPTS
+
+    def test_retry_after_header_is_honoured(self):
+        resp = MagicMock(status_code=429, headers={"Retry-After": "12"})
+        assert wayback._retry_after_seconds(resp, 0) == 12.0
+
+    def test_retry_after_is_capped(self):
+        """A hostile or absurd header must not stall the whole run."""
+        resp = MagicMock(status_code=429, headers={"Retry-After": "86400"})
+        assert wayback._retry_after_seconds(resp, 0) == 60.0
+
+    def test_the_circuit_breaker_stops_further_lookups(self):
+        wayback._consecutive_rate_limits = wayback._CIRCUIT_TRIP_AFTER
+        with patch.object(wayback.requests, "get") as mock_get:
+            result = wayback.check("https://example.org/page")
+        mock_get.assert_not_called()
+        assert result["archived"] is None
+        assert "rate limit tripped" in result["error"]
+
+    def test_a_success_resets_the_breaker(self):
+        wayback._consecutive_rate_limits = 3
+        ok = MagicMock(status_code=200, headers={})
+        ok.raise_for_status = MagicMock()
+        with patch.object(wayback.requests, "get", return_value=ok):
+            with patch.object(wayback.time, "sleep"):
+                wayback._get_availability("https://example.org", 10)
+        assert wayback._consecutive_rate_limits == 0

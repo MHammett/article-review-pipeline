@@ -75,6 +75,10 @@ _BETA_HEADER_MODELS = frozenset(
 # Fallback chain tried in order when primary model returns a capacity error (529).
 _FALLBACK_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
 
+#: Anthropic will not cache a block below roughly 1024 tokens; paying the cache
+#: write for anything smaller costs more than it saves. Chars, conservatively.
+_MIN_CACHEABLE_CHARS = 4000
+
 log = logging.getLogger(__name__)
 
 
@@ -118,6 +122,8 @@ def call(
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     thinking_budget = cfg.get("thinking_budget")
     effort = cfg.get("effort")
+    # On by default: it is a pure cost win with no behavioural change.
+    cache_prompt = cfg.get("cache_prompt", True)
     # Streaming socket timeout = inter-token read-gap (small constant). The big
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
@@ -135,6 +141,7 @@ def call(
             retry_delay=retry_delay,
             thinking_budget=thinking_budget,
             effort=effort,
+            cache_prompt=cache_prompt,
             timeout=timeout,
         )
         if not result.get("failed"):
@@ -168,6 +175,7 @@ def _call_model(
     retry_delay=10,
     thinking_budget=None,
     effort=None,
+    cache_prompt=True,
     timeout=None,
 ):
     if timeout is None:
@@ -193,9 +201,25 @@ def _call_model(
     if thinking_budget and model in _BETA_HEADER_MODELS:
         headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
 
+    # Prompt caching. The system prompt is the stable part of a review call — the
+    # same domain instruction goes out for every draft — and marking it cached
+    # means Anthropic bills the repeat at a read rate instead of in full.
+    # Verified 2026-08-12: first call wrote 4,803 cache tokens, the second read
+    # all 4,803 back. Only worth a breakpoint above Anthropic's minimum cacheable
+    # size, so short system prompts are sent plain rather than paying the write.
+    system_block = system_prompt
+    if cache_prompt and len(system_prompt) >= _MIN_CACHEABLE_CHARS:
+        system_block = [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
     payload = {
         "model": model,
-        "system": system_prompt,
+        "system": system_block,
         "messages": [{"role": "user", "content": user_prompt}],
         # Stream incrementally so the read timeout is the inter-token gap, not the
         # whole (potentially many-minute) generation. Usage arrives across the

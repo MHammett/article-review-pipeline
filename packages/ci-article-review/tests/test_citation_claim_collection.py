@@ -57,7 +57,7 @@ class TestCollectCitationClaims:
         """Claim-specific provenance always wins over a response-level one."""
         fact_check = {"outdated": [{"claim": "c1", "source": "https://own.example"}]}
         (claim,) = pipeline._collect_citation_claims(
-            fact_check, {"c1": "https://grounded.example"}
+            fact_check, {pipeline._claim_key("c1"): "https://grounded.example"}
         )
         assert claim["known_url"] == "https://own.example"
 
@@ -65,7 +65,7 @@ class TestCollectCitationClaims:
         """Finding 4 — a live-search URL is better than nothing."""
         fact_check = {"unverifiable": [{"claim": "c1"}]}
         (claim,) = pipeline._collect_citation_claims(
-            fact_check, {"c1": "https://grounded.example"}
+            fact_check, {pipeline._claim_key("c1"): "https://grounded.example"}
         )
         assert claim["known_url"] == "https://grounded.example"
 
@@ -94,13 +94,13 @@ class TestCollectGroundedUrls:
         got = pipeline._collect_grounded_urls(
             self._result(citations=["https://cited.example"])
         )
-        assert got == {"c1": "https://cited.example"}
+        assert got == {pipeline._claim_key("c1"): "https://cited.example"}
 
     def test_search_results_are_captured_too(self):
         got = pipeline._collect_grounded_urls(
             self._result(search_results=[{"url": "https://sr.example", "title": "t"}])
         )
-        assert got == {"c1": "https://sr.example"}
+        assert got == {pipeline._claim_key("c1"): "https://sr.example"}
 
     def test_failed_calls_contribute_nothing(self):
         got = pipeline._collect_grounded_urls(
@@ -308,3 +308,273 @@ class TestMarkdownSourceUrls:
 
     def test_no_url_returns_none(self):
         assert pipeline._extract_source_url("EIA State Energy Profile, 2024") is None
+
+
+class TestGroundedUrlLossIsReported:
+    """A failed fact-check pass silently degrades Section 9 — say so.
+
+    Measured 2026-08-12: perplexity:fact_check was rate-limited, grounded-search
+    URLs went 18 -> 0, and citation resolution fell from 48% (49/101) to 22%
+    (32/144). The run summary reported "perplexity:fact_check FAILED" in one
+    place and "9 verified" in another, with nothing connecting them, so the drop
+    read as an unexplained regression rather than a known consequence.
+    """
+
+    def _results(self, perplexity_failed):
+        return {
+            ("gemini", "fact_check"): {"failed": False, "data": {}},
+            ("perplexity", "fact_check"): (
+                {"failed": True, "error": "429 Too Many Requests"}
+                if perplexity_failed
+                else {
+                    "failed": False,
+                    "citations": ["https://example.org/source"],
+                    "data": {"confirmed": [{"claim": "a claim"}]},
+                }
+            ),
+        }
+
+    def test_grounded_urls_come_only_from_a_successful_fact_check_pass(self):
+        assert pipeline._collect_grounded_urls(self._results(False))
+        assert pipeline._collect_grounded_urls(self._results(True)) == {}
+
+    def test_failure_that_costs_grounded_urls_is_recorded_as_a_degradation(self):
+        report = {"section_2_fact_check": {}}
+        degradations = []
+
+        # Reproduce the branch the pipeline takes at Pass 3 without running the
+        # whole pass: no grounded URLs, and a fact-check pass that failed.
+        results = self._results(True)
+        grounded = pipeline._collect_grounded_urls(results)
+        failed = sorted(
+            f"{m}:{d}"
+            for (m, d), r in results.items()
+            if d == "fact_check" and r.get("failed") and not r.get("skipped")
+        )
+        assert grounded == {}
+        assert failed == ["perplexity:fact_check"]
+
+        if not grounded and failed:
+            degradations.append(
+                {"section": "SECTION 9: Citations", "caused_by": failed}
+            )
+        report["degradations"] = degradations
+
+        assert report["degradations"][0]["caused_by"] == ["perplexity:fact_check"]
+
+    def test_summary_prints_the_degradation_next_to_the_failure(self, capsys):
+        from ci_article_review.pipeline import _print_draft_summary
+
+        report = {
+            "article_title": "T",
+            "run_number": 17,
+            "generated": "2026-08-12T00:00:00+00:00",
+            "section_1_consensus": [],
+            "section_2_fact_check": {},
+            "section_3_voice": [],
+            "section_4_argument": [],
+            "section_5_completeness": [],
+            "section_6_red_team": {},
+            "section_7_low_confidence": [],
+            "lt_corrections_applied": [],
+            "lt_skipped": True,
+            "model_failures": ["perplexity:fact_check"],
+            "degradations": [
+                {
+                    "section": "SECTION 9: Citations",
+                    "caused_by": ["perplexity:fact_check"],
+                    "detail": "Section 9 degraded: no grounded-search URLs were "
+                    "available because perplexity:fact_check failed.",
+                }
+            ],
+        }
+        _print_draft_summary(report, {})
+        out = capsys.readouterr().out
+        assert "perplexity:fact_check" in out
+        assert "Section 9 degraded" in out
+        # The link is only useful if both appear together.
+        assert out.index("These model passes failed") < out.index("Section 9 degraded")
+
+
+class TestGeminiGroundingReachesClaims:
+    """Both grounded providers must supply URLs, so neither is a single point of failure."""
+
+    def _gemini_result(self):
+        return {
+            "failed": False,
+            "grounding_chunks": [
+                {
+                    "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA",
+                    "title": "epa.gov",
+                }
+            ],
+            "data": {"outdated": [{"claim": "gemini claim"}]},
+        }
+
+    def test_gemini_grounding_resolves_into_a_claim_url(self):
+        with patch(
+            "ci_article_review.pipeline.gemini_adapter.resolve_grounding_urls",
+            return_value=["https://www.epa.gov/superfund/pfoa"],
+        ):
+            got = pipeline._collect_grounded_urls(
+                {("gemini", "fact_check"): self._gemini_result()}
+            )
+        assert got == {
+            pipeline._claim_key("gemini claim"): "https://www.epa.gov/superfund/pfoa"
+        }
+
+    def test_perplexity_failing_no_longer_empties_the_grounded_urls(self):
+        """The 2026-08-12 cascade: gemini succeeded, perplexity didn't, and we got zero."""
+        results = {
+            ("perplexity", "fact_check"): {"failed": True, "error": "429"},
+            ("gemini", "fact_check"): self._gemini_result(),
+        }
+        with patch(
+            "ci_article_review.pipeline.gemini_adapter.resolve_grounding_urls",
+            return_value=["https://www.epa.gov/superfund/pfoa"],
+        ):
+            got = pipeline._collect_grounded_urls(results)
+        assert got, "gemini succeeded, so grounded URLs must not be empty"
+
+    def test_redirects_are_resolved_once_across_all_gemini_domains(self):
+        results = {
+            ("gemini", "fact_check"): self._gemini_result(),
+        }
+        with patch(
+            "ci_article_review.pipeline.gemini_adapter.resolve_grounding_urls",
+            return_value=["https://www.epa.gov/superfund/pfoa"],
+        ) as mock_resolve:
+            pipeline._collect_grounded_urls(results)
+        # A single shared cache dict must be threaded through every call.
+        assert mock_resolve.call_args.kwargs.get("cache") is not None
+
+    def test_a_wrapper_url_never_reaches_a_claim(self):
+        """Storing an expiring redirect is worse than storing nothing."""
+        with patch(
+            "ci_article_review.pipeline.gemini_adapter.resolve_grounding_urls",
+            return_value=[],
+        ):
+            got = pipeline._collect_grounded_urls(
+                {("gemini", "fact_check"): self._gemini_result()}
+            )
+        assert got == {}
+
+
+class TestClaimDeduplicationByMeaning:
+    """Five models paraphrasing one fact must produce one claim, not five.
+
+    The 2026-08-12 run carried 29 near-duplicate pairs among 144 claims — one
+    differing from its twin only by a trailing full stop. Each duplicate bought
+    its own resolution fetch, verification call, and Section 9 line.
+    """
+
+    def _claims(self, *texts):
+        return pipeline._collect_citation_claims(
+            {"outdated": [{"claim": t} for t in texts]}, {}
+        )
+
+    def test_a_trailing_period_is_not_a_new_claim(self):
+        got = self._claims(
+            "Microsoft dropped its NDA requirements in March 2026",
+            "Microsoft dropped its NDA requirements in March 2026.",
+        )
+        assert len(got) == 1
+
+    def test_a_leading_article_is_not_a_new_claim(self):
+        got = self._claims(
+            "The Virginia electrical grid runs below the national average",
+            "Virginia electrical grid runs below the national average",
+        )
+        assert len(got) == 1
+
+    def test_case_and_punctuation_differences_collapse(self):
+        got = self._claims(
+            "EPA designated PFOA as a CERCLA hazardous substance in 2024",
+            "EPA designated PFOA as a CERCLA hazardous substance in 2024!",
+        )
+        assert len(got) == 1
+
+    def test_genuinely_different_claims_both_survive(self):
+        """Merging two distinct claims silently drops one from verification."""
+        got = self._claims(
+            "US data centers consumed 17.4 billion gallons of water in 2023",
+            "US crop irrigation withdrawals average roughly 105 billion gallons per day",
+        )
+        assert len(got) == 2
+
+    def test_claims_differing_only_in_a_number_are_kept_apart(self):
+        """The threshold is set high precisely so this case does not merge."""
+        got = self._claims(
+            "Emergency engines are capped at 100 hours per year",
+            "Emergency engines are capped at 500 hours per year",
+        )
+        assert len(got) == 2, [c["claim"] for c in got]
+
+    def test_the_first_occurrence_wins_and_keeps_its_url(self):
+        claims = pipeline._collect_citation_claims(
+            {
+                "outdated": [
+                    {"claim": "A fact about water", "source": "https://first.example"},
+                    {
+                        "claim": "A fact about water.",
+                        "source": "https://second.example",
+                    },
+                ]
+            },
+            {},
+        )
+        assert len(claims) == 1
+        assert claims[0]["known_url"] == "https://first.example"
+
+    def test_an_empty_claim_never_matches_anything(self):
+        assert pipeline._is_duplicate_claim(frozenset(), [frozenset()]) is False
+
+
+class TestGroundedUrlsSurviveDeduplication:
+    """Dedup and grounded-URL lookup must agree on what "the same claim" means.
+
+    Regression guard: when claim dedup started collapsing paraphrases but the
+    grounded-URL map was still keyed on raw text, a URL registered under the
+    phrasing that lost the tie became unreachable by the phrasing that won it —
+    silently costing the claim its only source.
+    """
+
+    def test_a_url_registered_under_a_variant_phrasing_is_still_found(self):
+        grounded = pipeline._collect_grounded_urls(
+            {
+                ("perplexity", "fact_check"): {
+                    "failed": False,
+                    "citations": ["https://source.example"],
+                    "data": {
+                        "outdated": [
+                            {
+                                "claim": "Microsoft dropped its NDA requirements in March 2026."
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        claims = pipeline._collect_citation_claims(
+            {
+                "outdated": [
+                    {"claim": "Microsoft dropped its NDA requirements in March 2026"},
+                    {"claim": "Microsoft dropped its NDA requirements in March 2026."},
+                ]
+            },
+            grounded,
+        )
+        assert len(claims) == 1
+        assert claims[0]["known_url"] == "https://source.example"
+
+    def test_the_grounded_map_is_keyed_the_same_way_dedup_is(self):
+        grounded = pipeline._collect_grounded_urls(
+            {
+                ("perplexity", "fact_check"): {
+                    "failed": False,
+                    "citations": ["https://source.example"],
+                    "data": {"outdated": [{"claim": "The grid runs below average"}]},
+                }
+            }
+        )
+        assert list(grounded) == [pipeline._claim_key("The grid runs below average")]

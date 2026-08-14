@@ -1869,3 +1869,393 @@ class TestStreamingTimeoutAcrossAdapters:
         assert timeout[1] == 222, (
             f"{module_name} ignored stream_read_timeout override — got {timeout[1]!r} (expected 222)"
         )
+
+
+class TestGeminiGroundingCapture:
+    """Gemini's live-search sources were returned on every call and never read.
+
+    Verified against the real API 2026-08-12: a grounded gemini-2.5-flash call
+    returns candidates[].groundingMetadata with groundingChunks naming five web
+    sources. Nothing in the codebase referenced groundingMetadata, so Perplexity
+    was the pipeline's only supplier of grounded citation URLs.
+    """
+
+    # Shaped exactly like the live response, redirect wrappers and all.
+    def _lines(self):
+        import json
+
+        gm = {
+            "groundingChunks": [
+                {
+                    "web": {
+                        "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA",
+                        "title": "epa.gov",
+                    }
+                },
+                {
+                    "web": {
+                        "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/BBB",
+                        "title": "harvard.edu",
+                    }
+                },
+            ],
+            "webSearchQueries": ["pfoa cercla designation"],
+        }
+        chunks = [
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": '{"confirmed":'}]}, "index": 0}
+                ]
+            },
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": ' [{"claim": "c1"}]}'}]},
+                        "groundingMetadata": gm,
+                        "finishReason": "STOP",
+                        "index": 0,
+                    }
+                ]
+            },
+            # Repeated chunk — the same sources arrive more than once.
+            {"candidates": [{"groundingMetadata": gm, "index": 0}]},
+            {"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}},
+        ]
+        return [f"data: {json.dumps(c)}" for c in chunks]
+
+    def test_grounding_chunks_are_captured_and_deduplicated(self):
+        from ci_core.llm import streaming
+
+        out = streaming.accumulate_gemini(_sse_mock(self._lines()))
+        uris = [c["uri"] for c in out["grounding_chunks"]]
+        assert len(uris) == 2, uris
+        assert uris[0].endswith("/AAA")
+        assert out["grounding_chunks"][0]["title"] == "epa.gov"
+
+    def test_text_and_usage_are_unaffected(self):
+        from ci_core.llm import streaming
+
+        out = streaming.accumulate_gemini(_sse_mock(self._lines()))
+        assert out["content"] == '{"confirmed": [{"claim": "c1"}]}'
+        assert out["usage"]["promptTokenCount"] == 10
+
+    def test_a_stream_with_no_grounding_returns_an_empty_list(self):
+        from ci_core.llm import streaming
+
+        lines = ['data: {"candidates": [{"content": {"parts": [{"text": "hi"}]}}]}']
+        assert streaming.accumulate_gemini(_sse_mock(lines))["grounding_chunks"] == []
+
+
+class TestGroundingRedirectResolution:
+    """The wrapper URL must never be what gets stored — it expires in ~30 days."""
+
+    CHUNKS = [
+        {
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA",
+            "title": "epa.gov",
+        },
+        {
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/BBB",
+            "title": "lawbc.com",
+        },
+    ]
+
+    def _resp(self, final_url, status=200):
+        m = MagicMock()
+        m.url = final_url
+        m.status_code = status
+        return m
+
+    def test_redirects_resolve_to_final_source_urls(self):
+        from ci_core.llm.adapters import gemini as g
+
+        with patch.object(g.requests, "get") as mock_get:
+            mock_get.side_effect = [
+                self._resp("https://www.epa.gov/superfund/pfoa"),
+                self._resp("https://www.lawbc.com/epa-will-retain"),
+            ]
+            urls = g.resolve_grounding_urls(self.CHUNKS)
+        assert urls == [
+            "https://www.epa.gov/superfund/pfoa",
+            "https://www.lawbc.com/epa-will-retain",
+        ]
+        assert not any("vertexaisearch" in u for u in urls)
+
+    def test_an_unresolvable_redirect_is_dropped_not_downgraded(self):
+        """title is a bare domain; a homepage is not the source the claim rests on."""
+        from ci_core.llm.adapters import gemini as g
+
+        with patch.object(g.requests, "get") as mock_get:
+            mock_get.side_effect = [
+                g.requests.RequestException("timeout"),
+                self._resp("https://www.lawbc.com/epa-will-retain"),
+            ]
+            urls = g.resolve_grounding_urls(self.CHUNKS)
+        assert urls == ["https://www.lawbc.com/epa-will-retain"]
+        assert not any("epa.gov" == u for u in urls)
+
+    def test_a_redirect_that_goes_nowhere_is_dropped(self):
+        from ci_core.llm.adapters import gemini as g
+
+        with patch.object(g.requests, "get") as mock_get:
+            mock_get.return_value = self._resp(
+                "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA"
+            )
+            assert g.resolve_grounding_urls(self.CHUNKS[:1]) == []
+
+    def test_an_error_status_is_dropped(self):
+        from ci_core.llm.adapters import gemini as g
+
+        with patch.object(g.requests, "get") as mock_get:
+            mock_get.return_value = self._resp(
+                "https://unblock.federalregister.gov", 403
+            )
+            assert g.resolve_grounding_urls(self.CHUNKS[:1]) == []
+
+    def test_the_cache_means_one_request_per_distinct_redirect(self):
+        """Five Gemini domains cite overlapping sources within a single run."""
+        from ci_core.llm.adapters import gemini as g
+
+        cache = {}
+        with patch.object(g.requests, "get") as mock_get:
+            mock_get.return_value = self._resp("https://www.epa.gov/superfund/pfoa")
+            g.resolve_grounding_urls(self.CHUNKS[:1], cache=cache)
+            g.resolve_grounding_urls(self.CHUNKS[:1], cache=cache)
+            g.resolve_grounding_urls(self.CHUNKS[:1], cache=cache)
+        assert mock_get.call_count == 1
+
+
+class TestOpenAIWebSearchPath:
+    """The web_search path had never once worked on a gpt-5.x preset.
+
+    Verified against the live API 2026-08-12: the payload the adapter sent
+    (temperature 0.2 alongside web_search_preview) returns HTTP 400 —
+    "Unsupported parameter: 'temperature' is not supported with this model" — so
+    every call failed and silently fell through to the non-search path, buying a
+    wasted round trip and a warning line. reasoning_effort was never plumbed
+    through either, and the cited sources were dropped.
+    """
+
+    def _payload_from(self, provider_config):
+        from ci_core.llm.adapters import openai as oai
+
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(
+                _sse_responses_lines({"flags": [], "low_confidence": []})
+            )
+            oai.call("system", "user", "key", provider_config=provider_config)
+            return mock_session.post.call_args.kwargs["json"]
+
+    def test_temperature_is_not_sent_with_a_reasoning_model(self):
+        body = self._payload_from(
+            {"model": "gpt-5.5", "web_search": True, "reasoning_effort": "xhigh"}
+        )
+        assert "temperature" not in body, "gpt-5.x 400s on temperature"
+
+    def test_reasoning_effort_reaches_the_search_call(self):
+        body = self._payload_from(
+            {"model": "gpt-5.5", "web_search": True, "reasoning_effort": "xhigh"}
+        )
+        assert body["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+        assert body["tools"] == [{"type": "web_search_preview"}]
+
+    def test_a_non_reasoning_model_still_gets_temperature(self):
+        body = self._payload_from({"model": "gpt-4o", "web_search": True})
+        assert body["temperature"] == 0.2
+        assert "reasoning" not in body
+
+    def test_cited_sources_are_captured_from_annotations(self):
+        from ci_core.llm import streaming
+
+        lines = [
+            'data: {"type": "response.output_text.delta", "delta": "{\\"flags\\": []}"}',
+            'data: {"type": "response.output_text.annotation.added", "annotation": '
+            '{"type": "url_citation", "url": "https://www.epa.gov/newsreleases/pfoa", '
+            '"title": "EPA Announces Next Steps"}}',
+            # Restated on the final object — must not double up.
+            'data: {"type": "response.completed", "response": {"usage": {"input_tokens": 5}, '
+            '"output": [{"content": [{"annotations": [{"url": "https://www.epa.gov/newsreleases/pfoa"}, '
+            '{"url": "https://www.saul.com/insights"}]}]}]}}',
+        ]
+        out = streaming.accumulate_openai_responses(_sse_mock(lines))
+        assert out["citations"] == [
+            "https://www.epa.gov/newsreleases/pfoa",
+            "https://www.saul.com/insights",
+        ]
+
+    def test_a_call_without_search_reports_no_citations(self):
+        from ci_core.llm import streaming
+
+        out = streaming.accumulate_openai_responses(
+            _sse_mock(_sse_responses_lines({"flags": []}))
+        )
+        assert out["citations"] == []
+
+    def test_json_only_prompts_yield_no_annotations(self):
+        """Documents the measured limitation so nobody counts on this path.
+
+        The search runs and improves the answer, but a JSON-only response has
+        nowhere to put an inline citation, so no annotation events are emitted.
+        Measured live 2026-08-12 across three prompt shapes.
+        """
+        from ci_core.llm import streaming
+
+        json_only_stream = [
+            'data: {"type": "response.web_search_call.completed"}',
+            'data: {"type": "response.output_text.delta", "delta": "{\\"outdated\\":[]}"}',
+            'data: {"type": "response.completed", "response": {"usage": {"input_tokens": 9}}}',
+        ]
+        out = streaming.accumulate_openai_responses(_sse_mock(json_only_stream))
+        assert out["content"] == '{"outdated":[]}'
+        assert out["citations"] == []
+
+
+class TestProviderFeatureFlags:
+    """Capabilities each provider offers that the pipeline had never sent.
+
+    All verified against the live APIs on 2026-08-12 before being wired.
+    """
+
+    def _payload(self, mod_name, cfg, lines=None):
+        import importlib
+
+        mod = importlib.import_module(f"ci_core.llm.adapters.{mod_name}")
+        with patch(f"ci_core.llm.adapters.{mod_name}.requests.Session") as S:
+            session = MagicMock()
+            S.return_value = session
+            session.post.return_value = _sse_mock(lines or ["data: [DONE]"])
+            try:
+                mod.call("system prompt", "user", "key", provider_config=cfg)
+            except Exception:
+                pass
+            return session.post.call_args.kwargs.get("json", {})
+
+    def test_perplexity_academic_search_mode(self):
+        """Academic mode returned ASME/MDPI/PLOS where web mode returned LinkedIn."""
+        body = self._payload(
+            "perplexity", {"model": "sonar", "search_mode": "academic"}
+        )
+        assert body["search_mode"] == "academic"
+
+    def test_perplexity_sends_no_search_controls_unless_configured(self):
+        body = self._payload("perplexity", {"model": "sonar"})
+        for key in ("search_mode", "search_recency_filter", "search_domain_filter"):
+            assert key not in body
+
+    def test_openai_service_tier(self):
+        body = self._payload("openai", {"model": "gpt-5.5", "service_tier": "flex"})
+        assert body["service_tier"] == "flex"
+
+    def test_openai_omits_service_tier_by_default(self):
+        assert "service_tier" not in self._payload("openai", {"model": "gpt-5.5"})
+
+    def test_claude_marks_a_long_system_prompt_cacheable(self):
+        from ci_core.llm.adapters import claude
+
+        long_prompt = "You are a reviewer. " * 400
+        with patch("ci_core.llm.adapters.claude.requests.Session") as S:
+            session = MagicMock()
+            S.return_value = session
+            session.post.return_value = _sse_mock(["data: [DONE]"])
+            try:
+                claude.call(
+                    long_prompt,
+                    "user",
+                    "key",
+                    provider_config={"model": "claude-opus-4-8"},
+                )
+            except Exception:
+                pass
+            body = session.post.call_args.kwargs["json"]
+        assert isinstance(body["system"], list)
+        assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_claude_sends_a_short_system_prompt_plain(self):
+        """Below the minimum the cache write costs more than it saves."""
+        from ci_core.llm.adapters import claude
+
+        with patch("ci_core.llm.adapters.claude.requests.Session") as S:
+            session = MagicMock()
+            S.return_value = session
+            session.post.return_value = _sse_mock(["data: [DONE]"])
+            try:
+                claude.call(
+                    "short", "user", "key", provider_config={"model": "claude-opus-4-8"}
+                )
+            except Exception:
+                pass
+            body = session.post.call_args.kwargs["json"]
+        assert body["system"] == "short"
+
+    def test_claude_caching_can_be_turned_off(self):
+        from ci_core.llm.adapters import claude
+
+        with patch("ci_core.llm.adapters.claude.requests.Session") as S:
+            session = MagicMock()
+            S.return_value = session
+            session.post.return_value = _sse_mock(["data: [DONE]"])
+            try:
+                claude.call(
+                    "You are a reviewer. " * 400,
+                    "user",
+                    "key",
+                    provider_config={"model": "claude-opus-4-8", "cache_prompt": False},
+                )
+            except Exception:
+                pass
+            body = session.post.call_args.kwargs["json"]
+        assert isinstance(body["system"], str)
+
+    def test_grok_sends_an_explicit_output_cap(self):
+        body = self._payload("grok", {"model": "grok-4.20-0309-reasoning"})
+        assert body["max_tokens"] > 0
+
+
+class TestCachedTokensAreStillBilledInput:
+    """A cached call must not look free. Anthropic drops input_tokens to the
+    uncached remainder and reports the rest separately; reading only
+    input_tokens reported 20 tokens for a 4,800-token prompt (live, 2026-08-12).
+    """
+
+    def test_cache_write_counts_as_prompt_tokens(self):
+        from ci_core.llm.tokens import normalize_tokens
+
+        got = normalize_tokens(
+            {
+                "input_tokens": 11,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 4803,
+            }
+        )
+        assert got == {"prompt": 4814, "completion": 5}
+
+    def test_cache_read_counts_as_prompt_tokens(self):
+        from ci_core.llm.tokens import normalize_tokens
+
+        got = normalize_tokens(
+            {"input_tokens": 11, "output_tokens": 5, "cache_read_input_tokens": 4803}
+        )
+        # `prompt` stays the true total input; `cached` says how much of it came
+        # from the cache, so cost.py can price that portion lower.
+        assert got == {"prompt": 4814, "completion": 5, "cached": 4803}
+
+    def test_normalizing_twice_does_not_double_count(self):
+        from ci_core.llm.tokens import normalize_tokens
+
+        once = normalize_tokens(
+            {"input_tokens": 11, "output_tokens": 5, "cache_read_input_tokens": 4803}
+        )
+        assert normalize_tokens(once) == once
+
+    def test_the_anthropic_accumulator_keeps_the_cache_fields(self):
+        from ci_core.llm import streaming
+
+        lines = [
+            'data: {"type": "message_start", "message": {"usage": '
+            '{"input_tokens": 11, "output_tokens": 1, "cache_read_input_tokens": 4803}}}',
+            'data: {"type": "message_delta", "usage": {"output_tokens": 42}}',
+        ]
+        out = streaming.accumulate_anthropic(_sse_mock(lines))
+        assert out["usage"]["cache_read_input_tokens"] == 4803

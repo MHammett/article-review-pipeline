@@ -316,6 +316,8 @@ content-intelligence/
 │   │   │   ├── setup.py               first-run scaffolding for configs/
 │   │   │   ├── config_loader.py       config parsing and validation
 │   │   │   ├── consolidation.py       weighted ensemble consolidation → one report
+│   │   │   ├── response_schemas.py    per-domain JSON Schema, so providers enforce the
+│   │   │   │                          response shape instead of being asked nicely
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
@@ -360,6 +362,8 @@ content-intelligence/
 │   │   │   │   │                 call_text dispatch (claude, gemini, grok, mistral,
 │   │   │   │   │                 openai, perplexity)
 │   │   │   │   ├── streaming.py       SSE accumulation and read-gap timeouts
+│   │   │   │   ├── schema_format.py   wraps one JSON Schema in each provider's own
+│   │   │   │   │                      enforcement syntax
 │   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,
 │   │   │   │   │                      truncation salvage)
 │   │   │   │   ├── tokens.py          normalizes provider-native usage dicts to

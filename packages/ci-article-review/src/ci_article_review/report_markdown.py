@@ -199,6 +199,55 @@ def _render_section_8(additional):
     return lines
 
 
+def _citation_pair(citation):
+    """Return the live URL and its archive URL, for a citation the author can paste.
+
+    A citation that names only a live URL is durable until the page moves,
+    changes, or 403s — which link-check runs show happening constantly. Pairing
+    every live link with its Wayback snapshot is what makes the citation survive
+    the source. The pipeline has always *collected* the snapshot URL; it was
+    never rendered anywhere a human would see it, so the pairing existed in the
+    data and nowhere in the output.
+
+    Returns ``(live_url, archive_url_or_None)``.
+    """
+    wayback = citation.get("wayback") or {}
+    return citation.get("url", ""), wayback.get("snapshot_url")
+
+
+def _render_archive_pair(citation, indent="  "):
+    """Lines pairing a citation's live URL with its archive copy.
+
+    Says which of the three states applies rather than silently omitting the
+    archive line, because "no snapshot yet" and "never submitted" need different
+    follow-up from the author.
+    """
+    live, archive = _citation_pair(citation)
+    if not live:
+        return []
+    out = [f"{indent}- Live: {live}"]
+    wayback = citation.get("wayback") or {}
+    if archive:
+        stale = (
+            " (STALE — re-archive before relying on it)"
+            if wayback.get("snapshot_stale")
+            else ""
+        )
+        out.append(f"{indent}- Archive: {archive}{stale}")
+        out.append(f"{indent}- Cite both: {live} (archived: {archive})")
+    elif wayback.get("submitted"):
+        out.append(
+            f"{indent}- Archive: submitted to the Wayback Machine this run; the "
+            f"snapshot URL appears on the next run once archive.org has captured it."
+        )
+    else:
+        out.append(
+            f"{indent}- Archive: none. This citation is only as durable as the "
+            f"live URL — re-run once archiving succeeds, or archive it by hand."
+        )
+    return out
+
+
 def _render_section_9(citations):
     lines = ["## SECTION 9: Citations", ""]
     if not citations:
@@ -246,6 +295,7 @@ def _render_section_9(citations):
         lines.append("")
         for c in verified:
             lines.append(f'- "{c.get("claim", "")}"')
+            lines.extend(_render_archive_pair(c))
             for kv in _kv_lines(
                 c, exclude=("claim", "resolved", "content_changed_since")
             ):
@@ -264,6 +314,7 @@ def _render_section_9(citations):
         lines.append("")
         for c in pointer:
             lines.append(f'- "{c.get("claim", "")}"')
+            lines.extend(_render_archive_pair(c))
             for kv in _kv_lines(c, exclude=("claim", "resolved")):
                 lines.append(kv)
         lines.append("")

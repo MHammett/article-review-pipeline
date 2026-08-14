@@ -31,6 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Browser TLS fingerprint for citation links behind Cloudflare.
+# Optional: ci_core.http.impersonating_get degrades to None without it.
+unblock = ["curl_cffi>=0.7"]
 # ci_core.config / .db / .models / .logging. Implemented and tested, but with no
 # production consumer — nothing outside ci-core's own tests and alembic/env.py
 # imports them (see the README). They were hard dependencies of ci-core, which

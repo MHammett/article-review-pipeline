@@ -188,6 +188,16 @@ def accumulate_anthropic(resp):
                         "output_tokens": msg_usage.get("output_tokens"),
                     }
                 )
+                # Prompt caching moves most of the input out of input_tokens
+                # into these two, which are disjoint from it and from each
+                # other. Dropping them here made a cached call look almost
+                # free — 20 prompt tokens for a 4,800-token system prompt.
+                for key in (
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ):
+                    if msg_usage.get(key) is not None:
+                        usage[key] = msg_usage[key]
         elif etype == "content_block_delta":
             delta = obj.get("delta", {})
             if delta.get("type") == "text_delta":
@@ -212,12 +222,29 @@ def accumulate_gemini(resp):
     ``finishReason`` seen across candidates — a ``MAX_TOKENS`` finish reason means
     generation was cut off before a complete JSON payload could be emitted, which
     is a distinct (and diagnosable) failure mode from the model genuinely
-    returning malformed content. Returns the assembled text, the final
-    ``usageMetadata`` dict, and ``finish_reason``.
+    returning malformed content.
+
+    Also collects ``candidates[].groundingMetadata.groundingChunks`` — the web
+    sources the model's live Google Search actually returned. Every grounded
+    Gemini call has been producing these and nothing read them, which left
+    Perplexity as the pipeline's sole supplier of grounded citation URLs. Chunks
+    arrive across multiple SSE chunks and repeat, so they are deduplicated on
+    ``uri`` with first-seen order preserved.
+
+    Note the ``uri`` values are ``vertexaisearch.cloud.google.com/
+    grounding-api-redirect/...`` wrappers rather than source URLs, and they
+    expire after roughly 30 days. They are returned raw here — resolving them is
+    network I/O and does not belong on the streaming path; see
+    :func:`ci_core.llm.adapters.gemini.resolve_grounding_urls`.
+
+    Returns the assembled text, the final ``usageMetadata`` dict,
+    ``finish_reason``, and ``grounding_chunks`` (``[{"uri", "title"}, ...]``).
     """
     parts = []
     usage = {}
     finish_reason = None
+    grounding_chunks = []
+    seen_uris = set()
 
     for obj in iter_sse_data(resp):
         if obj.get("usageMetadata"):
@@ -225,11 +252,26 @@ def accumulate_gemini(resp):
         for cand in obj.get("candidates") or []:
             if cand.get("finishReason"):
                 finish_reason = cand["finishReason"]
+            for chunk in (cand.get("groundingMetadata") or {}).get(
+                "groundingChunks"
+            ) or []:
+                web = chunk.get("web") or {}
+                uri = web.get("uri")
+                if isinstance(uri, str) and uri not in seen_uris:
+                    seen_uris.add(uri)
+                    grounding_chunks.append(
+                        {"uri": uri, "title": web.get("title") or ""}
+                    )
             for part in cand.get("content", {}).get("parts", []):
                 if not part.get("thought") and "text" in part:
                     parts.append(part["text"])
 
-    return {"content": "".join(parts), "usage": usage, "finish_reason": finish_reason}
+    return {
+        "content": "".join(parts),
+        "usage": usage,
+        "finish_reason": finish_reason,
+        "grounding_chunks": grounding_chunks,
+    }
 
 
 def accumulate_openai_responses(resp):
@@ -250,10 +292,38 @@ def accumulate_openai_responses(resp):
     debug/logging) rather than discarded outright. Any other typed event
     (``response.created``, ``response.in_progress``, ...) is ignored — not
     crashing on it is enough for it to reset the timer.
+
+    When the ``web_search_preview`` tool is enabled, cited sources arrive as
+    ``response.output_text.annotation.added`` events carrying ``{"url",
+    "title"}``, restated on the final response object. They are collected into
+    ``citations`` — the same key Perplexity uses — and unlike Gemini's grounding
+    chunks they are real source URLs needing no redirect resolution.
+
+    **This is inert under ci-article-review's own prompts, by design of those
+    prompts.** Measured 2026-08-12: the search itself always runs, but the model
+    only emits annotations when it writes prose with inline citations. Every
+    review domain demands JSON-only output, so annotations come back empty every
+    time. What web search actually buys that pipeline is a *better-sourced*
+    answer — the ``source`` field the model fills becomes a URL it fetched this
+    run rather than one recalled from training data — which reaches the resolver
+    through the existing ``known_url`` path, not through here. The capture below
+    is kept because it is correct and free, and it activates for any caller whose
+    prompt does ask for prose. It is not a citation source for this pipeline
+    today; do not count it as one.
     """
     parts = []
     reasoning_parts = []
     usage = {}
+    citations = []
+    seen_urls = set()
+
+    def _take_annotation(annotation):
+        if not isinstance(annotation, dict):
+            return
+        url = annotation.get("url")
+        if isinstance(url, str) and url and url not in seen_urls:
+            seen_urls.add(url)
+            citations.append(url)
 
     for obj in iter_sse_data(resp):
         etype = obj.get("type")
@@ -261,11 +331,20 @@ def accumulate_openai_responses(resp):
             parts.append(obj.get("delta", "") or "")
         elif etype == "response.reasoning_summary_text.delta":
             reasoning_parts.append(obj.get("delta", "") or "")
+        elif etype == "response.output_text.annotation.added":
+            _take_annotation(obj.get("annotation"))
         elif etype in ("response.completed", "response.incomplete"):
-            usage = obj.get("response", {}).get("usage", {}) or usage
+            response = obj.get("response") or {}
+            usage = response.get("usage", {}) or usage
+            # Restated on the final object; harmless to re-read thanks to seen_urls.
+            for item in response.get("output") or []:
+                for content in item.get("content") or []:
+                    for annotation in content.get("annotations") or []:
+                        _take_annotation(annotation)
 
     return {
         "content": "".join(parts),
         "usage": usage,
         "reasoning_summary": "".join(reasoning_parts),
+        "citations": citations,
     }

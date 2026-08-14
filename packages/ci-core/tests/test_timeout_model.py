@@ -36,9 +36,26 @@ class TestComputeTimeout:
         assert high >= 2.5 * none, (none, high)
 
     def test_floor_enforced(self):
-        # Grok is fast; its computed value falls below the floor and is clamped up.
-        t = tm.compute_timeout(ANCHOR, "grok-4.20-0309-reasoning", None, CEILING)
+        # A small doc on the cheapest model computes well under the floor and is
+        # clamped up. This used to be asserted with Grok, on the premise that
+        # "Grok is fast" — a 130k-char run in Aug 2026 disproved that (it used
+        # 100% of its budget and timed out), and its multiplier was raised to 2.0,
+        # which lifts it clear of the floor at every size. See timeouts.yaml.
+        t = tm.compute_timeout(3000, "mistral-small-latest", "none", CEILING)
         assert t == tm._CONFIG["floor_seconds"]
+
+    def test_grok_budget_covers_its_observed_worst_case(self):
+        """Grok's budget must clear what it actually took on a large draft.
+
+        Its old 1.2 multiplier produced 126s at 130k chars, which grok:completeness
+        hit exactly (timed out) while two other domains finished within 14s of it.
+        The true completeness time is unknown — it was cut off, not measured — so
+        this guards the calls that *did* complete, with margin.
+        """
+        t = tm.compute_timeout(130190, "grok-4.20-0309-reasoning", "none", CEILING)
+        slowest_completed = 112.83
+        assert t >= 180, t
+        assert t >= 1.5 * slowest_completed, (t, slowest_completed)
 
     def test_ceiling_enforced_on_huge_doc(self):
         t = tm.compute_timeout(500000, "gpt-5.5", "xhigh", CEILING)

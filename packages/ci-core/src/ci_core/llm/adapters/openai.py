@@ -45,7 +45,7 @@ import time
 import logging
 import requests
 
-from .. import streaming
+from .. import schema_format, streaming
 from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
 from ..tokens import normalize_tokens
 from ... import redact
@@ -156,6 +156,10 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
+            # Was never passed, so enabling web_search silently threw away the
+            # preset's reasoning effort. Verified 2026-08-12 that the Responses
+            # API accepts web_search_preview and reasoning on the same request.
+            reasoning_effort=cfg.get("reasoning_effort"),
         )
         if not result.get("failed"):
             return result
@@ -168,6 +172,8 @@ def call(
     # --- openai.com path with fallback chain ---
     requested_model = _resolve_model(model, cfg)
     reasoning_effort = cfg.get("reasoning_effort")
+    response_schema = cfg.get("response_schema")
+    service_tier = cfg.get("service_tier")
     models_to_try = [requested_model] + [
         m for m in _FALLBACK_MODELS if m != requested_model
     ]
@@ -183,6 +189,8 @@ def call(
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
+            response_schema=response_schema,
+            service_tier=service_tier,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -212,7 +220,14 @@ def call(
 
 
 def _call_with_web_search(
-    system_prompt, user_prompt, api_key, model, retry, retry_delay, timeout=None
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry,
+    retry_delay,
+    timeout=None,
+    reasoning_effort=None,
 ):
     """Call via the OpenAI Responses API with the web_search_preview tool.
 
@@ -234,9 +249,18 @@ def _call_with_web_search(
         "instructions": system_prompt,
         "input": user_prompt,
         "tools": [{"type": "web_search_preview"}],
-        "temperature": 0.2,
         "stream": True,
     }
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+    else:
+        # Only on non-reasoning models. gpt-5.x rejects temperature outright
+        # ("Unsupported parameter: 'temperature' is not supported with this
+        # model", HTTP 400), and sending it unconditionally is why this path
+        # had never once succeeded on a gpt-5.x preset: every call 400'd and
+        # fell through to the non-search path, logging a warning and buying a
+        # wasted round trip. Verified against the live API 2026-08-12.
+        payload["temperature"] = 0.2
 
     session = requests.Session()
     t0 = time.monotonic()
@@ -323,6 +347,12 @@ def _call_with_web_search(
         "tokens": normalize_tokens(usage),
         "elapsed_seconds": elapsed,
         "grounding_available": True,
+        # Real source URLs from the model's live search, under the same key
+        # Perplexity uses so the citation resolver needs no special case. Expect
+        # this to be EMPTY under ci-article-review's JSON-only prompts — the
+        # search still runs and still improves the answer's `source` field, but
+        # annotations only appear alongside prose. See accumulate_openai_responses.
+        "citations": assembled.get("citations") or [],
     }
     if truncated:
         result["truncated"] = True
@@ -343,6 +373,8 @@ def _call_openai(
     retry_delay=10,
     reasoning_effort=None,
     timeout=None,
+    response_schema=None,
+    service_tier=None,
 ):
     """Call the openai.com Responses API — the primary (non-search) path.
 
@@ -376,6 +408,16 @@ def _call_openai(
             # requested via the system prompt / instructions instead (same
             # constraint _call_with_web_search already handles).
             p["temperature"] = 0.2
+        # service_tier: "flex" trades latency for a lower price, which suits a
+        # batch of long review calls nobody is watching. All three tiers verified
+        # accepted and echoed back on 2026-08-12. Opt-in per model config.
+        if service_tier:
+            p["service_tier"] = service_tier
+        if response_schema:
+            # text.format json_schema with strict:true. Composes with reasoning
+            # (verified live 2026-08-12), so this applies on both branches and
+            # makes "Malformed JSON response" structurally impossible here.
+            p["text"] = schema_format.openai_text_format(response_schema)
         return p
 
     result = _execute_openai_responses(

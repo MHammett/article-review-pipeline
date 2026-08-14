@@ -22,7 +22,7 @@ import time
 import logging
 import requests
 
-from .. import streaming
+from .. import schema_format, streaming
 from ..tokens import normalize_tokens
 from ... import redact
 from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
@@ -60,6 +60,8 @@ def call(
     cfg = provider_config or {}
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     reasoning_effort = cfg.get("reasoning_effort")
+    response_schema = cfg.get("response_schema")
+    search_options = cfg
     # Streaming socket timeout = inter-token read-gap (small constant). The big
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
@@ -77,6 +79,8 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
+            response_schema=response_schema,
+            search_options=search_options,
             timeout=timeout,
         )
         if not result.get("failed"):
@@ -135,8 +139,11 @@ def _call_perplexity(
     retry,
     retry_delay,
     reasoning_effort=None,
+    response_schema=None,
+    search_options=None,
     timeout=None,
 ):
+    search_options = search_options or {}
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
     headers = {
@@ -149,12 +156,38 @@ def _call_perplexity(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        # Perplexity does not support response_format: json_object.
-        # JSON is requested via the system prompt instead.
+        # Perplexity rejects response_format: json_object, which is why this
+        # was prose-only for so long. It DOES accept json_schema (verified
+        # live 2026-08-12) — set below when a domain schema is supplied.
         "temperature": 0.2,
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if response_schema:
+        payload["response_format"] = schema_format.chat_completions_response_format(
+            response_schema
+        )
+    # Search controls, all previously unsent. Verified live 2026-08-12 that
+    # search_domain_filter genuinely constrains the citations returned (every
+    # citation came back on the requested domain), so these are real levers
+    # rather than hints. Opt-in per model config: a recency window aimed at the
+    # "outdated" fact-check bucket, and a domain allowlist for regulatory work.
+    # search_mode: "academic" restricts retrieval to scholarly sources. Measured
+    # 2026-08-12 on the same query: academic returned ASME, MDPI, Taylor &
+    # Francis and PLOS; the default web mode returned a LinkedIn post and a
+    # university landing page. For fact-checking against peer-reviewed work
+    # that is the difference between a citable source and a link.
+    if search_options.get("search_mode"):
+        payload["search_mode"] = search_options["search_mode"]
+    for key in ("search_recency_filter", "search_after_date_filter"):
+        if search_options.get(key):
+            payload[key] = search_options[key]
+    if search_options.get("search_domain_filter"):
+        payload["search_domain_filter"] = list(search_options["search_domain_filter"])
+    if search_options.get("search_context_size"):
+        payload["web_search_options"] = {
+            "search_context_size": search_options["search_context_size"]
+        }
     if reasoning_effort:
         # Sonar API supports reasoning_effort: "minimal" | "low" | "medium" | "high"
         payload["reasoning_effort"] = reasoning_effort

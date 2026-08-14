@@ -1,4 +1,10 @@
-# Model pricing — per-million tokens (input, output).
+# Model pricing — per-million tokens: [input, output] or [input, output, cached_input].
+#
+# The optional third element is the rate for input served from the provider's
+# prompt cache. Without it, cached tokens are billed at the full input rate,
+# which over-reports every provider that caches — Grok caches automatically and
+# xAI prices cached input at $2.00 against $12.50 full, so the report was
+# overstating those calls more than sixfold on the cached portion.
 # Last verified: June 2026. Update whenever provider pricing changes.
 #
 # Prefix matching applies: "gemini-2.5-flash-0520" matches "gemini-2.5-flash".
@@ -10,9 +16,9 @@ unknown_price: [2.50, 10.00]   # fallback for unrecognized model IDs (conservati
 
 models:
   # ── OpenAI ──────────────────────────────────────────────────────────────────
-  gpt-5.5:              [5.00, 30.00]
-  gpt-5.4:              [2.50, 15.00]
-  gpt-5.4-mini:         [0.75,  4.50]
+  gpt-5.5:              [5.00, 30.00,  0.50]
+  gpt-5.4:              [2.50, 15.00,  0.25]
+  gpt-5.4-mini:         [0.75,  4.50,  0.075]
 
   # ── Google Gemini ────────────────────────────────────────────────────────────
   gemini-3.5-flash:         [1.50,  9.00]
