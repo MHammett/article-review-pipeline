@@ -151,9 +151,19 @@ def _build_user_prompt(
         f"ARTICLE TEXT (opening and close; the outline above covers the rest):\n{excerpt}"
     )
 
+    # The previous wording ("must be under N characters — count them") was
+    # overrun on consecutive runs: 157/155, then 177/155. The value is
+    # deliberately never truncated (see _field), so a miss here lands on the
+    # author as manual work. Stating the consequence and asking for margin gives
+    # the model somewhere to land short of the ceiling rather than at it.
     parts.append(
-        f"\nThe meta description must be under {meta_limit} characters — count "
-        f"them. An og_description, if you offer one, is held to the same limit."
+        f"\nHARD LIMIT: the meta description must be at most {meta_limit} "
+        f"characters. Search engines cut anything longer off mid-sentence, so "
+        f"going over makes it unusable, not merely imperfect. Target "
+        f"{max(40, meta_limit - 20)}-{meta_limit - 5} characters to leave margin. "
+        f"Write it, count the characters, and rewrite it shorter if it exceeds "
+        f"{meta_limit}. An og_description, if you offer one, is held to the same "
+        f"limit."
     )
     parts.append(
         f"This publication's configured default schema type is "
@@ -416,5 +426,12 @@ def generate(text, handoff=None, pub_config=None, api_keys=None, seo_result=None
         if suggestions["fields"][name]["over_limit"]
     ]
     if over:
-        log.warning("SEO suggestions over their character limit: %s", ", ".join(over))
+        log.warning(
+            "SEO suggestions over their character limit: %s. The model is told the "
+            "ceiling in the prompt and overran it anyway (157/155 and 177/155 on "
+            "consecutive runs) — the value is kept rather than truncated, because a "
+            "machine cut at a word boundary reads worse than the author trimming it. "
+            "It is reported with its count so the trim is a deliberate edit.",
+            ", ".join(over),
+        )
     return suggestions, call_log_entry

@@ -428,3 +428,89 @@ class TestGroundedUrlsSurviveDeduplication:
             }
         )
         assert list(grounded) == [pipeline._claim_key("The grid runs below average")]
+
+
+class TestGroundedUrlLossIsReported:
+    """A failed fact-check pass silently degrades Section 9 — say so.
+
+    Measured 2026-08-12: perplexity:fact_check was rate-limited, grounded-search
+    URLs went 18 -> 0, and citation resolution fell from 48% (49/101) to 22%
+    (32/144). The run summary reported "perplexity:fact_check FAILED" in one
+    place and "9 verified" in another, with nothing connecting them, so the drop
+    read as an unexplained regression rather than a known consequence.
+    """
+
+    def _results(self, perplexity_failed):
+        return {
+            ("gemini", "fact_check"): {"failed": False, "data": {}},
+            ("perplexity", "fact_check"): (
+                {"failed": True, "error": "429 Too Many Requests"}
+                if perplexity_failed
+                else {
+                    "failed": False,
+                    "citations": ["https://example.org/source"],
+                    "data": {"confirmed": [{"claim": "a claim"}]},
+                }
+            ),
+        }
+
+    def test_grounded_urls_come_only_from_a_successful_fact_check_pass(self):
+        assert pipeline._collect_grounded_urls(self._results(False))
+        assert pipeline._collect_grounded_urls(self._results(True)) == {}
+
+    def test_failure_that_costs_grounded_urls_is_recorded_as_a_degradation(self):
+        report = {"section_2_fact_check": {}}
+        degradations = []
+
+        # Reproduce the branch the pipeline takes at Pass 3 without running the
+        # whole pass: no grounded URLs, and a fact-check pass that failed.
+        results = self._results(True)
+        grounded = pipeline._collect_grounded_urls(results)
+        failed = sorted(
+            f"{m}:{d}"
+            for (m, d), r in results.items()
+            if d == "fact_check" and r.get("failed") and not r.get("skipped")
+        )
+        assert grounded == {}
+        assert failed == ["perplexity:fact_check"]
+
+        if not grounded and failed:
+            degradations.append(
+                {"section": "SECTION 9: Citations", "caused_by": failed}
+            )
+        report["degradations"] = degradations
+
+        assert report["degradations"][0]["caused_by"] == ["perplexity:fact_check"]
+
+    def test_summary_prints_the_degradation_next_to_the_failure(self, capsys):
+        from ci_article_review.pipeline import _print_draft_summary
+
+        report = {
+            "article_title": "T",
+            "run_number": 17,
+            "generated": "2026-08-12T00:00:00+00:00",
+            "section_1_consensus": [],
+            "section_2_fact_check": {},
+            "section_3_voice": [],
+            "section_4_argument": [],
+            "section_5_completeness": [],
+            "section_6_red_team": {},
+            "section_7_low_confidence": [],
+            "lt_corrections_applied": [],
+            "lt_skipped": True,
+            "model_failures": ["perplexity:fact_check"],
+            "degradations": [
+                {
+                    "section": "SECTION 9: Citations",
+                    "caused_by": ["perplexity:fact_check"],
+                    "detail": "Section 9 degraded: no grounded-search URLs were "
+                    "available because perplexity:fact_check failed.",
+                }
+            ],
+        }
+        _print_draft_summary(report, {})
+        out = capsys.readouterr().out
+        assert "perplexity:fact_check" in out
+        assert "Section 9 degraded" in out
+        # The link is only useful if both appear together.
+        assert out.index("These model passes failed") < out.index("Section 9 degraded")
