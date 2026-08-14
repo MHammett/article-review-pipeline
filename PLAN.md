@@ -226,18 +226,47 @@ around its output. 239 lines is not where the pain is.
 ## 5. Decisions needed
 
 1. **Adopt litellm?** Everything in section 2 depends on the answer.
-2. **Prompt-cache layout** — built, defaulted off. It moves the domain
-   instruction from before the article to after it (76% of input cached on calls
-   2+, ~$0.56–1.01/run). It changes prompt structure on a pipeline whose output
-   is the product, so it wants a golden-report diff and your judgment, not mine.
-3. **Delete the junk history directories?** `pipeline_history/t/` is empty;
-   `title/` holds a real 90 KB report from Jun 8 under a broken title. The guard
-   stops new ones; it does not clean up old ones, and deleting your data is not
-   mine to decide.
-4. **Enable OpenAI `web_search`?** Now repaired and functional. It bills per
-   search and shifts OpenAI's fact-check weight toward Gemini's. What it buys is
-   a live-fetched `source` field instead of training recall — not annotations,
+2. **Prompt-cache layout** — built, defaulted off. **Still open, blocked.** It
+   moves the domain instruction from before the article to after it (76% of
+   input cached on calls 2+, ~$0.56–1.01/run).
+
+   Two things settled on 2026-08-14 that whoever cuts this PR needs:
+
+   - **The golden report cannot verify it.** `test_pipeline_end_to_end.py` stubs
+     `_run_domain`, and that is exactly where `prompt_cache_layout` is applied,
+     so flipping the flag produces an *empty* golden diff by construction. An
+     empty diff there is evidence the code never ran, not evidence the findings
+     held. Verifying it means a live run diffed against a prior live run of the
+     same article — and reading that diff means checking `model_failures` first,
+     because a run that lost a provider looks exactly like a behavioural change.
+   - **Documentation is written and waiting.** A `### Prompt cache layout`
+     section for `docs/CONFIGURATION.md` and the `user.example.yaml` comment
+     block were drafted for PR #84 and pulled back out, because master has no
+     such setting yet. Recover them from that PR's branch history and land them
+     alongside the feature so it does not ship undocumented.
+
+   Blocked on OpenAI credits regardless: the entire measured effect is on
+   OpenAI's prefix, and the account has returned `credit_balance_exhausted`
+   since 2026-08-11.
+3. ~~**Delete the junk history directories?**~~ **Done, 2026-08-14.** `t/` and
+   `title/` are gone. The Jun 8 report was refiled into the article's own
+   directory as `run_1_20260608_075204_report.json`. It turned out to be the
+   smallest part of a larger problem: the same article occupied three more
+   directories because its title kept being revised, which let one article clear
+   `voice_pattern_report`'s `MIN_ARTICLES = 3` on its own. All 47 reports are now
+   under `pipeline_history/dc-environment/`, and a `History key:` handoff field
+   (PR #84) stops title revisions forking a history again.
+4. ~~**Enable OpenAI `web_search`?**~~ **Done, 2026-08-14 (PR #84).** Scoped to
+   `fact_check` rather than enabled flat — it is a per-model flag, so at
+   `maximum` it was billing a search on all five domains when only `fact_check`
+   can use one. Note it also never survived `cost_preset`, which rebuilds the
+   model dict and dropped it; fixed in the same PR. What it buys is a
+   live-fetched `source` field instead of training recall — not annotations,
    which are structurally empty under JSON-only prompts.
+5. ~~**Enable Claude?**~~ **Done, 2026-08-14 (PR #84).** Superseded by a general
+   drafting-model exclusion: `pipeline.drafting_model` (or `Drafted with:` in a
+   handoff) drops the declared drafter from `voice_style` only, so Claude can be
+   enabled without judging its own phrasing habits.
 
 ---
 
