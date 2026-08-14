@@ -57,7 +57,7 @@ class TestCollectCitationClaims:
         """Claim-specific provenance always wins over a response-level one."""
         fact_check = {"outdated": [{"claim": "c1", "source": "https://own.example"}]}
         (claim,) = pipeline._collect_citation_claims(
-            fact_check, {"c1": "https://grounded.example"}
+            fact_check, {pipeline._claim_key("c1"): "https://grounded.example"}
         )
         assert claim["known_url"] == "https://own.example"
 
@@ -65,7 +65,7 @@ class TestCollectCitationClaims:
         """Finding 4 — a live-search URL is better than nothing."""
         fact_check = {"unverifiable": [{"claim": "c1"}]}
         (claim,) = pipeline._collect_citation_claims(
-            fact_check, {"c1": "https://grounded.example"}
+            fact_check, {pipeline._claim_key("c1"): "https://grounded.example"}
         )
         assert claim["known_url"] == "https://grounded.example"
 
@@ -94,13 +94,13 @@ class TestCollectGroundedUrls:
         got = pipeline._collect_grounded_urls(
             self._result(citations=["https://cited.example"])
         )
-        assert got == {"c1": "https://cited.example"}
+        assert got == {pipeline._claim_key("c1"): "https://cited.example"}
 
     def test_search_results_are_captured_too(self):
         got = pipeline._collect_grounded_urls(
             self._result(search_results=[{"url": "https://sr.example", "title": "t"}])
         )
-        assert got == {"c1": "https://sr.example"}
+        assert got == {pipeline._claim_key("c1"): "https://sr.example"}
 
     def test_failed_calls_contribute_nothing(self):
         got = pipeline._collect_grounded_urls(
@@ -308,3 +308,123 @@ class TestMarkdownSourceUrls:
 
     def test_no_url_returns_none(self):
         assert pipeline._extract_source_url("EIA State Energy Profile, 2024") is None
+
+
+class TestClaimDeduplicationByMeaning:
+    """Five models paraphrasing one fact must produce one claim, not five.
+
+    The 2026-08-12 run carried 29 near-duplicate pairs among 144 claims — one
+    differing from its twin only by a trailing full stop. Each duplicate bought
+    its own resolution fetch, verification call, and Section 9 line.
+    """
+
+    def _claims(self, *texts):
+        return pipeline._collect_citation_claims(
+            {"outdated": [{"claim": t} for t in texts]}, {}
+        )
+
+    def test_a_trailing_period_is_not_a_new_claim(self):
+        got = self._claims(
+            "Microsoft dropped its NDA requirements in March 2026",
+            "Microsoft dropped its NDA requirements in March 2026.",
+        )
+        assert len(got) == 1
+
+    def test_a_leading_article_is_not_a_new_claim(self):
+        got = self._claims(
+            "The Virginia electrical grid runs below the national average",
+            "Virginia electrical grid runs below the national average",
+        )
+        assert len(got) == 1
+
+    def test_case_and_punctuation_differences_collapse(self):
+        got = self._claims(
+            "EPA designated PFOA as a CERCLA hazardous substance in 2024",
+            "EPA designated PFOA as a CERCLA hazardous substance in 2024!",
+        )
+        assert len(got) == 1
+
+    def test_genuinely_different_claims_both_survive(self):
+        """Merging two distinct claims silently drops one from verification."""
+        got = self._claims(
+            "US data centers consumed 17.4 billion gallons of water in 2023",
+            "US crop irrigation withdrawals average roughly 105 billion gallons per day",
+        )
+        assert len(got) == 2
+
+    def test_claims_differing_only_in_a_number_are_kept_apart(self):
+        """The threshold is set high precisely so this case does not merge."""
+        got = self._claims(
+            "Emergency engines are capped at 100 hours per year",
+            "Emergency engines are capped at 500 hours per year",
+        )
+        assert len(got) == 2, [c["claim"] for c in got]
+
+    def test_the_first_occurrence_wins_and_keeps_its_url(self):
+        claims = pipeline._collect_citation_claims(
+            {
+                "outdated": [
+                    {"claim": "A fact about water", "source": "https://first.example"},
+                    {
+                        "claim": "A fact about water.",
+                        "source": "https://second.example",
+                    },
+                ]
+            },
+            {},
+        )
+        assert len(claims) == 1
+        assert claims[0]["known_url"] == "https://first.example"
+
+    def test_an_empty_claim_never_matches_anything(self):
+        assert pipeline._is_duplicate_claim(frozenset(), [frozenset()]) is False
+
+
+class TestGroundedUrlsSurviveDeduplication:
+    """Dedup and grounded-URL lookup must agree on what "the same claim" means.
+
+    Regression guard: when claim dedup started collapsing paraphrases but the
+    grounded-URL map was still keyed on raw text, a URL registered under the
+    phrasing that lost the tie became unreachable by the phrasing that won it —
+    silently costing the claim its only source.
+    """
+
+    def test_a_url_registered_under_a_variant_phrasing_is_still_found(self):
+        grounded = pipeline._collect_grounded_urls(
+            {
+                ("perplexity", "fact_check"): {
+                    "failed": False,
+                    "citations": ["https://source.example"],
+                    "data": {
+                        "outdated": [
+                            {
+                                "claim": "Microsoft dropped its NDA requirements in March 2026."
+                            }
+                        ]
+                    },
+                }
+            }
+        )
+        claims = pipeline._collect_citation_claims(
+            {
+                "outdated": [
+                    {"claim": "Microsoft dropped its NDA requirements in March 2026"},
+                    {"claim": "Microsoft dropped its NDA requirements in March 2026."},
+                ]
+            },
+            grounded,
+        )
+        assert len(claims) == 1
+        assert claims[0]["known_url"] == "https://source.example"
+
+    def test_the_grounded_map_is_keyed_the_same_way_dedup_is(self):
+        grounded = pipeline._collect_grounded_urls(
+            {
+                ("perplexity", "fact_check"): {
+                    "failed": False,
+                    "citations": ["https://source.example"],
+                    "data": {"outdated": [{"claim": "The grid runs below average"}]},
+                }
+            }
+        )
+        assert list(grounded) == [pipeline._claim_key("The grid runs below average")]
