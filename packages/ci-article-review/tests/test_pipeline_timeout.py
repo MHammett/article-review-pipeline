@@ -12,7 +12,11 @@ import concurrent.futures
 import threading
 import time
 
+from unittest.mock import patch
+
 import pytest
+
+import ci_article_review.pipeline as pipeline
 
 
 class TestRunWithTimeout:
@@ -98,3 +102,48 @@ class TestRunWithTimeout:
         assert results["openai:structure"] == {"failed": False}
         assert results["claude:accuracy"]["failed"] is True
         assert "timed out" in results["claude:accuracy"]["error"].lower()
+
+
+class TestSameProviderStagger:
+    """A provider's own calls must not all fire in the same instant.
+
+    Rate limits are per account, not per call, so five simultaneous Perplexity
+    requests compete for one quota. Observed 2026-08-12: two returned HTTP 429
+    within one second of each other and one failed outright after its retry also
+    hit the limit, which then cost Section 9 all of its grounded-search URLs.
+    """
+
+    def test_calls_to_one_provider_are_spread(self):
+        names = [
+            f"perplexity:{d}"
+            for d in (
+                "fact_check",
+                "voice_style",
+                "completeness",
+                "argument_integrity",
+                "red_team",
+            )
+        ]
+        offsets = pipeline._stagger_offsets(names, 3)
+        assert sorted(offsets.values()) == [0, 3, 6, 9, 12]
+
+    def test_different_providers_still_start_together(self):
+        """The parallelism that matters is across providers, not within one."""
+        names = ["perplexity:fact_check", "gemini:fact_check", "grok:fact_check"]
+        assert set(pipeline._stagger_offsets(names, 3).values()) == {0}
+
+    def test_stagger_of_zero_disables_it(self):
+        names = [f"perplexity:{d}" for d in ("a", "b", "c")]
+        assert set(pipeline._stagger_offsets(names, 0).values()) == {0}
+
+    def test_delay_start_is_a_passthrough_at_zero(self):
+        """No offset must mean no wrapper, so the common case pays nothing."""
+        fn = lambda: "ran"  # noqa: E731
+        assert pipeline._delay_start(fn, 0) is fn
+
+    def test_delay_start_sleeps_then_runs(self):
+        slept = []
+        fn = pipeline._delay_start(lambda: "ran", 6)
+        with patch.object(pipeline.time, "sleep", side_effect=slept.append):
+            assert fn() == "ran"
+        assert slept == [6]
