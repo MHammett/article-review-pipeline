@@ -41,7 +41,6 @@ if _missing:
 
 import argparse
 import concurrent.futures
-import importlib
 import logging
 import re
 import time
@@ -66,6 +65,7 @@ from . import history as hist
 from . import consolidation
 from ci_core import redact
 from ci_core.config_helpers import normalize_model_configs
+from ci_core import llm
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from .analysis import readability as readability_analysis
@@ -99,15 +99,8 @@ _DOMAIN_PROMPTS: dict[str, str] = {
     "red_team": "red_team.txt",
 }
 
-#: Maps model names to their adapter module path.
-_ADAPTER_MODULES: dict[str, str] = {
-    "gemini": "ci_core.llm.adapters.gemini",
-    "openai": "ci_core.llm.adapters.openai",
-    "mistral": "ci_core.llm.adapters.mistral",
-    "grok": "ci_core.llm.adapters.grok",
-    "claude": "ci_core.llm.adapters.claude",
-    "perplexity": "ci_core.llm.adapters.perplexity",
-}
+#: Providers this pipeline can call — the six the shared LLM layer routes.
+_PROVIDERS: tuple[str, ...] = llm.PROVIDERS
 
 #: Which models run which domains at each thoroughness level.
 #: Models are listed in preference order; unconfigured ones are skipped.
@@ -459,7 +452,7 @@ def _build_custom_assignments(pub_config, model_configs, api_keys):
         prompts_by_domain[domain_name] = prompt_str
 
         for model_name in cfg.get("models") or []:
-            if model_name not in _ADAPTER_MODULES:
+            if model_name not in _PROVIDERS:
                 log.warning(
                     "Custom domain %r: unknown model %r — skipping",
                     domain_name,
@@ -798,8 +791,6 @@ def _run_domain(
     build the keyed results dict without re-parsing the runner name string.
     prompt_str overrides the built-in prompt file for custom publication domains.
     """
-    adapter = importlib.import_module(_ADAPTER_MODULES[model_name])
-
     template = (
         prompt_str if prompt_str is not None else _load_prompt(_DOMAIN_PROMPTS[domain])
     )
@@ -821,22 +812,23 @@ def _run_domain(
     user = _build_user_prompt(draft, handoff)
     api_key = api_keys.get(model_name, {}).get("api_key", "")
 
-    # Live web search is a per-model flag in the adapters, but only one domain
-    # has any use for it: fact_check, where it replaces training recall with a
-    # live-fetched source. voice_style matches the draft against a voice
-    # profile, and completeness, argument_integrity and red_team all reason
-    # about the draft in front of them — none are improved by fetching a page,
-    # and every one of them bills per search anyway. Resolving the flag here,
-    # where the domain is known, turns five paid search contexts per run into
-    # one. A bare `web_search: true` still means every domain, so existing
-    # configs keep their behaviour.
+    # Live web search is a per-model flag, but only one domain has any use for
+    # it: fact_check, where it replaces training recall with a live-fetched
+    # source. voice_style matches the draft against a voice profile, and
+    # completeness, argument_integrity and red_team all reason about the draft
+    # in front of them — none are improved by fetching a page, and every one of
+    # them bills per search anyway. Resolving the flag here, where the domain is
+    # known, turns five paid search contexts per run into one. A bare
+    # `web_search: true` still means every domain, so existing configs keep
+    # their behaviour.
     provider_config = dict(model_configs.get(model_name, {}))
     if "web_search" in provider_config:
         provider_config["web_search"] = _web_search_enabled(
             provider_config["web_search"], domain
         )
 
-    result = adapter.call(
+    result = llm.call_provider(
+        model_name,
         system,
         user,
         api_key,

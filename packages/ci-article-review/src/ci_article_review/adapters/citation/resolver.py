@@ -9,7 +9,7 @@ import threading
 from ci_core.http import UnsafeURLError, is_public_host, safe_get
 
 from ci_core import extract
-from ci_core.llm.adapters import mistral
+from ci_core import llm
 
 from ci_article_review import history_analytics
 
@@ -433,7 +433,8 @@ def _verify_relevance(claim, content, api_keys):
         # Throttled: the fetches around this run 8-wide, but the provider
         # rate-limits the model call. See _MAX_VERIFY_PARALLEL.
         with _VERIFY_SEMAPHORE:
-            result = mistral.call(
+            result = llm.call_provider(
+                "mistral",
                 _VERIFICATION_SYSTEM_PROMPT,
                 user_prompt,
                 api_key,

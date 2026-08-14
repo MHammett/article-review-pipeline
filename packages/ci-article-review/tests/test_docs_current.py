@@ -118,8 +118,6 @@ def test_every_cli_flag_is_documented_in_readme(module_name):
 SUMMARIZED_DIRS = {
     # "sources/  10 adapters: census, crossref, eia, epa, ferc, fhwa, fred, ..."
     "packages/ci-article-review/src/ci_article_review/adapters/citation/sources",
-    # "adapters/  the six streaming provider adapters + call_provider/call_text dispatch"
-    "packages/ci-core/src/ci_core/llm/adapters",
     # "collectors/  wordpress, gmail, outlook365, twitter, textfiles, custom/"
     "packages/ci-style-profile/src/ci_style_profile/collectors",
 }

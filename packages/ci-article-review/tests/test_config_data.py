@@ -59,10 +59,10 @@ class TestPresetsAreValid:
 
     def test_each_preset_configures_only_real_providers(self):
         from ci_article_review.config_loader import _load_presets_from_yaml
-        from ci_article_review.pipeline import _ADAPTER_MODULES
+        from ci_article_review.pipeline import _PROVIDERS
 
         for name, body in _load_presets_from_yaml().items():
-            unknown = set(body.get("models", {})) - set(_ADAPTER_MODULES)
+            unknown = set(body.get("models", {})) - set(_PROVIDERS)
             assert not unknown, f"preset {name!r} names unknown providers: {unknown}"
 
     def test_a_missing_presets_file_raises_rather_than_degrading(self, tmp_path):

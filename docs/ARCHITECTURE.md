@@ -261,7 +261,7 @@ The fix was to make the safe call the reachable one.
 |---|---|
 | A review domain | `custom_domains` in the publication config — inline prompt or `prompt_file`, plus which models run it |
 | A citation source | A module in `adapters/citation/sources/` exposing `resolve(claim)`, registered in `ADAPTER_MAP` |
-| A provider | An adapter in `ci_core/llm/adapters/` returning the standard result dict, plus `_ADAPTER_MODULES` and `pricing.yaml` |
+| A provider | An entry in `_PROVIDERS` in `ci_core/llm/client.py` (litellm route prefix, call surface, fallback chain, read-gap default), plus `pricing.yaml` and `cached_input` |
 | A cost preset | `configs/presets.yaml` — the YAML is the single source of truth |
 
 ---

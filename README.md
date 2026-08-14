@@ -372,15 +372,12 @@ content-intelligence/
 │   │   ├── pyproject.toml
 │   │   ├── src/ci_core/
 │   │   │   ├── llm/
-│   │   │   │   ├── adapters/     the six streaming provider adapters + call_provider/
-│   │   │   │   │                 call_text dispatch (claude, gemini, grok, mistral,
-│   │   │   │   │                 openai, perplexity)
-│   │   │   │   ├── streaming.py       SSE accumulation and read-gap timeouts
+│   │   │   │   ├── client.py          the litellm shim: five providers through
+│   │   │   │   │                      completion(), OpenAI through responses(),
+│   │   │   │   │                      all streaming under a read-gap timeout
 │   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,
 │   │   │   │   │                      truncation salvage)
-│   │   │   │   ├── tokens.py          normalizes provider-native usage dicts to
-│   │   │   │   │                      the {prompt, completion} contract
-│   │   │   │   ├── cost.py            token-based cost estimation
+│   │   │   │   ├── cost.py            token-based cost estimation, incl. cache hits
 │   │   │   │   ├── timeout_model.py   sliding-scale timeout from size × model × effort
 │   │   │   │   └── model_registry.py  current/superseded model detection
 │   │   │   ├── extract.py        HTML/PDF -> readable text, claim-centred excerpts

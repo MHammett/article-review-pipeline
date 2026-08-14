@@ -7,9 +7,14 @@ requires-python = ">=3.10"
 # persistence/settings/logging cluster (ci_core.config, .db, .models, .logging)
 # moved to the [persistence] extra below — see audit finding 13.
 dependencies = [
-    # ci_core.llm — the shared streaming LLM call layer. Deliberately built on
-    # requests + raw SSE rather than the per-provider SDKs: one transport, one
-    # set of timeout/encoding/error-body semantics across all six providers.
+    # ci_core.llm — the shared LLM call layer. litellm replaces the six
+    # hand-rolled provider adapters and the raw-SSE transport underneath them:
+    # one call shape, one set of error classes, and provider extras
+    # (Perplexity citations, Gemini grounding, cached tokens) preserved as
+    # response fields. See docs/LITELLM.md for what it does and does not carry.
+    "litellm>=1.96.2,<2.0",
+    # Still used by ci_core.extract and ci_core.http (link checking), and by
+    # redact.capture_error_body's requests.HTTPError handling.
     "requests>=2.31.0,<3.0",
     "pyyaml>=6.0,<7.0",
     # ci_core.extract — text extraction from PDF citation sources. Many of the

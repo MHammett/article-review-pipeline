@@ -47,7 +47,7 @@ def _model_response(data):
 
 def _review(data, pub_config=None, **kwargs):
     with patch(
-        "ci_article_review.analysis.seo_content.mistral.call",
+        "ci_article_review.analysis.seo_content.llm.call_provider",
         return_value=_model_response(data),
     ) as mock_call:
         result, call_log = seo_content.review(
@@ -94,7 +94,7 @@ class TestReview:
             ]
         }
         _, _, mock_call = _review({"findings": []}, suggestions=suggestions)
-        prompt = mock_call.call_args.args[1]
+        prompt = mock_call.call_args.args[2]
         assert "interconnection queue" in prompt
         assert "grid capacity" in prompt
 
@@ -128,7 +128,7 @@ class TestStaysInItsLane:
 
     def test_prompt_tells_the_model_to_leave_those_domains_alone(self):
         _, _, mock_call = _review({"findings": []})
-        system = mock_call.call_args.args[0]
+        system = mock_call.call_args.args[1]
         assert "Do NOT flag missing information" in system
         assert "EMPTY findings list" in system
 
@@ -147,7 +147,7 @@ class TestStaysInItsLane:
 class TestGracefulDegradation:
     def test_failed_call_still_logs_cost(self):
         with patch(
-            "ci_article_review.analysis.seo_content.mistral.call",
+            "ci_article_review.analysis.seo_content.llm.call_provider",
             return_value={
                 "failed": True,
                 "error": "503 Service Unavailable",
@@ -167,7 +167,7 @@ class TestGracefulDegradation:
 
     def test_raising_call_is_caught(self):
         with patch(
-            "ci_article_review.analysis.seo_content.mistral.call",
+            "ci_article_review.analysis.seo_content.llm.call_provider",
             side_effect=RuntimeError("socket exploded"),
         ):
             result, call_log = seo_content.review(
@@ -181,7 +181,7 @@ class TestGracefulDegradation:
     def test_non_dict_payload_is_a_failure(self):
         result, call_log = None, None
         with patch(
-            "ci_article_review.analysis.seo_content.mistral.call",
+            "ci_article_review.analysis.seo_content.llm.call_provider",
             return_value=_model_response(["not", "an", "object"]),
         ):
             result, call_log = seo_content.review(
@@ -196,7 +196,9 @@ class TestGracefulDegradation:
         assert result["findings"] == []
 
     def test_missing_api_key_skips_without_calling(self):
-        with patch("ci_article_review.analysis.seo_content.mistral.call") as mock_call:
+        with patch(
+            "ci_article_review.analysis.seo_content.llm.call_provider"
+        ) as mock_call:
             result, call_log = seo_content.review(
                 _ARTICLE, handoff=_HANDOFF, pub_config={}, api_keys={}
             )
@@ -207,7 +209,9 @@ class TestGracefulDegradation:
 
 class TestDisabling:
     def test_content_review_flag_off_skips_without_calling(self):
-        with patch("ci_article_review.analysis.seo_content.mistral.call") as mock_call:
+        with patch(
+            "ci_article_review.analysis.seo_content.llm.call_provider"
+        ) as mock_call:
             result, call_log = seo_content.review(
                 _ARTICLE,
                 handoff=_HANDOFF,
@@ -223,7 +227,7 @@ class TestDisabling:
         # Turning off metadata suggestions alone must not silence this pass —
         # they answer different questions and each has its own key.
         with patch(
-            "ci_article_review.analysis.seo_content.mistral.call",
+            "ci_article_review.analysis.seo_content.llm.call_provider",
             return_value=_model_response({"findings": [_FINDING]}),
         ) as mock_call:
             result, _ = seo_content.review(

@@ -68,7 +68,7 @@ _GOOD_DATA = {
 class TestGenerateHappyPath:
     def test_returns_candidates_and_measured_description(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ):
             suggestions, call_log = seo_suggest.generate(
@@ -91,7 +91,7 @@ class TestGenerateHappyPath:
         from ci_core.llm import cost as cost_analysis
 
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ):
             _, call_log = seo_suggest.generate(
@@ -112,14 +112,14 @@ class TestGenerateHappyPath:
 
     def test_prompt_carries_the_material_the_pipeline_already_has(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ) as mock_call:
             seo_suggest.generate(
                 _ARTICLE, handoff=_HANDOFF, pub_config=_PUB_CONFIG, api_keys=_KEYS
             )
 
-        user_prompt = mock_call.call_args.args[1]
+        user_prompt = mock_call.call_args.args[2]
         assert "Data Centers and the Grid" in user_prompt
         assert "Interconnection queues, not generation" in user_prompt
         assert "Municipal officials evaluating" in user_prompt
@@ -131,7 +131,7 @@ class TestGenerateHappyPath:
 
     def test_uses_the_small_fast_model(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ) as mock_call:
             seo_suggest.generate(
@@ -144,34 +144,34 @@ class TestGenerateHappyPath:
 class TestMetaDescriptionLengthConstraint:
     def test_prompt_states_the_limit(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ) as mock_call:
             seo_suggest.generate(
                 _ARTICLE, handoff=_HANDOFF, pub_config=_PUB_CONFIG, api_keys=_KEYS
             )
 
-        prompt = mock_call.call_args.args[1]
+        prompt = mock_call.call_args.args[2]
         assert "155" in prompt and "HARD LIMIT" in prompt
 
     def test_publication_config_governs_the_limit(self):
         pub_config = {**_PUB_CONFIG, "seo_rules": {"meta_description_max_chars": 120}}
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ) as mock_call:
             suggestions, _ = seo_suggest.generate(
                 _ARTICLE, handoff=_HANDOFF, pub_config=pub_config, api_keys=_KEYS
             )
 
-        prompt = mock_call.call_args.args[1]
+        prompt = mock_call.call_args.args[2]
         assert "120" in prompt and "HARD LIMIT" in prompt
         assert suggestions["fields"]["meta_description"]["limit"] == 120
 
     def test_over_limit_description_is_flagged_not_silently_shipped(self):
         long_description = "x" * 200
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(
                 {**_GOOD_DATA, "meta_description": long_description}
             ),
@@ -191,7 +191,7 @@ class TestMetaDescriptionLengthConstraint:
     def test_description_at_the_limit_is_not_flagged(self):
         exact = "x" * 155
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response({**_GOOD_DATA, "meta_description": exact}),
         ):
             suggestions, _ = seo_suggest.generate(
@@ -211,7 +211,7 @@ class TestOgTitle:
         assert "title_too_long" in [i["type"] for i in seo_result["issues"]]
 
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response({**_GOOD_DATA, "og_title": "A Shorter Title"}),
         ) as mock_call:
             suggestions, _ = seo_suggest.generate(
@@ -222,7 +222,7 @@ class TestOgTitle:
                 seo_result=seo_result,
             )
 
-        assert "OG TITLE REQUESTED" in mock_call.call_args.args[1]
+        assert "OG TITLE REQUESTED" in mock_call.call_args.args[2]
         og = suggestions["fields"]["og_title"]
         assert og["value"] == "A Shorter Title"
         assert og["chars"] == len("A Shorter Title")
@@ -231,7 +231,7 @@ class TestOgTitle:
     def test_over_long_og_title_is_flagged(self):
         handoff, seo_result = self._long_title_seo_result()
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response({**_GOOD_DATA, "og_title": "B" * 65}),
         ):
             suggestions, _ = seo_suggest.generate(
@@ -248,7 +248,7 @@ class TestOgTitle:
     def test_not_requested_when_the_title_fits(self):
         seo_result = seo_analysis.analyze(_ARTICLE, _HANDOFF)
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response({**_GOOD_DATA, "og_title": "Unasked For"}),
         ) as mock_call:
             suggestions, _ = seo_suggest.generate(
@@ -259,7 +259,7 @@ class TestOgTitle:
                 seo_result=seo_result,
             )
 
-        assert "OG TITLE REQUESTED" not in mock_call.call_args.args[1]
+        assert "OG TITLE REQUESTED" not in mock_call.call_args.args[2]
         # The field still reports an outcome — the article-title default.
         og = suggestions["fields"]["og_title"]
         assert og["value"] == ""
@@ -271,7 +271,7 @@ class TestGracefulDegradation:
 
     def test_failed_call_returns_failed_status_and_still_logs_cost(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value={
                 "failed": True,
                 "error": "503 Service Unavailable",
@@ -294,7 +294,7 @@ class TestGracefulDegradation:
 
     def test_raising_call_is_caught(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             side_effect=RuntimeError("socket exploded"),
         ):
             suggestions, call_log = seo_suggest.generate(
@@ -307,7 +307,7 @@ class TestGracefulDegradation:
 
     def test_non_dict_payload_is_a_failure_not_a_crash(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(["not", "an", "object"]),
         ):
             suggestions, call_log = seo_suggest.generate(
@@ -319,7 +319,7 @@ class TestGracefulDegradation:
 
     def test_empty_payload_is_a_failure(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(
                 {"keyword_candidates": [], "meta_description": ""}
             ),
@@ -331,7 +331,9 @@ class TestGracefulDegradation:
         assert suggestions["status"] == "failed"
 
     def test_missing_api_key_skips_without_calling(self):
-        with patch("ci_article_review.analysis.seo_suggest.mistral.call") as mock_call:
+        with patch(
+            "ci_article_review.analysis.seo_suggest.llm.call_provider"
+        ) as mock_call:
             suggestions, call_log = seo_suggest.generate(
                 _ARTICLE, handoff=_HANDOFF, pub_config=_PUB_CONFIG, api_keys={}
             )
@@ -343,7 +345,7 @@ class TestGracefulDegradation:
 
     def test_no_article_text_does_not_crash(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ):
             suggestions, _ = seo_suggest.generate(
@@ -356,7 +358,9 @@ class TestGracefulDegradation:
 class TestDisabling:
     def test_seo_rules_flag_off_skips_without_calling(self):
         pub_config = {**_PUB_CONFIG, "seo_rules": {"suggestions": False}}
-        with patch("ci_article_review.analysis.seo_suggest.mistral.call") as mock_call:
+        with patch(
+            "ci_article_review.analysis.seo_suggest.llm.call_provider"
+        ) as mock_call:
             suggestions, call_log = seo_suggest.generate(
                 _ARTICLE, handoff=_HANDOFF, pub_config=pub_config, api_keys=_KEYS
             )
@@ -368,7 +372,7 @@ class TestDisabling:
 
     def test_on_by_default(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(_GOOD_DATA),
         ) as mock_call:
             seo_suggest.generate(
@@ -382,7 +386,7 @@ class TestCandidateNormalization:
     def test_capped_at_five(self):
         many = [{"keyword": f"phrase {i}", "rationale": "why"} for i in range(9)]
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response({**_GOOD_DATA, "keyword_candidates": many}),
         ):
             suggestions, _ = seo_suggest.generate(
@@ -393,7 +397,7 @@ class TestCandidateNormalization:
 
     def test_bare_strings_are_accepted_as_candidates(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(
                 {**_GOOD_DATA, "keyword_candidates": ["grid interconnection", ""]}
             ),
@@ -408,7 +412,7 @@ class TestCandidateNormalization:
 
     def test_non_list_candidates_do_not_crash(self):
         with patch(
-            "ci_article_review.analysis.seo_suggest.mistral.call",
+            "ci_article_review.analysis.seo_suggest.llm.call_provider",
             return_value=_model_response(
                 {**_GOOD_DATA, "keyword_candidates": "one big string"}
             ),
@@ -424,7 +428,7 @@ class TestCandidateNormalization:
 
 def _generate(data, pub_config=None, **kwargs):
     with patch(
-        "ci_article_review.analysis.seo_suggest.mistral.call",
+        "ci_article_review.analysis.seo_suggest.llm.call_provider",
         return_value=_model_response({**_GOOD_DATA, **data}),
     ) as mock_call:
         suggestions, _ = seo_suggest.generate(
@@ -516,7 +520,7 @@ class TestSchemaType:
         assert field["configured_default"] == "Article"
         assert field["differs_from_default"] is True
         # The model is told what the default is, so confirming it is an option.
-        assert "default schema type is Article" in mock_call.call_args.args[1]
+        assert "default schema type is Article" in mock_call.call_args.args[2]
 
     def test_agreeing_with_the_default_is_not_flagged_as_a_change(self):
         pub_config = {

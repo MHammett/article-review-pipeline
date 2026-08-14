@@ -1,20 +1,19 @@
 """Multi-model caller for style synthesis and detection.
 
-Transport is :mod:`ci_core.llm.adapters` — the same provider adapters the
-review pipeline uses, so this module inherits their hardening: UTF-8 stream
-decoding, HTTP error-body capture, in-band SSE error surfacing, per-provider
-read-gap timeouts, and truncated-JSON salvage.
+Transport is :mod:`ci_core.llm` — the same litellm-backed call layer the review
+pipeline uses, so this module inherits its hardening: HTTP error-body capture,
+per-provider read-gap timeouts, and truncated-JSON salvage.
 
 What stays here is the *policy* around those calls: which models run
 (Perplexity is excluded by default — web grounding adds noise for corpus
 analysis), how they fan out (ThreadPoolExecutor), the wall-clock backstop, and
 the cumulative API-call log used for cost reporting.
 
-Calls go through :func:`ci_core.llm.adapters.call_text` rather than each
-adapter's ``call()`` directly: the adapters parse their response as JSON and
-report a prose reply as a failure, but style synthesis does its own parsing
-downstream (``extract_json``) and feeds some model output back into a later
-prompt verbatim, so it wants the assembled text.
+Calls go through :func:`ci_core.llm.call_text` rather than
+:func:`ci_core.llm.call_provider`: the shared layer parses its response as JSON
+and reports a prose reply as a failure, but style synthesis does its own
+parsing downstream (``extract_json``) and feeds some model output back into a
+later prompt verbatim, so it wants the assembled text.
 
 Import direction: this package depends on ci-core only. Nothing from
 ci-article-review is imported here, and nothing imports back up this chain.
@@ -29,7 +28,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 
 from ci_core.config_helpers import normalize_model_configs
 from ci_core.llm import timeout_model
-from ci_core.llm.adapters import call_text
+from ci_core.llm import call_text
 from ci_core.llm.cost import calculate as cost_calculate
 
 log = logging.getLogger(__name__)
@@ -79,8 +78,8 @@ def call_one(
             provider_config=model_cfg,
         )
     except KeyError:
-        # No adapter by that name — a config error, not a provider failure.
-        log.warning("Unknown model %r (no adapter); skipping", model_name)
+        # No provider by that name — a config error, not a provider failure.
+        log.warning("Unknown model %r (no provider); skipping", model_name)
         return {
             "failed": True,
             "error": f"Unknown model {model_name!r}",
