@@ -43,10 +43,20 @@ _WINDOWS_RESERVED = {
 _REPORT_NAME_RE = re.compile(r"^run_(?P<run>\d+)_((?P<ts>\d{8}_\d{6})_)?report\.json$")
 
 
+#: A real article title is longer than this. Anything shorter is a placeholder
+#: or a parse failure, and giving it its own history directory is how
+#: pipeline_history/ ended up with "t/" and "title/" sitting next to real runs —
+#: directories that will never accumulate a second run and only make the real
+#: ones harder to find.
+_MIN_TITLE_CHARS = 8
+
+
 def _slug(title):
     slug = title.lower()
     slug = re.sub(r"[^\w\s-]", "", slug)
     slug = re.sub(r"[\s_]+", "-", slug).strip("-")
+    if len(slug.replace("-", "")) < _MIN_TITLE_CHARS:
+        slug = "untitled"
     slug = slug[:60] or "untitled"
     if slug.lower() in _WINDOWS_RESERVED:
         slug = f"article-{slug}"
@@ -205,3 +215,26 @@ def append_disposition(history_root, article_title, entry):
     with open(disp_path, "a", encoding="utf-8") as f:
         timestamp = datetime.now(timezone.utc).isoformat()
         f.write(f"\n[{timestamp}] {entry}\n")
+
+
+def existing_run_numbers(history_root, article_title):
+    """Run numbers already on disk for ``article_title``.
+
+    The run number comes from the handoff, which the author edits by hand and
+    routinely forgets to bump. Without this the pipeline writes a second
+    ``run_16_*`` beside the first and neither filename says which is later.
+    Returns an empty set for an article with no history, or when the history
+    directory cannot be read — a numbering nicety must never fail a run.
+    """
+    try:
+        run_dir = Path(history_root) / _slug(article_title)
+        if not run_dir.is_dir():
+            return set()
+        numbers = set()
+        for path in run_dir.glob("run_*_report.json"):
+            match = re.match(r"run_(\d+)_", path.name)
+            if match:
+                numbers.add(int(match.group(1)))
+        return numbers
+    except OSError:
+        return set()

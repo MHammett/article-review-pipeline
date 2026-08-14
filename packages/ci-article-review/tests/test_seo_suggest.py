@@ -151,7 +151,8 @@ class TestMetaDescriptionLengthConstraint:
                 _ARTICLE, handoff=_HANDOFF, pub_config=_PUB_CONFIG, api_keys=_KEYS
             )
 
-        assert "under 155 characters" in mock_call.call_args.args[1]
+        prompt = mock_call.call_args.args[1]
+        assert "155" in prompt and "HARD LIMIT" in prompt
 
     def test_publication_config_governs_the_limit(self):
         pub_config = {**_PUB_CONFIG, "seo_rules": {"meta_description_max_chars": 120}}
@@ -163,7 +164,8 @@ class TestMetaDescriptionLengthConstraint:
                 _ARTICLE, handoff=_HANDOFF, pub_config=pub_config, api_keys=_KEYS
             )
 
-        assert "under 120 characters" in mock_call.call_args.args[1]
+        prompt = mock_call.call_args.args[1]
+        assert "120" in prompt and "HARD LIMIT" in prompt
         assert suggestions["fields"]["meta_description"]["limit"] == 120
 
     def test_over_limit_description_is_flagged_not_silently_shipped(self):

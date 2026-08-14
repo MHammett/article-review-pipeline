@@ -734,7 +734,22 @@ def run_draft_pipeline(
         sys.exit(1)
 
     run_start_ts = datetime.now(timezone.utc)
+    # The handoff declares the run number, so re-running without editing it
+    # writes a second report with the same number — pipeline_history ended up
+    # with two run_16_* files for one article, and the later one is not
+    # obviously the later one. Trust the handoff unless history already has that
+    # number, and say so rather than silently renumbering.
     run_number = handoff.get("run_number", 1)
+    _existing = hist.existing_run_numbers(HISTORY_ROOT, handoff.get("title", ""))
+    if run_number in _existing:
+        _next = max(_existing) + 1
+        log.warning(
+            "Run %d already exists for this article; using %d instead. Update "
+            "the handoff's 'Run:' line so the two agree.",
+            run_number,
+            _next,
+        )
+        run_number = _next
     article_title = handoff.get("title", "Untitled")
     lt_config = pub_config.get("languagetool", {})
 
@@ -748,6 +763,10 @@ def run_draft_pipeline(
         lt_result = {
             "failed": True,
             "skipped": True,
+            # Both skip paths set skipped=True, and the summary used to print the
+            # credentials message for either — telling an operator with working
+            # credentials in .env to go and configure credentials. Record which.
+            "skipped_reason": "disabled",
             "change_log": [],
             "flagged_matches": [],
         }
@@ -759,6 +778,7 @@ def run_draft_pipeline(
         lt_result = {
             "failed": True,
             "skipped": True,
+            "skipped_reason": "no_credentials",
             "change_log": [],
             "flagged_matches": [],
         }
@@ -1228,6 +1248,7 @@ def run_draft_pipeline(
                     f"{log_entry['error_body_excerpt']}"
                 )
 
+    report_baseline_warning = None
     all_failed = all(r.get("failed") for r in results.values())
     if all_failed and pipeline_cfg.get("abort_if_all_provider_calls_fail", False):
         log.error("All review model calls failed. Aborting.")
@@ -1247,6 +1268,31 @@ def run_draft_pipeline(
         )
     elif prior_report is not None:
         log.info(f"Comparing against prior run: {Path(prior_report_path).name}")
+        # A baseline that was itself missing model passes makes the delta
+        # unreadable. On 2026-08-12 the comparison ran against a run whose five
+        # OpenAI passes had all failed on a dead API key, so nine "new consensus
+        # flags" were mostly OpenAI voting for the first time — with the draft
+        # unchanged at 0.0% word change, and a "re-run after editing"
+        # recommendation on top. Name it, so the numbers below are read as a
+        # coverage difference rather than as movement in the article.
+        prior_failures = prior_report.get("model_failures") or []
+        if prior_failures:
+            log.warning(
+                "Baseline run was incomplete — %d pass(es) failed in it (%s). "
+                "Findings that look new may simply be those models voting for "
+                "the first time; treat the delta as indicative, not as movement "
+                "in the draft.",
+                len(prior_failures),
+                ", ".join(prior_failures),
+            )
+            report_baseline_warning = (
+                f"Baseline run {Path(prior_report_path).name} was itself missing "
+                f"{len(prior_failures)} model pass(es) ({', '.join(prior_failures)}). "
+                f"New findings below may be those models voting for the first time "
+                f"rather than changes in the draft."
+            )
+        else:
+            report_baseline_warning = None
 
     # Tag ensemble config with thoroughness for the report
     ensemble_cfg_tagged = {**ensemble_cfg, "thoroughness": thoroughness}
@@ -1285,10 +1331,39 @@ def run_draft_pipeline(
 
     fact_check = report.get("section_2_fact_check") or {}
     grounded_urls = _collect_grounded_urls(results)
+    failed_fact_check = sorted(
+        f"{model}:{domain}"
+        for (model, domain), r in results.items()
+        if domain == "fact_check" and r.get("failed") and not r.get("skipped")
+    )
     if grounded_urls:
         log.info(
             "Citations: %d claim(s) have a provider grounded-search URL available",
             len(grounded_urls),
+        )
+    elif failed_fact_check:
+        # A failed pass in one section quietly degrades another. Only a live-search
+        # fact-check pass returns response-level citations, so when one fails there
+        # is nothing to fall back on for claims that named no URL of their own, and
+        # Section 9 resolves materially fewer of them. Measured 2026-08-12:
+        # perplexity:fact_check was rate-limited, grounded URLs went 18 -> 0, and
+        # citation resolution fell from 48% (49/101) to 22% (32/144). Nothing in the
+        # output connected those two facts, so the drop read as a mystery.
+        note = (
+            f"Section 9 degraded: no grounded-search URLs were available because "
+            f"{', '.join(failed_fact_check)} failed. A live-search fact-check pass "
+            f"is their only source, so claims that named no URL of their own could "
+            f"not be resolved. Citation coverage below is lower than a clean run "
+            f"would produce — re-run once that provider recovers before treating it "
+            f"as final."
+        )
+        log.warning("Citations: %s", note)
+        report.setdefault("degradations", []).append(
+            {
+                "section": "SECTION 9: Citations",
+                "caused_by": failed_fact_check,
+                "detail": note,
+            }
         )
     claims = _collect_citation_claims(fact_check, grounded_urls)
     if claims:
@@ -1355,6 +1430,9 @@ def run_draft_pipeline(
     ]
     if fallback_warnings:
         report["fallback_warnings"] = fallback_warnings
+
+    if report_baseline_warning:
+        report["baseline_warning"] = report_baseline_warning
 
     # Attach currency check results so they appear in the saved report JSON
     # and can be rendered by _print_draft_summary.
@@ -1507,10 +1585,20 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     print(f"Thoroughness: {thoroughness} ({n_calls} model-domain calls)")
     print("=" * 60)
 
+    if report.get("baseline_warning"):
+        print(f"\nWARNING: {report['baseline_warning']}")
+
     if report.get("model_failures"):
         print(
             f"\nWARNING: These model passes failed: {', '.join(report['model_failures'])}"
         )
+
+    # Knock-on effects of those failures. Printed adjacent to the failure list
+    # because the two are only useful together: "perplexity:fact_check failed"
+    # and "9 claims verified" are separately unremarkable, and it is the link
+    # between them that tells a reader which numbers below to distrust.
+    for degradation in report.get("degradations") or []:
+        print(f"\nWARNING: {degradation['detail']}")
 
     if report.get("fallback_warnings"):
         print(f"\n{'!' * 60}")
@@ -1565,8 +1653,17 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             )
 
     if report.get("lt_skipped"):
+        # Both skip paths set lt_skipped, and this printed the credentials
+        # message for either — telling an operator whose credentials are sitting
+        # in .env and working to go and configure credentials, when the actual
+        # cause was grammar_pass: false in the config.
+        if report.get("lt_skipped_reason") == "disabled":
+            why = "grammar_pass is set to false in the pipeline config"
+        else:
+            why = "no LanguageTool credentials configured"
         print(
-            "\nGrammar pass: skipped (no LanguageTool credentials — run manual Grammarly pass before publishing)"
+            f"\nGrammar pass: skipped ({why} — run a manual Grammarly pass "
+            f"before publishing)"
         )
     elif report.get("lt_failed"):
         print("\nWARNING: LanguageTool failed — draft not grammar-corrected")

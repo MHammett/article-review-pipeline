@@ -148,6 +148,7 @@
   "lt_corrections_applied": [],
   "lt_failed": true,
   "lt_skipped": true,
+  "lt_skipped_reason": "disabled",
   "model_currency": {
     "notices": [],
     "registry_age_days": "<volatile>",

@@ -286,3 +286,51 @@ def test_prior_report_timestamp_falls_back_to_mtime(tmp_path):
     ts = hist._report_timestamp(path)
     assert ts.tzinfo is not None
     assert abs(ts - datetime.now(timezone.utc)) < timedelta(minutes=5)
+
+
+class TestPlaceholderTitlesGetNoDirectory:
+    """pipeline_history/ had "t/" and "title/" beside real articles.
+
+    A one-character title is a parse failure or a template placeholder, not an
+    article. Giving it a directory means it never accumulates a second run and
+    only makes the real ones harder to find.
+    """
+
+    def test_a_one_character_title_is_untitled(self):
+        assert hist._slug("t") == "untitled"
+
+    def test_the_literal_word_title_is_untitled(self):
+        assert hist._slug("title") == "untitled"
+
+    def test_a_real_title_keeps_its_slug(self):
+        slug = hist._slug("Data Centers Don't Have an Environmental Record")
+        assert slug.startswith("data-centers-dont-have")
+
+    def test_punctuation_does_not_pad_a_short_title(self):
+        """ "a.b.c" is three characters of content, not five."""
+        assert hist._slug("a.b.c") == "untitled"
+
+
+class TestRunNumberCollision:
+    """The handoff declares the run number and authors forget to bump it."""
+
+    def test_existing_numbers_are_read_from_disk(self, tmp_path):
+        run_dir = tmp_path / hist._slug("A Real Article Title Here")
+        run_dir.mkdir(parents=True)
+        (run_dir / "run_3_20260101_000000_report.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        (run_dir / "run_16_20260101_000000_report.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        got = hist.existing_run_numbers(tmp_path, "A Real Article Title Here")
+        assert got == {3, 16}
+
+    def test_an_article_with_no_history_returns_empty(self, tmp_path):
+        assert hist.existing_run_numbers(tmp_path, "Never Seen This Title") == set()
+
+    def test_an_unreadable_history_root_never_raises(self, tmp_path):
+        """A numbering nicety must not be able to fail a run."""
+        assert (
+            hist.existing_run_numbers(tmp_path / "nope", "Some Article Title") == set()
+        )
