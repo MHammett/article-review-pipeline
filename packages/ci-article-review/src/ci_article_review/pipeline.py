@@ -155,10 +155,113 @@ def _model_has_credentials(model_name: str, api_keys: dict, model_cfg: dict) -> 
     return bool(api_keys.get(model_name, {}).get("api_key"))
 
 
+#: Domains the drafting model is not allowed to review.
+#:
+#: voice_style runs ai_speak.txt, which is a list of AI tells — hedging,
+#: throat-clearing, vague significance gesturing, the problem→cause→solution
+#: skeleton. Asking the model that wrote the draft to find those is asking it
+#: to notice its own defaults, and it under-reports them.
+#:
+#: Deliberately just this one. A model re-reading its own reasoning in
+#: argument_integrity has a similar conflict, but a far weaker one: that prompt
+#: asks whether the logic holds, not whether the prose carries the model's own
+#: fingerprints. Widening this list costs real review coverage, so it should
+#: only grow on evidence that a domain is actually compromised.
+_DRAFTER_EXCLUDED_DOMAINS: tuple[str, ...] = ("voice_style",)
+
+
+def _history_key(handoff: dict) -> str:
+    """Return the key naming this article's history directory.
+
+    The directory is normally slugged from the title, which makes the title the
+    de-facto primary key for an article's history. That breaks the moment the
+    title is revised: "…They Have Eight of Them." became "…Ten of Them." and
+    then "…Twelve of Them.", and one article ended up spread over three
+    directories. Nothing errors — the runs simply stop finding each other, so
+    delta comparison loses its baseline and voice_pattern_report counts one
+    article as three distinct ones when deciding whether a phrasing habit
+    recurs across the body of work.
+
+    ``History key:`` in the handoff pins the directory to something the author
+    controls and can keep stable while the title moves. Absent, the title is
+    used exactly as before.
+    """
+    return (handoff.get("history_key") or "").strip() or handoff.get("title", "")
+
+
+def _drafting_model(handoff: dict, pipeline_cfg: dict) -> str | None:
+    """Return the model that drafted the article, or None if undeclared.
+
+    Two sources, because they answer different questions. ``pipeline.
+    drafting_model`` in user.yaml is the default for someone who always drafts
+    the same way; a ``Drafted with:`` line in the handoff states it for one
+    article and wins when both are present, since the drafting tool can change
+    between pieces while the config does not.
+
+    An unrecognised name is a no-op with a warning rather than an error: the
+    cost of a typo here is a review pass that should have been dropped, and
+    failing the whole run over it would be worse.
+    """
+    declared = (handoff.get("drafted_with") or "").strip() or (
+        pipeline_cfg.get("drafting_model") or ""
+    ).strip()
+    if not declared:
+        return None
+
+    name = declared.lower()
+    if name not in _ADAPTER_MODULES:
+        log.warning(
+            "Declared drafting model %r is not one of %s — no review pass will "
+            "be excluded. Check 'Drafted with:' in the handoff, or "
+            "pipeline.drafting_model in user.yaml.",
+            declared,
+            ", ".join(sorted(_ADAPTER_MODULES)),
+        )
+        return None
+    return name
+
+
+def _drafter_is_excluded(model_name: str, domain: str, drafting_model: str | None):
+    """True when this pair is the drafting model judging its own prose."""
+    return (
+        drafting_model is not None
+        and model_name == drafting_model
+        and domain in _DRAFTER_EXCLUDED_DOMAINS
+    )
+
+
+def _warn_on_domains_left_unreviewed(assignments, drafting_model: str | None) -> None:
+    """Warn when excluding the drafter leaves a domain with no reviewer at all.
+
+    At ``maximum`` thoroughness every model runs every domain, so this cannot
+    happen. At ``standard`` it can: voice_style is one model, and if that model
+    drafted the article the domain empties. Silently shipping a report whose
+    voice section is empty because nobody ran it — indistinguishable, in the
+    output, from nobody finding anything — is the failure worth being loud
+    about.
+    """
+    if drafting_model is None:
+        return
+    covered = {domain for _, domain in assignments}
+    for domain in _DRAFTER_EXCLUDED_DOMAINS:
+        if domain not in covered:
+            log.warning(
+                "No model is reviewing '%s': %s drafted this article and is "
+                "excluded from it, and no other model was assigned. That "
+                "section will be empty because it never ran, not because the "
+                "draft is clean. Add another model to %s, or raise "
+                "thoroughness.",
+                domain,
+                drafting_model,
+                domain,
+            )
+
+
 def _build_assignments(
     thoroughness: str,
     model_configs: dict,
     api_keys: dict,
+    drafting_model: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return list of (model_name, domain) pairs to execute.
 
@@ -168,7 +271,8 @@ def _build_assignments(
     3. Skip models that have no credentials.
     4. Respect per-model prompt overrides (models.<name>.prompts:) — if set,
        that model only runs those domains regardless of the preset.
-    5. Deduplicate (model, domain) pairs.
+    5. Drop the drafting model from the domains it cannot judge.
+    6. Deduplicate (model, domain) pairs.
     """
     preset = _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
     assignments: list[tuple[str, str]] = []
@@ -184,6 +288,8 @@ def _build_assignments(
                 continue
             if not _model_has_credentials(model_name, api_keys, cfg):
                 continue
+            if _drafter_is_excluded(model_name, domain, drafting_model):
+                continue
             pair = (model_name, domain)
             if pair not in seen:
                 seen.add(pair)
@@ -197,10 +303,14 @@ def _build_assignments(
         if not _model_has_credentials(model_name, api_keys, cfg):
             continue
         for domain in cfg.get("prompts", []):
+            if _drafter_is_excluded(model_name, domain, drafting_model):
+                continue
             pair = (model_name, domain)
             if pair not in seen and domain in _DOMAIN_PROMPTS:
                 seen.add(pair)
                 assignments.append(pair)
+
+    _warn_on_domains_left_unreviewed(assignments, drafting_model)
 
     return assignments
 
@@ -289,6 +399,28 @@ def _render_prompt(template: str, **kwargs) -> str:
     for key, value in kwargs.items():
         template = template.replace(f"{{{key}}}", str(value) if value else "")
     return template
+
+
+def _web_search_enabled(setting, domain: str) -> bool:
+    """Resolve a model's ``web_search`` setting for one domain.
+
+    Accepts either shape:
+
+    ``web_search: true``          — every domain searches (the original meaning,
+                                    kept so existing configs are unaffected).
+    ``web_search: [fact_check]``  — only the listed domains search.
+
+    Anything else is falsy and disables search, so a typo fails closed rather
+    than quietly billing a search on all five domains.
+    """
+    if isinstance(setting, str):
+        # A bare string is almost certainly one domain name rather than a
+        # truthy value; treating it as a one-element list is what the author
+        # meant, and `bool("fact_check")` being True on every domain is not.
+        return domain == setting
+    if isinstance(setting, (list, tuple, set)):
+        return domain in setting
+    return bool(setting)
 
 
 def _build_user_prompt(draft: str, handoff: dict) -> str:
@@ -553,13 +685,28 @@ def _run_domain(
     user = _build_user_prompt(draft, handoff)
     api_key = api_keys.get(model_name, {}).get("api_key", "")
 
+    # Live web search is a per-model flag in the adapters, but only one domain
+    # has any use for it: fact_check, where it replaces training recall with a
+    # live-fetched source. voice_style matches the draft against a voice
+    # profile, and completeness, argument_integrity and red_team all reason
+    # about the draft in front of them — none are improved by fetching a page,
+    # and every one of them bills per search anyway. Resolving the flag here,
+    # where the domain is known, turns five paid search contexts per run into
+    # one. A bare `web_search: true` still means every domain, so existing
+    # configs keep their behaviour.
+    provider_config = dict(model_configs.get(model_name, {}))
+    if "web_search" in provider_config:
+        provider_config["web_search"] = _web_search_enabled(
+            provider_config["web_search"], domain
+        )
+
     result = adapter.call(
         system,
         user,
         api_key,
         retry=pipeline_cfg.get("retry_on_failure", True),
         retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
-        provider_config=model_configs.get(model_name, {}),
+        provider_config=provider_config,
     )
     result["_model"] = model_name
     result["_domain"] = domain
@@ -740,7 +887,7 @@ def run_draft_pipeline(
     # obviously the later one. Trust the handoff unless history already has that
     # number, and say so rather than silently renumbering.
     run_number = handoff.get("run_number", 1)
-    _existing = hist.existing_run_numbers(HISTORY_ROOT, handoff.get("title", ""))
+    _existing = hist.existing_run_numbers(HISTORY_ROOT, _history_key(handoff))
     if run_number in _existing:
         _next = max(_existing) + 1
         log.warning(
@@ -960,7 +1107,16 @@ def run_draft_pipeline(
         _load_prompt(prompt_name)
 
     # Pass 2: Ensemble model review — built-in domains
-    assignments = _build_assignments(thoroughness, model_configs, api_keys)
+    drafting_model = _drafting_model(handoff, pipeline_cfg)
+    if drafting_model:
+        log.info(
+            "Drafting model: %s — excluded from %s",
+            drafting_model,
+            ", ".join(_DRAFTER_EXCLUDED_DOMAINS),
+        )
+    assignments = _build_assignments(
+        thoroughness, model_configs, api_keys, drafting_model
+    )
 
     # Custom publication-defined domains
     custom_assignments, custom_prompts = _build_custom_assignments(
@@ -1255,7 +1411,7 @@ def run_draft_pipeline(
         sys.exit(1)
 
     prior_report, prior_report_path = hist.load_prior_report(
-        HISTORY_ROOT, article_title, before_ts=run_start_ts
+        HISTORY_ROOT, _history_key(handoff), before_ts=run_start_ts
     )
     if prior_report is None and run_number > 1:
         log.warning(
@@ -1440,7 +1596,7 @@ def run_draft_pipeline(
 
     paths = hist.save_run(
         HISTORY_ROOT,
-        article_title,
+        _history_key(handoff),
         run_number,
         report,
         lt_result.get("change_log", []),

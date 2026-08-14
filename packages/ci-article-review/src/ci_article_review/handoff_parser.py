@@ -149,6 +149,12 @@ def parse_metadata_only(text):
     title = _extract_field(text, "Article:")
     publication = _extract_field(text, "Publication:")
     run_number = _extract_field(text, "Pipeline run:")
+    # Optional. Names the model that drafted the article so the pipeline can
+    # keep it out of voice_style — see _drafting_model() in pipeline.py.
+    drafted_with = _extract_field(text, "Drafted with:")
+    # Optional. Pins the history directory so revising the title does not fork
+    # the article's history — see _history_key() in pipeline.py.
+    history_key = _extract_field(text, "History key:")
     primary_claim = section("PRIMARY CLAIM")
 
     if not primary_claim:
@@ -168,6 +174,8 @@ def parse_metadata_only(text):
         "uncertain_sections": section("UNCERTAIN SECTIONS"),
         "known_gaps": section("KNOWN GAPS"),
         "additional_context": section("ADDITIONAL CONTEXT FOR REVIEW MODELS"),
+        "drafted_with": drafted_with,
+        "history_key": history_key,
     }
 
     if not results["pre_draft_analysis"]:
@@ -208,6 +216,12 @@ def parse_draft_submission(text):
     title = _extract_field(text, "Article:")
     publication = _extract_field(text, "Publication:")
     run_number = _extract_field(text, "Pipeline run:")
+    # Optional. Names the model that drafted the article so the pipeline can
+    # keep it out of voice_style — see _drafting_model() in pipeline.py.
+    drafted_with = _extract_field(text, "Drafted with:")
+    # Optional. Pins the history directory so revising the title does not fork
+    # the article's history — see _history_key() in pipeline.py.
+    history_key = _extract_field(text, "History key:")
 
     # Fields that directly fill prompt template variables — warn if missing
     # so the user knows before a model call produces oddly generic output.
@@ -242,6 +256,8 @@ def parse_draft_submission(text):
         "uncertain_sections": section("UNCERTAIN SECTIONS"),
         "known_gaps": section("KNOWN GAPS"),
         "additional_context": section("ADDITIONAL CONTEXT FOR REVIEW MODELS"),
+        "drafted_with": drafted_with,
+        "history_key": history_key,
         "draft": _REQUIRED_FIELDS["draft"][1],
     }
 

@@ -162,7 +162,9 @@ models:
 #
 #  openai:
 #    model: gpt-5.4
-#    web_search: true    # enables web_search_preview; falls back to chat completions on error
+#    web_search: [fact_check]   # only these domains search; `true` means all five
+#                               # (search bills per search, and only fact_check
+#                               #  has any use for a live-fetched source)
 #
 # Azure OpenAI — data residency, SOC2, provisioned throughput.
 # The api_key above should be your Azure resource key (not an OpenAI key).
@@ -187,6 +189,14 @@ models:
 pipeline:
   grammar_pass: true            # set false to skip LanguageTool entirely
   parallel_review_calls: true
+
+  # Which model you draft with, if you draft with one. That model is excluded
+  # from voice_style, because ai_speak.txt asks the reviewer to flag the exact
+  # phrasing habits that are its own defaults, and it under-reports them.
+  # A `Drafted with:` line in the handoff overrides this for a single article.
+  # drafting_model: claude
+
+
   retry_on_failure: true
   retry_delay_seconds: 10
   abort_if_all_provider_calls_fail: false
