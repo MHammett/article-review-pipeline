@@ -8,6 +8,10 @@ After the fact-check pass, the pipeline takes the claims that came out of it and
 
 Section 9 is not a pass/fail list. A claim can be resolved at very different levels of confidence, and the difference matters: one tier means a model read the source and confirmed it backs the claim, another means "here is a portal that is probably about the right topic." Reading those as equivalent is exactly the mistake this section is structured to prevent.
 
+**How the readable report is organised.** It opens with the fraction that matters — *N of M claims were checked against a document the pipeline fetched and read* — then a table putting every claim in exactly one disposition, then one block per disposition. The fraction leads because it governs how much of the rest to trust, and it is usually small: in the run this structure was built from, 9 of 144 claims had a document fetched and read. The tier names below were already honest about that, but a four-way count in the opening line made the reader derive it.
+
+**The `confirmed` bucket is reconciled against retrieval.** The fact-check pass's verdict and this section's retrieval are independent — the first is model judgment about the claim, the second is whether a document was opened. In that same run 85 claims came back `confirmed` and 50 of them had no source retrieved at all, so the report now states that relationship directly rather than leaving `fact_check_bucket: confirmed` sitting beside a claim with no URL, where it reads as corroboration it is not.
+
 ---
 
 ## Confidence tiers
@@ -44,7 +48,7 @@ Keyword matching is gated by `topic_match.py`, which discards a keyword hit when
 
 **How much to trust it:** treat it as a research lead, not a citation. Open the URL and confirm before the claim ships.
 
-### Unresolved — `resolved: false`
+### Unresolved / no source retrieved — `resolved: false`
 
 No configured adapter matched, or the source URL couldn't be fetched. The entry carries a `note` explaining which. Nothing was established.
 
@@ -52,7 +56,7 @@ No configured adapter matched, or the source URL couldn't be fetched. The entry 
 
 ### Content mismatch — `verification: "content_mismatch"`
 
-A distinct failure mode that lands in the *Unresolved* section of the readable report. The source URL fetched and checksummed fine, but the relevance check came back saying the page does **not** support the claim. The entry records the verdict (`contradicts`, `not_addressed`, or `inconclusive`) and the model's one-sentence reason.
+A distinct failure mode, and the highest-information outcome in the section: the source URL fetched and checksummed fine, but the relevance check came back saying the page does **not** support the claim. These are the only entries where a document was genuinely retrieved, read, and found not to back the claim it was cited for, so the readable report gives them their own block (*Read, and does NOT support the claim*) directly under the confirmed ones. They previously rendered inside *Unresolved*, indistinguishable from claims nothing had ever been fetched for. The entry records the verdict (`contradicts`, `not_addressed`, or `inconclusive`) and the model's one-sentence reason, and the report separates them: `contradicts` means the source says otherwise and the draft may be factually wrong, while `not_addressed`/`inconclusive` far more often means the wrong URL was checked or the relevant passage did not extract — a citation problem, not a factual one. All nine mismatches in the motivating run were `not_addressed`.
 
 This is worth more attention than an ordinary unresolved entry. An ordinary one means "we couldn't find a source." This one means "a source was proposed and it doesn't check out" — and a `contradicts` verdict in particular is a signal about the claim, not just about the citation.
 

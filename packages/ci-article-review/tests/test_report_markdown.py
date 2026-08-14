@@ -1,5 +1,7 @@
 """Unit tests for report_markdown.render_report_markdown."""
 
+import re
+
 from ci_article_review import report_markdown
 from ci_article_review.adapters.citation import wayback
 from ci_article_review.report_markdown import render_report_markdown
@@ -292,8 +294,8 @@ class TestSection9Citations:
             ]
         )
         md = render_report_markdown(report)
-        assert "### Verified" in md
-        assert "### Unresolved" in md
+        assert "### Read and confirmed" in md
+        assert "### No source retrieved" in md
         assert "The bridge cost $4 million." in md
         assert "https://example.gov/budget.pdf" in md
         assert "The plan was approved in 2021." in md
@@ -326,12 +328,14 @@ class TestSection9Citations:
             ]
         )
         md = render_report_markdown(report)
-        assert "### Verified" in md
-        assert "### Pointer-only" in md
+        assert "### Read and confirmed" in md
+        assert "### Pointer only" in md
         assert "not independently verified" in md.lower()
 
-        verified_section = md.split("### Verified")[1].split("### Pointer-only")[0]
-        pointer_section = md.split("### Pointer-only")[1]
+        verified_section = md.split("### Read and confirmed")[1].split(
+            "### Pointer only"
+        )[0]
+        pointer_section = md.split("### Pointer only")[1]
         assert "The bridge cost $4 million." in verified_section
         assert "capacity auction" not in verified_section.lower()
         assert "capacity auction" in pointer_section.lower()
@@ -364,10 +368,12 @@ class TestSection9Citations:
         )
         md = render_report_markdown(report)
 
-        assert "### Could not be verified" in md
-        assert "could not be verified" in md.lower()
+        assert "### Fetched, but could not be read" in md
+        assert "could not be read" in md.lower()
 
-        unverifiable_section = md.split("### Could not be verified")[1].split("###")[0]
+        unverifiable_section = md.split("### Fetched, but could not be read")[1].split(
+            "###"
+        )[0]
         assert "ICNIRP" in unverifiable_section
         assert "does not support" not in unverifiable_section
         # The mismatch stays in its own bucket.
@@ -386,7 +392,7 @@ class TestSection9Citations:
         )
         md = render_report_markdown(report)
 
-        assert "1 could not be verified" in md
+        assert "| Fetched, but could not be read | 1 |" in md
 
     def test_content_drift_called_out_above_the_tiers(self):
         """A source that changed since it was last checksummed gets its own
@@ -414,12 +420,15 @@ class TestSection9Citations:
         md = render_report_markdown(report)
         assert "### ⚠ Content changed since prior checksum (1)" in md
 
-        drift_section = md.split("### ⚠ Content changed")[1].split("### Verified")[0]
+        drift_section = md.split("### ⚠ Content changed")[1].split(
+            "### Read and confirmed"
+        )[0]
         assert "https://example.gov/budget.pdf" in drift_section
         assert "run 4 of 'prior-article' on 2026-01-01T00:00:00" in drift_section
         assert "may need re-checking" in drift_section
-        # The entry still renders in its tier; it is not moved out of Verified.
-        assert "The bridge cost $4 million." in md.split("### Verified")[1]
+        # The entry still renders in its tier; it is not moved out of the
+        # confirmed block.
+        assert "The bridge cost $4 million." in md.split("### Read and confirmed")[1]
 
     def test_no_drift_block_when_nothing_changed(self):
         report = _base_report(
@@ -435,6 +444,134 @@ class TestSection9Citations:
         assert "Content changed since prior checksum" not in render_report_markdown(
             report
         )
+
+    def test_lead_states_the_checked_fraction_before_any_tier(self):
+        """The reader's first number must be "how many were actually checked",
+        not a four-way tier breakdown they have to do arithmetic on. In the run
+        that motivated this, 9 of 144 claims had a document fetched and read and
+        the section opened with "9 verified, 15 pointer-only, ..." — accurate,
+        but it buried the 6%."""
+        citations = [
+            {"claim": f"checked {i}", "resolved": True, "verification": "checksum"}
+            for i in range(3)
+        ] + [{"claim": f"nothing {i}", "resolved": False} for i in range(7)]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        lead = md.split("## SECTION 9")[1].split("|")[0]
+        assert "3 of 10 claim(s) (30%) were checked" in lead
+        assert "research lead, not a verification" in lead
+
+    def test_every_claim_lands_in_exactly_one_disposition_row(self):
+        """The table is the section's accounting. If the rows don't sum to the
+        total, some claims are being counted twice or not at all — which is the
+        precise failure the old "unresolved" bucket had, since it overlapped the
+        content-mismatch entries."""
+        citations = [
+            {"claim": "a", "resolved": True, "verification": "checksum"},
+            {"claim": "b", "resolved": False, "verification": "content_mismatch"},
+            {"claim": "c", "resolved": True, "verification": "unverifiable"},
+            {"claim": "d", "resolved": True, "verification": "pointer"},
+            {"claim": "e", "resolved": False},
+            # resolved:True but no tier — still "no source retrieved", because
+            # nothing was fetched to read.
+            {"claim": "f", "resolved": True},
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        counts = [int(n) for n in re.findall(r"^\| .+ \| (\d+) \|$", md, re.M)]
+        assert sum(counts) == len(citations)
+        assert counts == [1, 1, 1, 1, 2]
+
+    def test_content_mismatch_is_not_buried_with_never_looked_up_claims(self):
+        """A source fetched, read, and found not to support the claim is the
+        highest-information row in the section. It used to render inside
+        "Unresolved" alongside claims nothing was ever retrieved for, which made
+        the most actionable finding a run produces indistinguishable from a gap.
+        """
+        citations = [
+            {
+                "claim": "IARC classified ELF-EMF as Group 2B in 2002.",
+                "resolved": False,
+                "url": "https://publications.iarc.who.int/100",
+                "verification": "content_mismatch",
+                "relevance_verdict": "not_addressed",
+                "note": "does not mention ELF-EMF",
+            },
+            {"claim": "The plan was approved in 2021.", "resolved": False},
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        assert "### Read, and does NOT support the claim (1)" in md
+        mismatch_section = md.split("### Read, and does NOT support the claim")[
+            1
+        ].split("###")[0]
+        assert "IARC" in mismatch_section
+        # The claim nothing was fetched for must not be in there with it.
+        assert "The plan was approved in 2021." not in mismatch_section
+        assert (
+            "The plan was approved in 2021." in md.split("### No source retrieved")[1]
+        )
+
+    def test_mismatch_distinguishes_contradicts_from_not_addressed(self):
+        """ "The source refutes you" and "the source doesn't cover this" warrant
+        different reactions — the first is a possible factual error, the second
+        is usually the wrong URL. Collapsing them overstates one and buries the
+        other."""
+        not_addressed = [
+            {
+                "claim": "a",
+                "resolved": False,
+                "verification": "content_mismatch",
+                "relevance_verdict": "not_addressed",
+            }
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=not_addressed))
+        assert "None came back `contradicts`" in md
+        assert "wrong URL was checked" in md
+
+        contradicts = not_addressed + [
+            {
+                "claim": "b",
+                "resolved": False,
+                "verification": "content_mismatch",
+                "relevance_verdict": "contradicts",
+            }
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=contradicts))
+        assert "1 of these came back `contradicts`" in md
+        assert "possible factual error" in md
+
+    def test_confirmed_bucket_is_reconciled_against_what_was_retrieved(self):
+        """The fact-check pass's "confirmed" verdict and this section's
+        retrieval are independent, and a reader seeing "Bucket: confirmed" beside
+        a claim with no URL reads it as corroboration. In the motivating run 85
+        claims came back confirmed and 50 of those had nothing fetched at all."""
+        citations = [
+            {
+                "claim": "a",
+                "resolved": True,
+                "verification": "checksum",
+                "fact_check_bucket": "confirmed",
+            },
+        ] + [
+            {"claim": f"b{i}", "resolved": False, "fact_check_bucket": "confirmed"}
+            for i in range(4)
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        assert 'called 5 of these claims "confirmed"' in md
+        assert "1 of those had a supporting document fetched and read" in md
+        assert "4 had no source retrieved at all" in md
+
+    def test_no_confirmed_reconciliation_when_the_bucket_is_absent(self):
+        """Reports whose fact-check pass produced no confirmed bucket must not
+        grow an empty callout."""
+        citations = [{"claim": "a", "resolved": True, "verification": "checksum"}]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        assert "The fact-check pass called" not in md
+        # The disposition label still says "confirmed" — that is the tier name,
+        # not the reconciliation callout.
+        assert "| Read and confirmed | 1 |" in md
 
 
 def _field(label, value="", limit=None, rationale="", default_note="", **extra):

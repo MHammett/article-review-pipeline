@@ -51,15 +51,22 @@ Rules for the metadata update:
   what you didn't.
 - TARGET AUDIENCE and ADDITIONAL CONTEXT FOR REVIEW MODELS: leave unchanged
   unless a finding specifically implicates audience fit or context accuracy.
-- SECTION 9 (Citations): the tiers mean different things and must be treated
-  differently. "Verified" means a model read the source and confirmed it backs
-  the claim, quoting the supporting sentence — those need nothing from you.
-  "Content mismatch" entries (inside the Unresolved block) mean the source was
-  read and does NOT support the claim: either re-source the claim, soften it to
-  what the source actually says, or drop it. "Pointer-only" and "Could not be
-  verified" establish nothing either way — do not treat them as either
-  confirmation or refutation; flag them in your summary as needing a human
-  check. Never present an unverified citation as verified in the revision.
+- SECTION 9 (Citations): the dispositions mean different things and must be
+  treated differently. Read the opening line first — it says how many claims
+  were actually checked against a fetched document, and it is usually a small
+  fraction of the total. "Read and confirmed" means a model read the source and
+  confirmed it backs the claim, quoting the supporting sentence — those need
+  nothing from you. "Read, and does NOT support the claim" means the source was
+  fetched and read and does not back it; check the verdict, because
+  `contradicts` means the source says otherwise (re-source the claim, soften it
+  to what the source actually says, or drop it) while `not_addressed` usually
+  means the wrong URL was checked (fix the citation, not the sentence).
+  "Pointer only", "Fetched, but could not be read", and "No source retrieved"
+  establish nothing either way — do not treat them as either confirmation or
+  refutation; flag them in your summary as needing a human check. In
+  particular, a claim the fact-check pass called "confirmed" may still have had
+  no source retrieved at all; that is not corroboration. Never present an
+  unverified citation as verified in the revision.
 - SEO STRUCTURE REVIEW (if present): heading, opening, and title-promise
   findings from a search-reader's perspective. Apply the ones you agree with.
   A title_promise finding is worth real attention — it means the piece does not
