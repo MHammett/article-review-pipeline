@@ -1,5 +1,7 @@
 """Unit tests for report_markdown.render_report_markdown."""
 
+from ci_article_review import report_markdown
+from ci_article_review.adapters.citation import wayback
 from ci_article_review.report_markdown import render_report_markdown
 
 
@@ -672,3 +674,98 @@ class TestEmptyReport:
         md = render_report_markdown(_base_report())
         assert "SECTION 1" in md
         assert "SECTION 9" in md
+
+
+class TestCitationsPairLiveAndArchiveLinks:
+    """Every citation should carry both links, so it survives its source.
+
+    The snapshot URL was collected on every run and rendered nowhere — the
+    pairing existed in the report JSON and never in anything a human read.
+    """
+
+    def _cit(self, **wayback):
+        return {
+            "claim": "A claim",
+            "url": "https://example.org/page",
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": wayback,
+        }
+
+    def _text(self, citation):
+        return "\n".join(report_markdown._render_section_9([citation]))
+
+    def test_an_archived_citation_shows_both_links(self):
+        out = self._text(
+            self._cit(archived=True, snapshot_url="https://web.archive.org/web/1/x")
+        )
+        assert "Live: https://example.org/page" in out
+        assert "Archive: https://web.archive.org/web/1/x" in out
+
+    def test_a_paste_ready_pairing_is_offered(self):
+        """The point is a citation the author can put in the article as-is."""
+        out = self._text(
+            self._cit(archived=True, snapshot_url="https://web.archive.org/web/1/x")
+        )
+        assert (
+            "Cite both: https://example.org/page (archived: https://web.archive.org/web/1/x)"
+            in out
+        )
+
+    def test_a_stale_snapshot_is_marked_where_it_is_read(self):
+        out = self._text(
+            self._cit(
+                archived=True,
+                snapshot_url="https://web.archive.org/web/1/x",
+                snapshot_stale=True,
+            )
+        )
+        assert "STALE" in out
+
+    def test_a_just_submitted_archive_says_so_rather_than_going_quiet(self):
+        out = self._text(self._cit(archived=False, submitted=True))
+        assert "submitted to the Wayback Machine this run" in out
+        assert "Cite both" not in out
+
+    def test_an_unarchived_citation_says_it_is_undurable(self):
+        """Silence would read as "fine"; it is the case that needs action."""
+        out = self._text(self._cit(archived=False))
+        assert "only as durable as the live URL" in out
+
+    def test_a_lookup_that_never_completed_is_not_reported_as_unarchived(self):
+        """``archived: None`` is "we never found out", not "there is no snapshot".
+
+        Reporting it as "none" asserts something the run never established. The
+        rate-limit circuit breaker makes this the common case rather than a rare
+        one — once it trips, every remaining citation carries a null.
+        """
+        out = self._text(self._cit(archived=None, error="skipped: rate limit"))
+        assert "NOT CHECKED" in out
+        assert "only as durable as the live URL" not in out
+        assert "Archive: none" not in out
+
+    def test_the_circuit_breaker_state_renders_as_not_checked(self):
+        """End to end: what the breaker actually returns, through the renderer.
+
+        Guards the two halves against drifting apart — the breaker's return shape
+        is what decides which branch this function takes.
+        """
+        wayback.reset_rate_limit_state()
+        wayback._consecutive_rate_limits = wayback._CIRCUIT_TRIP_AFTER
+        try:
+            result = wayback.check("https://example.org/page")
+        finally:
+            wayback.reset_rate_limit_state()
+        citation = {
+            "claim": "A claim",
+            "url": "https://example.org/page",
+            "resolved": True,
+            "wayback": result,
+        }
+        out = "\n".join(report_markdown._render_archive_pair(citation))
+        assert "NOT CHECKED" in out
+        assert "Archive: none" not in out
+
+    def test_a_citation_with_no_url_renders_no_pairing(self):
+        citation = {"claim": "c", "resolved": True, "verification": "checksum"}
+        assert report_markdown._render_archive_pair(citation) == []
