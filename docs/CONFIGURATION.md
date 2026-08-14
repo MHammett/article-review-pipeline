@@ -324,16 +324,22 @@ The `balanced` cost preset uses `mistral-medium-3-5` without a `reasoning_effort
 
 ### OpenAI web search
 
-GPT-5.x can run through the OpenAI Responses API with live web search enabled. Set `web_search: true` in the openai model config:
+GPT-5.x can run through the OpenAI Responses API with live web search enabled. Restrict it to the domains that can use it:
 
 ```yaml
 models:
   openai:
     model: gpt-5.4
-    web_search: true
+    web_search: [fact_check]    # only fact_check searches
 ```
 
-When enabled, the pipeline uses the Responses API with `web_search_preview` for all OpenAI calls. If the Responses API is unavailable it falls back to standard chat completions silently. When web search is active, OpenAI's weight for `fact_check` effectively becomes similar to Gemini's — useful at `thorough` or `maximum` thoroughness.
+`web_search: true` is still accepted and means every domain, which is what you almost never want. Search bills per search on top of tokens, and only `fact_check` has any use for it — there it replaces training recall with a live-fetched `source`. `voice_style` matches the draft against a voice profile, and `completeness`, `argument_integrity` and `red_team` all reason about the draft in front of them. At `maximum` thoroughness, where OpenAI runs all five domains, the list form is the difference between one paid search context per run and five.
+
+If the Responses API is unavailable it falls back to standard chat completions silently.
+
+One tradeoff to weigh before enabling it: Gemini and Perplexity are already search-grounded fact-checkers. Consensus scoring treats agreement between models as evidence, and three search-grounded checkers agreeing is weaker evidence than three independent ones agreeing, because they may be reading the same page. Enabling it trades an independent recall-based check for a third correlated live one.
+
+Note also that annotations come back structurally empty under this pipeline's JSON-only prompts. Search runs and the `source` field improves; the annotation list does not populate.
 
 ---
 
@@ -406,11 +412,54 @@ pipeline:
   link_validation: true         # check HTTP status of every URL in the draft
   wayback_link_check: true      # also query the Wayback Machine for each URL
   wayback_snapshot_stale_days: 180  # snapshots older than this are flagged [STALE]
+
+  drafting_model: claude        # excluded from voice_style — see below
+  prompt_cache_layout: false    # see "Prompt cache layout"
 ```
 
 **`wayback_snapshot_stale_days`** controls when a Wayback Machine snapshot is considered stale. At 180 days (default), a snapshot from more than six months ago triggers a `[STALE]` flag and a manual re-archive recommendation. Lower this for publications with high source-freshness standards (e.g., 90 days for breaking-news adjacent pieces). It applies to both draft link validation and resolved citation URLs.
 
 Archiving is not check-only: resolved citation URLs that aren't archived yet are submitted to archive.org's Save Page Now, and a fetch the origin refused (401/403/429) or that never reached it (timeout, DNS failure) falls back to reading an archived snapshot. Both are covered in [CITATIONS.md](CITATIONS.md#wayback-machine-behavior).
+
+---
+
+### Drafting model
+
+If you draft with a model, name it — that model is then excluded from `voice_style`:
+
+```yaml
+pipeline:
+  drafting_model: claude
+```
+
+`voice_style` runs `ai_speak.txt`, which asks the reviewer to flag hedging, throat-clearing, vague significance gesturing and the problem→cause→solution skeleton. Those are AI defaults. A model asked to find them in its own output is being asked to notice its own habits, and it under-reports them. Every other model still reviews voice normally.
+
+For a single article, declare it in the handoff instead — this wins over the config, because the drafting tool can change between pieces while the config does not:
+
+```
+Drafted with: claude
+```
+
+Accepted names are the model keys: `claude`, `openai`, `gemini`, `mistral`, `grok`, `perplexity`. An unrecognised name logs a warning and excludes nothing, so a typo costs a dropped review pass rather than the run.
+
+Only `voice_style` is affected. A model re-reading its own reasoning in `argument_integrity` has a similar conflict but a much weaker one — that prompt asks whether the logic holds, not whether the prose carries the model's fingerprints — and widening the exclusion costs real review coverage.
+
+Watch for one edge case: at `standard` thoroughness `voice_style` is a single model, so declaring that model as the drafter leaves the domain with no reviewer. The pipeline logs a warning when that happens, because an empty voice section then means "never ran", which looks identical in the report to "found nothing". At `thorough` or `maximum` there are always other models covering it.
+
+---
+
+### Prompt cache layout
+
+```yaml
+pipeline:
+  prompt_cache_layout: true
+```
+
+Providers cache on an exact *leading* prefix. The per-domain instruction normally sits ahead of the article, and it differs for every domain, so a provider's five calls in one run share a long article and not one cacheable byte — measured 0 cached tokens on every call. This setting moves the domain instruction to the end of the user message, leaving a constant stub plus the article as a shared prefix, so calls 2+ hit the cache. Measured 1792/2368 tokens cached (76%), worth roughly $0.56/run at a 50% cached-token discount and ~$1.01 at 90%.
+
+Off by default, and worth verifying before you turn it on. The model receives the whole instruction either way — only its position changes — but position affects how instructions are weighted, and this pipeline's output is the product.
+
+**The golden report cannot verify this.** `test_pipeline_end_to_end.py` stubs `_run_domain`, and that is exactly where this setting is applied, so flipping the flag produces an empty golden diff by construction. An empty diff there is evidence the code never ran, not evidence the findings held. Verifying it means a live run compared against a prior live run of the same article.
 
 ---
 
@@ -951,6 +1000,27 @@ A re-run is recommended when **any** of these is true: word change exceeds the t
 - **Claim comparison** is whitespace- and case-insensitive, and only fires when both runs supplied a claim — reports from before claim tracking won't trigger a spurious re-run.
 - **Structure comparison** looks only at headings (`#`–`######`), so body-only edits don't count as a structural change.
 - **Which run is "prior"** is decided by execution time, not by the handoff's `Pipeline run:` number. That number is author-declared, so running the same handoff twice writes two reports at the same run number; the delta always compares against the report from the execution that immediately preceded this one, whatever number it declared. The report it picked is recorded in the delta as `compared_against` and printed in the console summary and the markdown review as `Compared against: run_2_20260810_005452_report.json`.
+- **Which directory it looks in** is the article's history key — see below. A revised title with no history key means the delta looks in a brand-new directory and finds nothing to compare against.
+
+---
+
+## History key
+
+Every run is saved under `pipeline_history/<slug>/`, and that slug is what ties an article's runs together. By default it is slugged from the title, which makes the title the article's primary key — and titles get revised.
+
+When that happens the history forks. One article titled "…They Have Eight of Them.", then "…Ten of Them.", then "…Twelve of Them." produced three directories. Nothing errors; the runs simply stop finding each other:
+
+- **Delta comparison** looks for the prior run in the new directory, finds none, and reports a revised article as a first run.
+- **`ci-voice-patterns`** counts distinct articles by directory to decide whether a phrasing habit recurs across your body of work. Its threshold is three articles, so one article split three ways can clear that bar on its own and promote a pattern that only ever appeared in one piece.
+
+Pin it in the handoff:
+
+```
+Article: Data Centers Don't Have an Environmental Record. They Have Twelve of Them.
+History key: dc-environment
+```
+
+Set it once, when you start the piece, and leave it alone however much the headline moves. Omit it and the title is used exactly as before, so existing handoffs keep working.
 
 ---
 

@@ -114,3 +114,36 @@ class TestApplyPresetOverrides:
     def test_invalid_overrides_type_raises(self):
         with pytest.raises(ValueError, match="preset_overrides must be a mapping"):
             _apply_preset_overrides({"preset_overrides": "not-a-dict"}, {})
+
+
+class TestPresetPreservesUserCapabilityFlags:
+    """A cost preset picks model variants and reasoning depth — not permissions.
+
+    The preset rebuilds each configured model's dict, so any key it does not
+    know about is dropped. ``web_search`` was one of those: setting it alongside
+    a ``cost_preset`` — which is every non-default configuration — silently did
+    nothing, and the failure was invisible because the flag simply wasn't there
+    by the time the adapter looked for it.
+    """
+
+    def test_web_search_survives_a_cost_preset(self):
+        models_raw = {"openai": {"model": "gpt-5.4", "web_search": ["fact_check"]}}
+        _, models = _apply_cost_preset({"cost_preset": "maximum"}, models_raw)
+        assert models["openai"]["web_search"] == ["fact_check"]
+
+    def test_bool_form_survives_too(self):
+        models_raw = {"openai": {"model": "gpt-5.4", "web_search": True}}
+        _, models = _apply_cost_preset({"cost_preset": "balanced"}, models_raw)
+        assert models["openai"]["web_search"] is True
+
+    def test_preset_still_owns_the_model_variant(self):
+        """Preserving the flag must not freeze the rest of the model config."""
+        models_raw = {"openai": {"model": "gpt-5.4", "web_search": ["fact_check"]}}
+        _, models = _apply_cost_preset({"cost_preset": "maximum"}, models_raw)
+        assert models["openai"]["model"] != "gpt-5.4"
+
+    def test_prompts_routing_survives_as_well(self):
+        """The neighbouring per-model routing key, guarded for the same reason."""
+        models_raw = {"claude": {"model": "claude-opus-4-8", "prompts": ["red_team"]}}
+        _, models = _apply_cost_preset({"cost_preset": "maximum"}, models_raw)
+        assert models["claude"]["prompts"] == ["red_team"]
