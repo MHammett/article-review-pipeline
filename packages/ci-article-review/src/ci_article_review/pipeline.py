@@ -385,9 +385,14 @@ def _collect_grounded_urls(results: dict) -> dict:
     Grounded citations are returned for the response as a whole, not per claim,
     so they are only used as a *fallback* for a claim whose own ``source`` field
     carried no URL, and only from the fact-check domain. Returns
-    ``{claim_text: url}``; an empty dict when nothing grounded came back.
+    ``{claim_key: url}`` keyed by :func:`_claim_key` — the same normalised key
+    claim dedup uses, so the two cannot disagree about whether two phrasings are
+    the same claim. An empty dict when nothing grounded came back.
     """
-    grounded: dict[str, str] = {}
+    # Keyed by _claim_key (a frozenset of content words), not raw claim text —
+    # the same key claim dedup uses, so the two cannot disagree about whether
+    # two phrasings are the same claim.
+    grounded: dict[frozenset, str] = {}
     for (_model, domain), result in results.items():
         if domain != "fact_check" or result.get("failed"):
             continue
@@ -406,9 +411,54 @@ def _collect_grounded_urls(results: dict) -> dict:
                 # Only claims this model itself raised, and only when it did not
                 # already name a URL — a claim-specific source always wins over
                 # a response-level one.
-                if claim and claim not in grounded:
-                    grounded[claim] = urls[0]
+                # Keyed on the normalised claim key, not the raw text: claim
+                # dedup collapses paraphrases, so a URL registered under the
+                # phrasing that loses the tie would never be found again by the
+                # phrasing that wins it.
+                key = _claim_key(claim)
+                if key and key not in grounded:
+                    grounded[key] = urls[0]
     return grounded
+
+
+#: Function words dropped before comparing two claims. They carry no identity —
+#: "The Virginia grid runs below average" and "Virginia grid runs below average"
+#: are one claim, and five models will phrase it five ways.
+_CLAIM_STOPWORDS = frozenset(
+    "the a an of in to and is are was were that for on at by its with as from".split()
+)
+
+#: Token-overlap threshold above which two claims are treated as the same one.
+#: Calibrated on the 2026-08-12 run (144 claims): 0.9 collapses 7 and every pair
+#: it merges is a genuine restatement; 0.8 collapses 12 but starts reaching for
+#: claims that differ in a material number. Set high deliberately — merging two
+#: distinct claims silently drops one from verification, which is worse than
+#: verifying a near-duplicate twice.
+_CLAIM_SIMILARITY = 0.9
+
+
+def _claim_key(claim: str) -> frozenset:
+    """Content words of a claim, for identity comparison."""
+    words = re.sub(r"[^a-z0-9 ]", " ", claim.lower()).split()
+    return frozenset(w for w in words if w not in _CLAIM_STOPWORDS)
+
+
+def _is_duplicate_claim(key: frozenset, seen_keys: list) -> bool:
+    """True if ``key`` restates a claim already collected.
+
+    Exact match after normalisation catches the common case — the same sentence
+    with a trailing period, or a leading "The". The Jaccard pass catches the rest:
+    five models independently paraphrasing one fact.
+    """
+    if not key:
+        return False
+    for other in seen_keys:
+        if key == other:
+            return True
+        union = len(key | other)
+        if union and len(key & other) / union >= _CLAIM_SIMILARITY:
+            return True
+    return False
 
 
 def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict]:
@@ -416,22 +466,30 @@ def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict
 
     Every bucket contributes its claims. A claim's own source field is preferred;
     a provider's grounded search result is the fallback (see
-    ``_collect_grounded_urls``). Deduplicated on claim text, first occurrence
-    winning, so a claim raised by two models is resolved once.
+    ``_collect_grounded_urls``).
+
+    Deduplication is on claim *meaning*, not exact text. It used to be exact text,
+    which meant five models paraphrasing one fact produced five claims: the
+    2026-08-12 run carried 29 near-duplicate pairs among 144 claims, one differing
+    from its twin only by a trailing full stop. Each duplicate bought its own
+    resolution fetch, its own verification call, and its own line in Section 9.
     """
     claims: list[dict] = []
-    seen: set[str] = set()
+    seen_keys: list[frozenset] = []
     for bucket, url_key in _CITATION_CLAIM_BUCKETS.items():
         for item in fact_check.get(bucket, []) or []:
             claim = item.get("claim", "")
-            if not claim or claim in seen:
+            if not claim:
                 continue
-            seen.add(claim)
+            key = _claim_key(claim)
+            if _is_duplicate_claim(key, seen_keys):
+                continue
+            seen_keys.append(key)
             known_url = None
             if url_key:
                 known_url = _extract_source_url(item.get(url_key, ""))
             if not known_url:
-                known_url = grounded_urls.get(claim)
+                known_url = grounded_urls.get(key)
             claims.append(
                 {"claim": claim, "known_url": known_url, "fact_check_bucket": bucket}
             )
