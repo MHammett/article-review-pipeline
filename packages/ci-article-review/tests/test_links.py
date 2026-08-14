@@ -116,6 +116,21 @@ class TestWaybackFallbackOnUnreadableOrigin:
         resp.url = "https://example.com/blocked"
         return resp
 
+    def _get_response(self, status):
+        """A GET the origin also refuses — the 403 retry finds no better answer.
+
+        _check_http now retries a 403 with GET (some servers reject HEAD
+        specifically). These cases cover the origin refusing both, so the
+        Wayback fallback still has to carry the link.
+        """
+        resp = MagicMock(status_code=status)
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        resp.headers = {}
+        resp.url = "https://example.com/blocked"
+        resp.history = []
+        return resp
+
     def test_403_recovers_via_wayback_snapshot(self):
         snapshot_url = (
             "https://web.archive.org/web/20240101000000/https://example.com/blocked"
@@ -126,6 +141,10 @@ class TestWaybackFallbackOnUnreadableOrigin:
             patch(
                 "ci_article_review.analysis.links.requests.head",
                 return_value=self._head_response(403),
+            ),
+            patch(
+                "ci_article_review.analysis.links.requests.get",
+                return_value=self._get_response(403),
             ),
             patch(
                 "ci_article_review.analysis.links.safe_get",
@@ -150,6 +169,10 @@ class TestWaybackFallbackOnUnreadableOrigin:
             patch(
                 "ci_article_review.analysis.links.requests.head",
                 return_value=self._head_response(403),
+            ),
+            patch(
+                "ci_article_review.analysis.links.requests.get",
+                return_value=self._get_response(403),
             ),
             patch(
                 "ci_article_review.analysis.links.wayback_check",
