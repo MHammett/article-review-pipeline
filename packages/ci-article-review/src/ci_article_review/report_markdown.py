@@ -377,6 +377,38 @@ def _render_section_9(citations):
         )
         lines.append("")
 
+    # A wholesale archive-lookup failure is invisible one entry at a time: every
+    # citation reads "Archive: NOT CHECKED", and a reader skimming for archive
+    # coverage concludes nothing is archived. Say it once, with a count.
+    #
+    # The circuit breaker makes this the common case rather than a rare one —
+    # once archive.org has 429'd enough times the run stops asking, so every
+    # remaining citation carries a null from that point on. That is a statement
+    # about the run, not about the pages.
+    unchecked = [
+        c
+        for c in citations
+        if isinstance(c.get("wayback"), dict)
+        and c["wayback"].get("archived") is None
+        and c.get("url")
+    ]
+    if unchecked:
+        rate_limited = sum(1 for c in unchecked if c["wayback"].get("rate_limited"))
+        reason = (
+            " archive.org rate-limited this run (HTTP 429)"
+            if rate_limited == len(unchecked)
+            else f" {rate_limited} of them to archive.org rate limiting"
+            if rate_limited
+            else ""
+        )
+        lines.append(
+            f"> **Archive status is unknown for {len(unchecked)} of these "
+            f"citations.**{reason}. `archived: null` means the lookup did not "
+            f"complete, **not** that the page is unarchived — and nothing was "
+            f"submitted for archiving on that basis. Re-run to find out."
+        )
+        lines.append("")
+
     changed = [c for c in verified if c.get("content_changed_since")]
     if changed:
         lines.append(f"### ⚠ Content changed since prior checksum ({len(changed)})")
