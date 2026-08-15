@@ -49,7 +49,7 @@ class TestPackagedConfigsAreValid:
 
         assert cost._PRICING, "pricing.yaml produced an empty table"
         for model, pair in cost._PRICING.items():
-            assert len(pair) == 2, f"{model} price is not a pair"
+            assert len(pair) in (2, 3), f"{model} price is not a pair"
             assert all(isinstance(v, float) and v >= 0 for v in pair), (
                 f"{model} has a negative or non-numeric price: {pair}"
             )
@@ -115,7 +115,7 @@ class TestPricingStructure:
     def test_every_model_has_numeric_pair(self):
         data = _load("pricing.yaml")
         for model_id, pair in data["models"].items():
-            assert isinstance(pair, list) and len(pair) == 2, (
+            assert isinstance(pair, list) and len(pair) in (2, 3), (
                 f"{model_id}: not a 2-element list"
             )
             assert all(isinstance(x, (int, float)) for x in pair), (
@@ -126,7 +126,7 @@ class TestPricingStructure:
     def test_unknown_price_present_and_numeric(self):
         data = _load("pricing.yaml")
         pair = data["unknown_price"]
-        assert len(pair) == 2 and all(isinstance(x, (int, float)) for x in pair)
+        assert len(pair) in (2, 3) and all(isinstance(x, (int, float)) for x in pair)
 
 
 class TestRegistryStructure:

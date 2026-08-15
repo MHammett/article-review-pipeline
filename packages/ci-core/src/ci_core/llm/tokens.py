@@ -73,7 +73,31 @@ def normalize_tokens(usage):
         # Guarded on the normalized key so re-normalizing an already-normalized
         # dict does not add the thinking tokens a second time.
         completion += _first_int(usage, ("thoughtsTokenCount",))
-    return {
-        "prompt": _first_int(usage, _PROMPT_KEYS),
-        "completion": completion,
-    }
+
+    prompt = _first_int(usage, _PROMPT_KEYS)
+    # Cached input is still input. Anthropic reports it in separate fields and
+    # drops ``input_tokens`` to only the uncached remainder, so reading that key
+    # alone under-reports a cached call enormously — a 4,800-token system prompt
+    # showed up as 20. Both cache fields are disjoint from ``input_tokens`` and
+    # from each other, so they add. Guarded on the normalized key so
+    # re-normalizing does not double-count.
+    if "prompt" not in usage:
+        prompt += _first_int(usage, ("cache_creation_input_tokens",))
+        prompt += _first_int(usage, ("cache_read_input_tokens",))
+    # How much of `prompt` came from the provider's cache. Kept as a separate
+    # key rather than subtracted, so `prompt` stays the true total input and only
+    # cost.py needs to know cached tokens are cheaper.
+    cached = 0
+    if "cached" in usage:
+        cached = _first_int(usage, ("cached",))
+    else:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cached += _first_int(details, ("cached_tokens",))
+        cached += _first_int(usage, ("cache_read_input_tokens",))
+        cached += _first_int(usage, ("cachedContentTokenCount",))
+
+    out = {"prompt": prompt, "completion": completion}
+    if cached:
+        out["cached"] = min(cached, prompt)
+    return out
