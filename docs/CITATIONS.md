@@ -4,13 +4,45 @@ After the fact-check pass, the pipeline takes the claims that came out of it and
 
 **Which claims.** All five fact-check buckets are resolved: `confirmed`, `outdated`, `contradicted`, `unverifiable` and `primary_source_needed`. `confirmed` matters most and is easy to overlook — those are the claims that ship *as written*, so they are the ones whose sources most need checksumming and archiving. Each entry records which bucket it came from in `fact_check_bucket`, because the same URL verified the same way means something different behind a claim you are about to publish than behind one you are about to rewrite.
 
-**Which URL.** In order of preference: the URL named in the claim's own source field (`source`, or `best_candidate_source` for `primary_source_needed`); failing that, a URL returned by a provider's live search during this run (Perplexity `citations` / `search_results`). The second is worth having precisely because of its provenance — a model-supplied URL is usually recalled from training data, whereas a grounded one was fetched by a real search while the review ran. The results land in **Section 9** of the report — both in `run_N_<timestamp>_report.json` and in the readable `run_N_<timestamp>_review.md`.
+**Which URL.** The draft's own citation for the claim comes first. Section 9 audits the article's citations, so the question worth answering is "does the source *you cited* say this" — not "is there some page on the internet that agrees." The pipeline reads the draft's numbered citation block, traces each claim back to the marker attached to it, and checks the claim against that source. See [How a claim is traced to a citation](#how-a-claim-is-traced-to-a-citation) below.
+
+Failing that — a claim the draft attaches no citation to — the URL named in the claim's own source field (`source`, or `best_candidate_source` for `primary_source_needed`) is used instead. A claim with neither gets no URL at all and falls through to the source adapters. That is deliberate: "the draft cites nothing here" is a true and useful thing to report, and it is the honest answer where a guess used to go.
+
+> **What used to be here.** Until this changed, a claim with no source of its own inherited a *response-level* grounded URL — the first entry of the provider's search-results list for the whole response, which was never about any particular claim. In one run that stamped a single LBNL energy report onto 44 unrelated claims (Yorkville water rates, ICNIRP exposure limits, IARC classifications) and the relevance checker correctly reported that an energy report does not discuss any of them. Two real findings sat inside 47 false positives. A section that flags everything flags nothing.
+
+The results land in **Section 9** of the report — both in `run_N_<timestamp>_report.json` and in the readable `run_N_<timestamp>_review.md`.
 
 Section 9 is not a pass/fail list. A claim can be resolved at very different levels of confidence, and the difference matters: one tier means a model read the source and confirmed it backs the claim, another means "here is a portal that is probably about the right topic." Reading those as equivalent is exactly the mistake this section is structured to prevent.
 
 **How the readable report is organised.** It opens with the fraction that matters — *N of M claims were checked against a document the pipeline fetched and read* — then a table putting every claim in exactly one disposition, then one block per disposition in the same order. The fraction leads because it governs how much of the rest to trust, and it is usually small: in the run this structure was built from, 18 of 144 claims had a document fetched and read. "Checked" deliberately counts both read outcomes — 9 where the document supported the claim and 9 where it did not — because a mismatch *was* checked; the check returned "no". Counting only the confirmations would reproduce, in the summary line, the same conflation between assertion and retrieval that the tiers exist to separate. The tier names below were already honest about that, but a four-way count in the opening line made the reader derive it.
 
 **The `confirmed` bucket is reconciled against retrieval.** The fact-check pass's verdict and this section's retrieval are independent — the first is model judgment about the claim, the second is whether a document was opened. In that same run 85 claims came back `confirmed`; 9 had a document read that supported the claim, 8 had one that did not, and for 68 no document was read at all, so the report now states that relationship directly rather than leaving `fact_check_bucket: confirmed` sitting beside a claim with no URL, where it reads as corroboration it is not.
+
+---
+
+## How a claim is traced to a citation
+
+The fact-check models return claims, not locations, so something has to connect a claim back to the place in the draft it came from. That work lives in `adapters/citation/draft_citations.py`.
+
+**The draft's citation block** is found by its heading (`## Citations`, `## Sources`, `## References`, `## Works Cited`, …) and parsed into `marker → URLs`. Sub-numbering is preserved: `[24a]` and `[24d]` are different sources, not two references to note 24.
+
+**Markers cite backwards.** In `…first reactor online by 2030. [24a] Microsoft signed a 20-year PPA…`, the marker belongs to the sentence *before* it. This is the single detail everything else rests on — attaching markers forward shifts every citation in a paragraph one sentence late, which produces a mapping that looks entirely plausible and is wrong throughout. The body is cut into spans at each marker run, and a span keeps the text preceding its marker.
+
+**A list item is its own unit.** An uncited bullet does not inherit the next bullet's markers. In the run that motivated this, a summary list whose middle bullet (xAI's turbines, QTS's water, Meta's EPA review) carried no citation took the markers off the bullet below it, pointing three Virginia noise sources at a Tennessee air-permit claim.
+
+**Matching** is a bag-of-words-plus-figures similarity between the claim and each span. Figures carry most of the weight — two passages about water use are told apart by `42,000` versus `350,000`, not by vocabulary. A claim that clears no span by a clear margin gets no URL rather than a guessed one; in the reference run, 4 of 133 claims landed there.
+
+**Ordering.** When several markers are plausible, they are ranked using the citation entries' own descriptions. Span position alone is not enough: a summary bullet that restates several findings and cites the span once will match a claim almost verbatim while its markers point elsewhere. The block breaks the tie — entry `[6a]` names xAI and Memphis in its description, entry `[4]` does not.
+
+If a claim explicitly names a marker (`"cited in [29] but not public"`), that wins outright. The model is naming the citation directly, which beats any similarity score.
+
+### More than one cited source
+
+A draft often cites several sources for one passage, and the marker enclosing a claim is not always the one the author meant for the passage's opening sentence. So up to three candidate URLs are checked, best first, **stopping at the first one that supports the claim**. A claim whose first cited source backs it costs exactly one fetch; only claims that would otherwise be reported unsupported pay for the rest.
+
+When none of them supports the claim, the reported entry is the most *informative* outcome, not the first one tried — a `contradicts` outranks a `not_addressed`. This is load-bearing. In the reference run the draft's "17 billion gallons" figure was contradicted by the LBNL report it cited (which says 66 billion liters, ≈17.4 billion gallons) while two sibling sources simply did not discuss it. Reporting whichever came back first would have buried the only thing worth acting on.
+
+The other URLs checked are recorded on the entry as `alternates_checked`, so "only the third cited source actually carries this claim" is visible rather than silently smoothed over.
 
 ---
 
@@ -24,9 +56,9 @@ The strongest tier. The source URL was fetched, its content SHA-256 checksummed 
 
 This tier is only reachable two ways:
 
-1. **A `known_url` citation** — the fact-check model supplied a source URL alongside the claim. The pipeline fetches it, checksums it, then makes a separate cheap model call (`mistral-small-latest`) asking whether the page content actually supports the claim. The verdict must come back `supports`. A verdict of `contradicts`, `not_addressed`, or `inconclusive` demotes the entry out of this tier entirely (see *Content mismatch* below).
+1. **A cited-source citation** — the draft cites a source for this claim (or, failing that, the fact-check model supplied one). The pipeline fetches it, checksums it, then makes a separate cheap model call (`mistral-small-latest`) asking whether the page content actually supports the claim. The verdict must come back `supports`. A verdict of `contradicts`, `not_addressed`, or `inconclusive` sends the pipeline to the next source cited for the claim, and demotes the entry out of this tier entirely if none of them supports it (see *Content mismatch* below).
 
-   This check exists because a `known_url` frequently comes from a model recalling a URL from training data rather than from a live search. **A URL that loads is not evidence that the page says what the claim says.** The fetch proves the page exists; only the relevance check speaks to whether it's the right page.
+   This check exists because a URL reaching this path is not necessarily the right page: a model-supplied one is often recalled from training data, and a draft's own citation can be attached to the wrong sentence. **A URL that loads is not evidence that the page says what the claim says.** The fetch proves the page exists; only the relevance check speaks to whether it's the right page.
 
 2. **A data-fetching source adapter** — `census`, `crossref`, `eia`, or `fred`. These retrieve actual data from an API, so the checksummed content *is* the evidence.
 
@@ -61,6 +93,8 @@ The readable report splits this in two, because the two halves call for differen
 A distinct failure mode, and the highest-information outcome in the section: the source URL fetched and checksummed fine, but the relevance check came back saying the page does **not** support the claim. These are the only entries where a document was genuinely retrieved, read, and found not to back the claim it was cited for, so the readable report gives them their own block (*Read, and does NOT support the claim*) directly under the confirmed ones. They previously rendered inside *Unresolved*, indistinguishable from claims nothing had ever been fetched for. The entry records the verdict (`contradicts`, `not_addressed`, or `inconclusive`) and the model's one-sentence reason, and the report separates them: `contradicts` means the source says otherwise and the draft may be factually wrong, while `not_addressed`/`inconclusive` far more often means the wrong URL was checked or the relevant passage did not extract — a citation problem, not a factual one. All nine mismatches in the motivating run were `not_addressed`.
 
 This is worth more attention than an ordinary unresolved entry. An ordinary one means "we couldn't find a source." This one means "a source was proposed and it doesn't check out" — and a `contradicts` verdict in particular is a signal about the claim, not just about the citation.
+
+**Every source cited for the claim failed**, not just one. When the draft cites several, all of them are checked before the entry lands here, and `alternates_checked` lists the ones that are not shown. Reporting a mismatch after checking one of three cited sources would say something false about a draft that cited the right source second.
 
 This tier asserts something about the source, so it is only ever reached when the document was genuinely read. If the content could not be extracted, or the check could not run, the entry becomes *Could not be verified* instead — never this.
 

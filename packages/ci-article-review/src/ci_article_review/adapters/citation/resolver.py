@@ -665,19 +665,91 @@ def _resolve_known_url(
     return _check_drift(result, checksum_index)
 
 
+#: How informative each failed outcome is, when several candidate sources were
+#: checked and none of them supported the claim. The reported entry is the most
+#: informative one, not the first tried.
+#:
+#: ``contradicts`` outranks everything because it is a finding about the *claim*,
+#: not just about a citation — in the run this ordering was written for, the
+#: draft's "17 billion gallons" was contradicted by the LBNL report it cited
+#: ("66 billion liters", ≈17.4 billion gallons) while two sibling sources simply
+#: did not discuss it. Reporting whichever came back first would have buried the
+#: only thing worth acting on.
+_FAILURE_RANK = {
+    "contradicts": 5,
+    "not_addressed": 4,
+    "inconclusive": 3,
+}
+_UNVERIFIABLE_RANK = 2
+_UNRESOLVED_RANK = 1
+
+
+def _informativeness(result):
+    if result.get("verification") == "content_mismatch":
+        return _FAILURE_RANK.get(result.get("relevance_verdict"), _UNRESOLVED_RANK)
+    if result.get("verification") == "unverifiable":
+        return _UNVERIFIABLE_RANK
+    return _UNRESOLVED_RANK
+
+
+def _resolve_candidates(
+    claim, known_urls, api_keys=None, call_log=None, checksum_index=None
+):
+    """Check a claim against the sources cited for it, best candidate first.
+
+    A claim usually has one candidate and this costs one fetch. More than one
+    arises when the draft cites several sources for a passage, or when the claim
+    opens a span whose marker may belong to the sentence before it — see
+    ``draft_citations``. Checking stops at the first source that *supports* the
+    claim, so the extra candidates are only paid for by claims that would
+    otherwise be reported as unsupported.
+
+    That ordering matters for honesty as much as cost. Reporting "the source
+    does not support this" after checking one of three cited sources says
+    something false about a draft that cited the right source second.
+    """
+    attempts = []
+    for url in known_urls:
+        result = _resolve_known_url(
+            claim,
+            url,
+            api_keys=api_keys,
+            call_log=call_log,
+            checksum_index=checksum_index,
+        )
+        if result.get("verification") == "checksum":
+            # Supported. Note the sources that failed to back it anyway — a
+            # citation list where only the third entry carries the claim is
+            # worth knowing about, and it is invisible otherwise.
+            if attempts:
+                result["alternates_checked"] = [a.get("url") for a in attempts]
+            return result
+        attempts.append(result)
+
+    best = max(attempts, key=_informativeness)
+    others = [a.get("url") for a in attempts if a is not best]
+    if others:
+        best["alternates_checked"] = others
+        best["note"] = (
+            f"{best.get('note', '').rstrip()} Also checked {len(others)} other "
+            f"source(s) cited for this claim; none supported it either."
+        ).lstrip()
+    return best
+
+
 def _resolve_one(
     claim,
     citation_sources,
-    known_url=None,
+    known_urls=None,
     api_keys=None,
     call_log=None,
     checksum_index=None,
 ):
     """Resolve a single claim against the configured sources, in order.
 
-    If ``known_url`` is given (a source URL the fact-check model already
-    supplied for this claim), it is fetched and checksummed directly —
-    the narrow adapter matching below is skipped entirely.
+    If ``known_urls`` is given (the sources the draft cites for this claim, or
+    one the fact-check model supplied), they are fetched and checksummed
+    directly — the narrow adapter matching below is skipped entirely.
 
     Returns the resolution dict.  Pointer-only adapters (e.g. FHWA, which just
     points at a publication for manual retrieval) are reported with
@@ -686,10 +758,10 @@ def _resolve_one(
     """
     checksum_index = checksum_index if checksum_index is not None else {}
 
-    if known_url:
-        return _resolve_known_url(
+    if known_urls:
+        return _resolve_candidates(
             claim,
-            known_url,
+            known_urls,
             api_keys=api_keys,
             call_log=call_log,
             checksum_index=checksum_index,
@@ -806,7 +878,9 @@ def _submit_missing_archives(results, archive_org_creds=None):
 
 def _normalize_claim_entry(entry):
     """Accept either a plain claim string or a dict:
-    ``{"claim": str, "known_url": str | None, "fact_check_bucket": str | None}``.
+    ``{"claim": str, "known_urls": list[str], "fact_check_bucket": str | None}``.
+
+    ``known_url`` (singular) is still accepted and means a one-entry list.
 
     ``fact_check_bucket`` records which fact-check list the claim came from
     (``confirmed``, ``outdated``, …). It is carried onto the result so the report
@@ -815,10 +889,14 @@ def _normalize_claim_entry(entry):
     verified the same way, means something different in each case.
     """
     if isinstance(entry, str):
-        return entry, None, None
+        return entry, [], None
+    urls = entry.get("known_urls")
+    if urls is None:
+        single = entry.get("known_url")
+        urls = [single] if single else []
     return (
         entry.get("claim", ""),
-        entry.get("known_url"),
+        [u for u in urls if u],
         entry.get("fact_check_bucket"),
     )
 
@@ -831,14 +909,15 @@ def resolve_citations(
     history_root=None,
 ):
     """
-    For each claim, resolve a primary source. If the claim entry carries a
-    ``known_url`` (a source the fact-check model already supplied), that URL
-    is fetched and checksummed directly. Otherwise each configured source
+    For each claim, resolve a primary source. If the claim entry carries
+    ``known_urls`` (the sources the draft cites for it, most likely first), they
+    are fetched and checksummed directly, stopping at the first that supports
+    the claim — see ``_resolve_candidates``. Otherwise each configured source
     adapter is tried in order. Claims are resolved in parallel (bounded by
     _MAX_PARALLEL) because each one performs blocking network I/O — the
     source lookup plus a Wayback check.
 
-    A ``known_url`` fetch also runs a content-relevance check (see
+    A ``known_urls`` fetch also runs a content-relevance check (see
     ``_verify_relevance``) — a cheap LLM call confirming the fetched page
     actually supports the claim, not just that the URL loaded. Passing a
     ``verification_call_log`` list (e.g. the pipeline's ``api_call_log``)
@@ -879,12 +958,12 @@ def resolve_citations(
                 _resolve_one,
                 claim,
                 citation_sources,
-                known_url,
+                known_urls,
                 api_keys,
                 call_log,
                 checksum_index,
             ): idx
-            for idx, (claim, known_url, _bucket) in enumerate(normalized)
+            for idx, (claim, known_urls, _bucket) in enumerate(normalized)
         }
         ordered: dict[int, dict] = {}
         for future in concurrent.futures.as_completed(futures):

@@ -332,6 +332,7 @@ content-intelligence/
 │   │   │   │   ├── cms/wordpress.py          WordPress REST API publisher
 │   │   │   │   └── citation/
 │   │   │   │       ├── resolver.py           primary source resolution, checksums, confidence tiers
+│   │   │   │       ├── draft_citations.py    traces a claim to the citation the draft cites for it
 │   │   │   │       ├── wayback.py            Wayback archive check + Save Page Now submission
 │   │   │   │       ├── topic_match.py        keyword gating for pointer-only adapters
 │   │   │   │       └── sources/              10 adapters: census, crossref, eia, epa, ferc,
