@@ -73,6 +73,7 @@ from .analysis import seo_content
 from .analysis import seo_suggest
 from ci_core.llm import cost as cost_analysis
 from .analysis.webpage import build_handoff_from_url
+from .adapters.citation import draft_citations
 from .adapters.citation import wayback
 
 log = logging.getLogger("pipeline")
@@ -500,62 +501,6 @@ _CITATION_CLAIM_BUCKETS = {
 }
 
 
-def _collect_grounded_urls(results: dict) -> dict:
-    """Map claim text -> a source URL the *provider's own live search* returned.
-
-    Perplexity returns ``citations`` (flat URLs) and ``search_results`` (richer
-    objects) on its final SSE chunk, and Gemini returns grounding metadata.
-    Both were parsed by the adapters, counted in a log line, and then dropped
-    when the result dict was folded into the report.
-
-    That is worth recovering specifically because of its provenance. The
-    ``known_url`` path exists because a model-supplied URL is usually recalled
-    from training data rather than looked up; these URLs are the opposite —
-    fetched during this run by a live search. They are the better input to the
-    same machinery.
-
-    Grounded citations are returned for the response as a whole, not per claim,
-    so they are only used as a *fallback* for a claim whose own ``source`` field
-    carried no URL, and only from the fact-check domain. Returns
-    ``{claim_key: url}`` keyed by :func:`_claim_key` — the same normalised key
-    claim dedup uses, so the two cannot disagree about whether two phrasings are
-    the same claim. An empty dict when nothing grounded came back.
-    """
-    # Keyed by _claim_key (a frozenset of content words), not raw claim text —
-    # the same key claim dedup uses, so the two cannot disagree about whether
-    # two phrasings are the same claim.
-    grounded: dict[frozenset, str] = {}
-    for (_model, domain), result in results.items():
-        if domain != "fact_check" or result.get("failed"):
-            continue
-        urls = [u for u in (result.get("citations") or []) if isinstance(u, str)]
-        urls += [
-            sr["url"]
-            for sr in (result.get("search_results") or [])
-            if isinstance(sr, dict) and isinstance(sr.get("url"), str)
-        ]
-        if not urls:
-            continue
-        data = result.get("data") or {}
-        for bucket in _CITATION_CLAIM_BUCKETS:
-            for item in data.get(bucket, []) or []:
-                claim = item.get("claim", "")
-                # Only claims this model itself raised, and only when it did not
-                # already name a URL — a claim-specific source always wins over
-                # a response-level one.
-                # Keyed on the normalised claim key, not the raw text: claim
-                # dedup collapses paraphrases, so a URL registered under the
-                # phrasing that loses the tie would never be found again by the
-                # phrasing that wins it.
-                key = _claim_key(claim)
-                if key and key not in grounded:
-                    grounded[key] = urls[0]
-    return grounded
-
-
-#: Function words dropped before comparing two claims. They carry no identity —
-#: "The Virginia grid runs below average" and "Virginia grid runs below average"
-#: are one claim, and five models will phrase it five ways.
 _CLAIM_STOPWORDS = frozenset(
     "the a an of in to and is are was were that for on at by its with as from".split()
 )
@@ -593,21 +538,48 @@ def _is_duplicate_claim(key: frozenset, seen_keys: list) -> bool:
     return False
 
 
-def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict]:
+def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
     """Build the Pass 3 claim list from consolidated fact-check output.
 
-    Every bucket contributes its claims. A claim's own source field is preferred;
-    a provider's grounded search result is the fallback (see
-    ``_collect_grounded_urls``).
+    Every bucket contributes its claims.
 
-    Deduplication is on claim *meaning*, not exact text. It used to be exact text,
-    which meant five models paraphrasing one fact produced five claims: the
+    **Which URLs a claim is checked against.** The draft's own citation for the
+    claim comes first: Section 9 audits the article's citations, so "does the
+    source you cited say this" is the question worth answering. See
+    ``draft_citations`` for how a claim is traced back to a marker. The URL named
+    in the claim's own source field follows as a fallback, for claims the draft
+    attaches no citation to.
+
+    What used to sit in that fallback slot was a *response-level* grounded URL —
+    the first entry of the provider's search-results list for the whole response,
+    which is not about any particular claim. In one real run that stamped a
+    single LBNL energy report onto 44 unrelated claims and produced 47 false
+    "the source does not mention this" findings around two real ones. A claim
+    with no traceable citation now gets no URL, which is both true and useful:
+    "the draft cites nothing here" is something an author can act on.
+
+    **Deduplication is on claim *meaning*, not exact text.** It used to be exact
+    text, which meant five models paraphrasing one fact produced five claims: the
     2026-08-12 run carried 29 near-duplicate pairs among 144 claims, one differing
     from its twin only by a trailing full stop. Each duplicate bought its own
     resolution fetch, its own verification call, and its own line in Section 9.
     """
+    cited = draft_citations.DraftCitations(draft)
+    if cited:
+        log.info(
+            "Citations: draft citation block parsed — %d marker(s) available "
+            "for claim anchoring",
+            cited.marker_count,
+        )
+    else:
+        log.info(
+            "Citations: no citation block found in the draft; claims fall back "
+            "to the source URL named by the fact-check model"
+        )
+
     claims: list[dict] = []
     seen_keys: list[frozenset] = []
+    anchored = 0
     for bucket, url_key in _CITATION_CLAIM_BUCKETS.items():
         for item in fact_check.get(bucket, []) or []:
             claim = item.get("claim", "")
@@ -617,14 +589,25 @@ def _collect_citation_claims(fact_check: dict, grounded_urls: dict) -> list[dict
             if _is_duplicate_claim(key, seen_keys):
                 continue
             seen_keys.append(key)
-            known_url = None
-            if url_key:
-                known_url = _extract_source_url(item.get(url_key, ""))
-            if not known_url:
-                known_url = grounded_urls.get(key)
+            source_field = item.get(url_key, "") if url_key else ""
+            known_urls = cited.candidates_for(claim, source_field)
+            if known_urls:
+                anchored += 1
+            own = _extract_source_url(source_field) if url_key else None
+            if own and own not in known_urls:
+                known_urls = known_urls + [own]
             claims.append(
-                {"claim": claim, "known_url": known_url, "fact_check_bucket": bucket}
+                {
+                    "claim": claim,
+                    "known_urls": known_urls,
+                    "fact_check_bucket": bucket,
+                }
             )
+    log.info(
+        "Citations: %d of %d claim(s) traced to a citation in the draft",
+        anchored,
+        len(claims),
+    )
     return claims
 
 
@@ -725,9 +708,10 @@ def _stagger_offsets(runner_names, stagger_seconds):
     provider's domain calls in the same instant makes them compete for one
     quota. Observed 2026-08-12: two Perplexity calls returned HTTP 429 within a
     second of each other, and the one whose retry also hit the limit failed
-    outright — which then silently cost Section 9 its grounded-search URLs,
-    since perplexity:fact_check is their only supplier (see
-    :func:`_collect_grounded_urls`).
+    outright — which then cost Section 9 every claim that pass would have
+    raised. (It also cost Section 9 its grounded-search URLs at the time;
+    citations now resolve against the draft's own sources, so that particular
+    consequence no longer applies — see :func:`_collect_citation_claims`.)
 
     Only calls sharing a provider are spread; calls to *different* providers all
     start at 0, because the parallelism that matters is across providers, not
@@ -1486,42 +1470,7 @@ def run_draft_pipeline(
     from .adapters.citation.resolver import resolve_citations
 
     fact_check = report.get("section_2_fact_check") or {}
-    grounded_urls = _collect_grounded_urls(results)
-    failed_fact_check = sorted(
-        f"{model}:{domain}"
-        for (model, domain), r in results.items()
-        if domain == "fact_check" and r.get("failed") and not r.get("skipped")
-    )
-    if grounded_urls:
-        log.info(
-            "Citations: %d claim(s) have a provider grounded-search URL available",
-            len(grounded_urls),
-        )
-    elif failed_fact_check:
-        # A failed pass in one section quietly degrades another. Only a live-search
-        # fact-check pass returns response-level citations, so when one fails there
-        # is nothing to fall back on for claims that named no URL of their own, and
-        # Section 9 resolves materially fewer of them. Measured 2026-08-12:
-        # perplexity:fact_check was rate-limited, grounded URLs went 18 -> 0, and
-        # citation resolution fell from 48% (49/101) to 22% (32/144). Nothing in the
-        # output connected those two facts, so the drop read as a mystery.
-        note = (
-            f"Section 9 degraded: no grounded-search URLs were available because "
-            f"{', '.join(failed_fact_check)} failed. A live-search fact-check pass "
-            f"is their only source, so claims that named no URL of their own could "
-            f"not be resolved. Citation coverage below is lower than a clean run "
-            f"would produce — re-run once that provider recovers before treating it "
-            f"as final."
-        )
-        log.warning("Citations: %s", note)
-        report.setdefault("degradations", []).append(
-            {
-                "section": "SECTION 9: Citations",
-                "caused_by": failed_fact_check,
-                "detail": note,
-            }
-        )
-    claims = _collect_citation_claims(fact_check, grounded_urls)
+    claims = _collect_citation_claims(fact_check, corrected_draft)
     if claims:
         citation_results = resolve_citations(
             claims,

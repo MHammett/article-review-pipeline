@@ -464,6 +464,170 @@ class TestResolveCitations:
         assert results[0]["source_name"] == "FRED"
 
 
+class TestMultipleCitedSources:
+    """A draft that cites several sources for a passage gets all of them checked.
+
+    Reporting "the source does not support this" after checking one of three
+    cited sources says something false about a draft that cited the right source
+    second. Checking stops at the first that supports, so the extra candidates
+    are only paid for by claims that would otherwise be reported unsupported.
+    """
+
+    def _verdicts(self, *by_url):
+        """Return a mistral.call double that answers per fetched URL."""
+        table = dict(by_url)
+        seen = []
+
+        def _fake_get(url, timeout=15):
+            seen.append(url)
+            return _page_response()
+
+        def _fake_call(_system, user_prompt, _api_key, model=None):
+            verdict = table[seen[-1]]
+            return {
+                "failed": False,
+                "data": {
+                    "verdict": verdict,
+                    "reason": f"verdict for {seen[-1]}",
+                    "quote": _quote_from_prompt(user_prompt),
+                },
+                "model": "mistral-small-latest",
+                "tokens": {"prompt": 10, "completion": 5},
+                "elapsed_seconds": 0.1,
+            }
+
+        return _fake_get, _fake_call, seen
+
+    def _resolve(self, claim_entry, fake_get, fake_call):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=fake_get,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=_no_wayback,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.mistral.call",
+                side_effect=fake_call,
+            ),
+        ):
+            return resolver.resolve_citations(
+                [claim_entry], _SOURCES, api_keys={"mistral": {"api_key": "k"}}
+            )[0]
+
+    def test_checking_stops_at_the_first_source_that_supports(self):
+        fake_get, fake_call, seen = self._verdicts(
+            ("https://a.example", "supports"),
+            ("https://b.example", "contradicts"),
+        )
+        result = self._resolve(
+            {
+                "claim": "a claim",
+                "known_urls": ["https://a.example", "https://b.example"],
+            },
+            fake_get,
+            fake_call,
+        )
+        assert result["verification"] == "checksum"
+        assert result["url"] == "https://a.example"
+        assert seen == ["https://a.example"]
+
+    def test_a_later_cited_source_can_still_verify_the_claim(self):
+        """The regression that motivated escalation.
+
+        The first source cited for a passage often covers the sentence *after*
+        the claim. Stopping there reports a false "does not support".
+        """
+        fake_get, fake_call, _ = self._verdicts(
+            ("https://a.example", "not_addressed"),
+            ("https://b.example", "supports"),
+        )
+        result = self._resolve(
+            {
+                "claim": "a claim",
+                "known_urls": ["https://a.example", "https://b.example"],
+            },
+            fake_get,
+            fake_call,
+        )
+        assert result["verification"] == "checksum"
+        assert result["url"] == "https://b.example"
+        assert result["alternates_checked"] == ["https://a.example"]
+
+    def test_a_contradiction_outranks_a_not_addressed(self):
+        """The finding that has to survive.
+
+        A draft said "17 billion gallons"; the LBNL report it cited said 66
+        billion liters (≈17.4 billion gallons) while two sibling sources simply
+        did not discuss it. Reporting whichever came back first would bury the
+        only thing worth acting on.
+        """
+        fake_get, fake_call, _ = self._verdicts(
+            ("https://golf.example", "not_addressed"),
+            ("https://usgs.example", "not_addressed"),
+            ("https://lbnl.example", "contradicts"),
+        )
+        result = self._resolve(
+            {
+                "claim": "17 billion gallons",
+                "known_urls": [
+                    "https://golf.example",
+                    "https://usgs.example",
+                    "https://lbnl.example",
+                ],
+            },
+            fake_get,
+            fake_call,
+        )
+        assert result["verification"] == "content_mismatch"
+        assert result["relevance_verdict"] == "contradicts"
+        assert result["url"] == "https://lbnl.example"
+        assert sorted(result["alternates_checked"]) == [
+            "https://golf.example",
+            "https://usgs.example",
+        ]
+
+    def test_the_note_says_the_other_cited_sources_were_checked_too(self):
+        fake_get, fake_call, _ = self._verdicts(
+            ("https://a.example", "not_addressed"),
+            ("https://b.example", "not_addressed"),
+        )
+        result = self._resolve(
+            {
+                "claim": "a claim",
+                "known_urls": ["https://a.example", "https://b.example"],
+            },
+            fake_get,
+            fake_call,
+        )
+        assert "Also checked 1 other source(s)" in result["note"]
+
+    def test_a_single_cited_source_costs_a_single_fetch(self):
+        fake_get, fake_call, seen = self._verdicts(
+            ("https://a.example", "not_addressed")
+        )
+        self._resolve(
+            {"claim": "a claim", "known_urls": ["https://a.example"]},
+            fake_get,
+            fake_call,
+        )
+        assert seen == ["https://a.example"]
+
+    def test_the_singular_known_url_key_still_works(self):
+        """Kept so a caller (or a saved claim list) written against the old
+        one-URL shape does not silently resolve nothing."""
+        fake_get, fake_call, _ = self._verdicts(("https://a.example", "supports"))
+        result = self._resolve(
+            {"claim": "a claim", "known_url": "https://a.example"},
+            fake_get,
+            fake_call,
+        )
+        assert result["verification"] == "checksum"
+        assert result["url"] == "https://a.example"
+
+
 class TestVerifierSeesReadableContent:
     """Regression: the resolver used to hand `resp.text` — raw HTML source or
     raw PDF bytes — to the relevance verifier, which then rejected essentially
