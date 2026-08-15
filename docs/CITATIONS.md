@@ -8,6 +8,10 @@ After the fact-check pass, the pipeline takes the claims that came out of it and
 
 Section 9 is not a pass/fail list. A claim can be resolved at very different levels of confidence, and the difference matters: one tier means a model read the source and confirmed it backs the claim, another means "here is a portal that is probably about the right topic." Reading those as equivalent is exactly the mistake this section is structured to prevent.
 
+**How the readable report is organised.** It opens with the fraction that matters — *N of M claims were checked against a document the pipeline fetched and read* — then a table putting every claim in exactly one disposition, then one block per disposition in the same order. The fraction leads because it governs how much of the rest to trust, and it is usually small: in the run this structure was built from, 18 of 144 claims had a document fetched and read. "Checked" deliberately counts both read outcomes — 9 where the document supported the claim and 9 where it did not — because a mismatch *was* checked; the check returned "no". Counting only the confirmations would reproduce, in the summary line, the same conflation between assertion and retrieval that the tiers exist to separate. The tier names below were already honest about that, but a four-way count in the opening line made the reader derive it.
+
+**The `confirmed` bucket is reconciled against retrieval.** The fact-check pass's verdict and this section's retrieval are independent — the first is model judgment about the claim, the second is whether a document was opened. In that same run 85 claims came back `confirmed`; 9 had a document read that supported the claim, 8 had one that did not, and for 68 no document was read at all, so the report now states that relationship directly rather than leaving `fact_check_bucket: confirmed` sitting beside a claim with no URL, where it reads as corroboration it is not.
+
 ---
 
 ## Confidence tiers
@@ -48,11 +52,13 @@ Keyword matching is gated by `topic_match.py`, which discards a keyword hit when
 
 No configured adapter matched, or the source URL couldn't be fetched. The entry carries a `note` explaining which. Nothing was established.
 
+The readable report splits this in two, because the two halves call for different follow-up. An entry with **a URL** was a real fetch that failed (403, 404, DNS) and renders under *Source URL identified, but the fetch was refused* — the document is named, a 403 describes automated access rather than the document, and the archive copy is listed beside it, so these are often clearable by hand. An entry with **no URL** renders under *No source identified*: nothing was ever found to try.
+
 **How much to trust it:** nothing to trust — this is a to-do.
 
 ### Content mismatch — `verification: "content_mismatch"`
 
-A distinct failure mode that lands in the *Unresolved* section of the readable report. The source URL fetched and checksummed fine, but the relevance check came back saying the page does **not** support the claim. The entry records the verdict (`contradicts`, `not_addressed`, or `inconclusive`) and the model's one-sentence reason.
+A distinct failure mode, and the highest-information outcome in the section: the source URL fetched and checksummed fine, but the relevance check came back saying the page does **not** support the claim. These are the only entries where a document was genuinely retrieved, read, and found not to back the claim it was cited for, so the readable report gives them their own block (*Read, and does NOT support the claim*) directly under the confirmed ones. They previously rendered inside *Unresolved*, indistinguishable from claims nothing had ever been fetched for. The entry records the verdict (`contradicts`, `not_addressed`, or `inconclusive`) and the model's one-sentence reason, and the report separates them: `contradicts` means the source says otherwise and the draft may be factually wrong, while `not_addressed`/`inconclusive` far more often means the wrong URL was checked or the relevant passage did not extract — a citation problem, not a factual one. All nine mismatches in the motivating run were `not_addressed`.
 
 This is worth more attention than an ordinary unresolved entry. An ordinary one means "we couldn't find a source." This one means "a source was proposed and it doesn't check out" — and a `contradicts` verdict in particular is a signal about the claim, not just about the citation.
 
