@@ -1134,3 +1134,81 @@ class TestCitationsPairLiveAndArchiveLinks:
     def test_a_citation_with_no_url_renders_no_pairing(self):
         citation = {"claim": "c", "resolved": True, "verification": "checksum"}
         assert report_markdown._render_archive_pair(citation) == []
+
+
+class TestWaybackIsRenderedForAReaderNotADebugger:
+    """`_kv_lines` dumped the raw wayback dict into the report.
+
+    A reader looking for "is this archived" got `{'archived': None, 'error':
+    '...'}` and had to decode it. The null case is the one that has to be right:
+    it means the lookup never completed, not that there is no snapshot.
+    """
+
+    def _cit(self, **wb):
+        return {"claim": "A claim", "url": "https://example.org/p", "wayback": wb}
+
+    def test_a_never_completed_lookup_is_not_reported_as_unarchived(self):
+        out = "\n".join(
+            report_markdown._kv_lines(
+                self._cit(archived=None, error="rate limit tripped")
+            )
+        )
+        assert "NOT CHECKED" in out
+        assert "Not archived" not in out
+        assert "{'archived'" not in out, "the raw dict must not reach the report"
+
+    def test_a_genuinely_unarchived_page_still_says_so(self):
+        out = "\n".join(report_markdown._kv_lines(self._cit(archived=False)))
+        assert "Not archived in Wayback Machine" in out
+
+    def test_an_archived_page_shows_its_snapshot(self):
+        out = "\n".join(
+            report_markdown._kv_lines(
+                self._cit(
+                    archived=True,
+                    snapshot_age_days=12,
+                    snapshot_url="https://web.archive.org/web/1/x",
+                )
+            )
+        )
+        assert "12d ago" in out and "https://web.archive.org/web/1/x" in out
+
+    def test_staleness_survives_the_rendering(self):
+        out = "\n".join(
+            report_markdown._kv_lines(
+                self._cit(archived=True, snapshot_age_days=400, snapshot_stale=True)
+            )
+        )
+        assert "[STALE]" in out
+
+
+class TestWaybackSummaryDoesNotDriftFromTheAdapter:
+    """`_wayback_summary` is duplicated from `wayback.format_summary`.
+
+    Duplicated rather than imported so this module stays a dependency-free
+    renderer — importing the adapter pulls `requests` in behind it, the same
+    reason `_SEO_FIELD_ORDER` is duplicated. This is the test that keeps the two
+    honest, across every state including the one that matters.
+    """
+
+    CASES = [
+        {"archived": None, "error": "rate limit tripped earlier this run"},
+        {"archived": False},
+        {
+            "archived": True,
+            "snapshot_age_days": 12,
+            "snapshot_url": "https://web.archive.org/web/1/x",
+        },
+        {
+            "archived": True,
+            "snapshot_age_days": 400,
+            "snapshot_stale": True,
+            "snapshot_url": "https://web.archive.org/web/2/y",
+        },
+    ]
+
+    def test_every_state_renders_identically(self):
+        for wb in self.CASES:
+            assert report_markdown._wayback_summary(wb) == wayback.format_summary(wb), (
+                wb
+            )

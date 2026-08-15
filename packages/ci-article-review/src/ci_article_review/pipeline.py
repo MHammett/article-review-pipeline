@@ -2046,6 +2046,13 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
                     wb_str = f"stale archive ({age}d)"
                 elif wb.get("archived"):
                     wb_str = f"archived ({age}d)"
+                elif wb:
+                    # archived is None: the lookup never completed. Rendering
+                    # this as blank let it read as "nothing to report", which is
+                    # the opposite of true — and the rate limiter's circuit
+                    # breaker makes it the common case in a throttled run, so a
+                    # whole column of blanks would mean "we stopped asking".
+                    wb_str = "archive not checked"
                 else:
                     wb_str = ""
                 extras = f"  [{wb_str}]" if wb_str else ""

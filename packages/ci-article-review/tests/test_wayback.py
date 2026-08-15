@@ -172,10 +172,19 @@ class TestWaybackCheck:
         assert "Not archived" in summary
 
     def test_format_summary_network_error(self):
+        """A null must not read as "not archived" — it means we never asked.
+
+        This asserted only that the word "failed" appeared, which the old
+        exception-led wording satisfied while still leaving a reader to infer
+        what a failed check implied about the page. It now has to say so.
+        """
         summary = wayback.format_summary(
             {"url": "https://x.com", "archived": None, "error": "timeout"}
         )
-        assert "failed" in summary.lower()
+        assert "NOT CHECKED" in summary
+        assert "timeout" in summary
+        assert "says nothing about whether the page is archived" in summary
+        assert "Not archived" not in summary
 
     def test_format_summary_archived(self):
         wb = {

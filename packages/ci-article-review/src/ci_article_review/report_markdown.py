@@ -18,11 +18,48 @@ the pipeline after that template was written).
 _SEO_FIELD_ORDER = ("meta_description", "og_title", "og_description", "schema_type")
 
 
+def _wayback_summary(wb):
+    """One line describing a wayback result, for a reader rather than a debugger.
+
+    A wayback result is a dict, and ``_kv_lines`` dumped it raw — putting a
+    reader in front of ``{'archived': None, 'error': '...'}`` and asking them to
+    work out what it meant.
+
+    The ``archived is None`` case is the one that has to be right: it means the
+    lookup never completed, which is NOT "there is no snapshot". Since the rate
+    limiter's circuit breaker skips every remaining lookup once it trips, a null
+    is the common case in a throttled run rather than a rare one, and rendering
+    it as anything resembling "not archived" would assert something the run
+    never established.
+
+    Deliberately duplicated from ``adapters.citation.wayback.format_summary``
+    rather than imported, for the same reason ``_SEO_FIELD_ORDER`` above is:
+    this module is a dependency-free renderer over a plain dict, and importing
+    the wayback adapter would pull ``requests`` in behind it. A test asserts the
+    two stay in step across all four states.
+    """
+    if wb.get("archived") is None:
+        return (
+            f"NOT CHECKED — the archive.org lookup did not complete "
+            f"({wb.get('error', 'unknown error')}). This says nothing about "
+            f"whether the page is archived."
+        )
+    if not wb.get("archived"):
+        return "Not archived in Wayback Machine"
+    age = wb.get("snapshot_age_days")
+    age_str = f"{age}d ago" if age is not None else "age unknown"
+    flag = " [STALE]" if wb.get("snapshot_stale") else ""
+    return f"Archived — latest snapshot {age_str}{flag}: {wb.get('snapshot_url', '')}"
+
+
 def _kv_lines(d, exclude=()):
     """Render remaining key/value pairs of a flag dict as indented bullets."""
     lines = []
     for key, value in d.items():
         if key in exclude or value in (None, "", [], {}):
+            continue
+        if key == "wayback" and isinstance(value, dict):
+            lines.append(f"  - Wayback: {_wayback_summary(value)}")
             continue
         label = key.replace("_", " ").capitalize()
         lines.append(f"  - {label}: {value}")

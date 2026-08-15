@@ -299,6 +299,16 @@ def _wayback_fallback_content(url, timeout):
     """
     wb = wayback.check(url, timeout=timeout)
     snapshot_url = wb.get("snapshot_url")
+    # `not archived` deliberately covers both False and None here, and the two
+    # cannot be told apart from the outside: with no snapshot URL there is
+    # nothing to fetch either way, so the fallback fails identically. What
+    # differs is *why* — False is "archive.org has no snapshot", None is "we
+    # never got an answer", and the rate limiter's circuit breaker makes the
+    # second common in a throttled run. The distinction is lost at this return
+    # because `wb` is dropped on the failure path; the caller's `resolved:
+    # False` citation therefore records no wayback state at all. Worth carrying
+    # `wb` out of here so the citation can say which happened, but that is a
+    # change to this function's contract and belongs in its own commit.
     if not wb.get("archived") or not snapshot_url:
         return None
     try:
