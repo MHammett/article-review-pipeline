@@ -538,6 +538,53 @@ def _is_duplicate_claim(key: frozenset, seen_keys: list) -> bool:
     return False
 
 
+def _record_fact_check_degradation(report: dict, results: dict) -> None:
+    """Record that a failed fact-check pass left Sections 2 and 9 incomplete.
+
+    A failed pass in one place quietly degrades another, and nothing in the
+    output used to connect the two: the run summary said
+    "perplexity:fact_check FAILED" in one place and "9 verified" in another,
+    and the drop read as an unexplained regression rather than a known
+    consequence.
+
+    **The mechanism this describes is not the one it originally described.**
+    Until citations resolved against the draft's own sources, a failed
+    fact-check pass cost Section 9 its *grounded-search URLs* — that pass was
+    their only supplier, and losing it took citation resolution from 48% to 22%
+    in the 2026-08-12 run. Grounded URLs are gone; claims are now anchored to
+    the draft's citation block, which no model pass supplies. What a failure
+    costs now is the *claims themselves*: every claim only that pass would have
+    raised is missing from the fact-check results and therefore from citation
+    resolution too. Narrower in effect, wider in scope — it degrades Section 2
+    as well, which the old warning never said.
+    """
+    failed = sorted(
+        f"{model}:{domain}"
+        for (model, domain), r in results.items()
+        if domain == "fact_check" and r.get("failed") and not r.get("skipped")
+    )
+    if not failed:
+        return
+    total = sum(1 for (_model, domain) in results if domain == "fact_check")
+    detail = (
+        f"Sections 2 and 9 are working from an incomplete claim list: "
+        f"{len(failed)} of {total} fact-check pass(es) failed "
+        f"({', '.join(failed)}). Any claim only those passes would have raised "
+        f"is missing from the fact-check results, and so was never put through "
+        f"citation resolution either. Counts in both sections are lower than a "
+        f"clean run would produce — re-run once the provider recovers before "
+        f"treating them as final."
+    )
+    log.warning("Citations: %s", detail)
+    report.setdefault("degradations", []).append(
+        {
+            "section": "SECTION 2: Factual Verification, SECTION 9: Citations",
+            "caused_by": failed,
+            "detail": detail,
+        }
+    )
+
+
 def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
     """Build the Pass 3 claim list from consolidated fact-check output.
 
@@ -1470,6 +1517,7 @@ def run_draft_pipeline(
     from .adapters.citation.resolver import resolve_citations
 
     fact_check = report.get("section_2_fact_check") or {}
+    _record_fact_check_degradation(report, results)
     claims = _collect_citation_claims(fact_check, corrected_draft)
     if claims:
         citation_results = resolve_citations(
