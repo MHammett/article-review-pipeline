@@ -657,6 +657,62 @@ class TestSection9Citations:
         positions = [section.index(f"### {h}") for h in heads]
         assert positions == sorted(positions), dict(zip(heads, positions))
 
+    def test_wholesale_archive_lookup_failure_is_stated_once(self):
+        """Per-entry "NOT CHECKED" is invisible in aggregate: a reader skimming
+        a page of them concludes nothing is archived. The circuit breaker makes
+        this the common case — once archive.org 429s enough, the run stops
+        asking and every remaining citation carries a null."""
+        citations = [
+            {
+                "claim": f"c{i}",
+                "resolved": True,
+                "verification": "checksum",
+                "url": f"https://example.gov/{i}",
+                "wayback": {"archived": None, "rate_limited": True},
+            }
+            for i in range(3)
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        assert "Archive status is unknown for 3 of these citations" in md
+        assert "rate-limited this run (HTTP 429)" in md
+        assert "**not** that the page is unarchived" in md
+
+    def test_partial_archive_failure_reports_the_rate_limited_share(self):
+        citations = [
+            {
+                "claim": "a",
+                "resolved": True,
+                "verification": "checksum",
+                "url": "https://example.gov/a",
+                "wayback": {"archived": None, "rate_limited": True},
+            },
+            {
+                "claim": "b",
+                "resolved": True,
+                "verification": "checksum",
+                "url": "https://example.gov/b",
+                "wayback": {"archived": None},
+            },
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        assert "unknown for 2 of these citations" in md
+        assert "1 of them to archive.org rate limiting" in md
+
+    def test_a_known_unarchived_page_is_not_called_unknown(self):
+        """archived:False is an answer. Only null is "we did not find out"."""
+        citations = [
+            {
+                "claim": "a",
+                "resolved": True,
+                "verification": "checksum",
+                "url": "https://example.gov/a",
+                "wayback": {"archived": False},
+            }
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        assert "Archive status is unknown" not in md
+
     def test_no_confirmed_reconciliation_when_the_bucket_is_absent(self):
         """Reports whose fact-check pass produced no confirmed bucket must not
         grow an empty callout."""
