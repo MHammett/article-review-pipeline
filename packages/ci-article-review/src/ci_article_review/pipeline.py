@@ -2164,9 +2164,14 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             )
             print("!" * 60)
 
-    print(
-        f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/"
-    )
+    # Derive the directory from the file actually written rather than re-slugging
+    # the title. A handoff with a `History key:` saves under that key, so
+    # re-slugging the title printed a path that does not exist.
+    if markdown_path:
+        report_dir = Path(markdown_path).parent
+    else:
+        report_dir = Path(HISTORY_ROOT) / hist._slug(report.get("article_title", ""))
+    print(f"\nFull report: {report_dir}")
     if markdown_path:
         print(f"Readable review (paste into chat): {markdown_path}")
         _print_next_step(markdown_path)
