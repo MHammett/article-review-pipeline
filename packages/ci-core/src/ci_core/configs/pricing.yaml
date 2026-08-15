@@ -1,5 +1,19 @@
-# Model pricing — per-million tokens (input, output).
-# Last verified: June 2026. Update whenever provider pricing changes.
+# Model pricing — per-million tokens: [input, output] or [input, output, cached_input].
+#
+# The optional third element is the rate for input served from the provider's
+# prompt cache. Without it, cached tokens are billed at the full input rate,
+# which over-reports every provider that caches — Grok caches automatically, and
+# xAI prices its cached input at $0.20 against $1.25 full on the models used
+# here, so the report was overstating the cached portion of those calls more
+# than sixfold.
+#
+# xAI also tiers by prompt size: a request whose prompt reaches 200k tokens is
+# billed at roughly double these rates for *all* its tokens. Not modelled — the
+# drafts reviewed here run ~33k tokens, well under the threshold. Revisit if
+# that stops being true.
+#
+# Last verified: OpenAI/Gemini/Anthropic June 2026; xAI against docs.x.ai
+# 2026-08-15. Update whenever provider pricing changes.
 #
 # Prefix matching applies: "gemini-2.5-flash-0520" matches "gemini-2.5-flash".
 # Sort longer IDs before shorter ones if two share a prefix.
@@ -10,9 +24,9 @@ unknown_price: [2.50, 10.00]   # fallback for unrecognized model IDs (conservati
 
 models:
   # ── OpenAI ──────────────────────────────────────────────────────────────────
-  gpt-5.5:              [5.00, 30.00]
-  gpt-5.4:              [2.50, 15.00]
-  gpt-5.4-mini:         [0.75,  4.50]
+  gpt-5.5:              [5.00, 30.00,  0.50]
+  gpt-5.4:              [2.50, 15.00,  0.25]
+  gpt-5.4-mini:         [0.75,  4.50,  0.075]
 
   # ── Google Gemini ────────────────────────────────────────────────────────────
   gemini-3.5-flash:         [1.50,  9.00]
@@ -32,10 +46,12 @@ models:
   sonar:                    [0.50,  1.50]
 
   # ── xAI Grok ─────────────────────────────────────────────────────────────────
-  grok-4.20-0309-reasoning:     [1.25,  2.50]
-  grok-4.20-0309-non-reasoning: [1.25,  2.50]
-  grok-4.3:                     [1.25,  2.50]
-  grok-build-0.1:               [0.30,  1.00]
+  grok-4.20-0309-reasoning:     [1.25,  2.50,  0.20]
+  grok-4.20-0309-non-reasoning: [1.25,  2.50,  0.20]
+  grok-4.3:                     [1.25,  2.50,  0.20]
+  # Base rates corrected 2026-08-15: this was [0.30, 1.00], which matched no
+  # published xAI rate. docs.x.ai lists $1.00 in / $2.00 out.
+  grok-build-0.1:               [1.00,  2.00,  0.20]
 
   # ── Anthropic Claude ─────────────────────────────────────────────────────────
   claude-fable-5:               [10.00, 50.00]

@@ -36,12 +36,15 @@ def _load_pricing():
 
     pricing = {}
     for model_id, pair in (data.get("models") or {}).items():
-        if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+        # [input, output] or [input, output, cached_input]. The third element is
+        # optional: a model without it bills cached tokens at the full input
+        # rate, which over-reports rather than inventing a discount.
+        if not (isinstance(pair, (list, tuple)) and len(pair) in (2, 3)):
             raise PackagedConfigError(
-                f"{yaml_path}: models.{model_id} must be a [prompt, completion] "
-                f"pair, got {pair!r}"
+                f"{yaml_path}: models.{model_id} must be [prompt, completion] or "
+                f"[prompt, completion, cached], got {pair!r}"
             )
-        pricing[str(model_id)] = (float(pair[0]), float(pair[1]))
+        pricing[str(model_id)] = tuple(float(x) for x in pair)
     if not pricing:
         raise PackagedConfigError(f"{yaml_path}: 'models' is empty or missing")
 
@@ -77,11 +80,22 @@ def _entry_cost(entry):
     tokens = entry.get("tokens") or {}
     prompt_tok = tokens.get("prompt", 0) or 0
     completion_tok = tokens.get("completion", 0) or 0
+    # Cached input is a subset of prompt tokens, billed at a lower rate. It is
+    # reported by every provider that caches and was priced at the full input
+    # rate until now, so any caching the pipeline benefits from was invisible in
+    # the cost summary — which is also what made the caching work unmeasurable.
+    cached_tok = min(tokens.get("cached", 0) or 0, prompt_tok)
+    uncached_tok = prompt_tok - cached_tok
     model_id = entry.get("model", "")
     # Strip fallback annotations like " [FALLBACK from gpt-5.4]"
     model_id = model_id.split(" ")[0] if model_id else ""
-    in_price, out_price = _price_for_model(model_id)
-    return (prompt_tok / 1_000_000 * in_price, completion_tok / 1_000_000 * out_price)
+    prices = _price_for_model(model_id)
+    in_price, out_price = prices[0], prices[1]
+    # No cached rate configured for this model → bill cached input as full input.
+    # Conservative: over-reports rather than inventing a discount.
+    cached_price = prices[2] if len(prices) > 2 else in_price
+    input_usd = (uncached_tok * in_price + cached_tok * cached_price) / 1_000_000
+    return (input_usd, completion_tok / 1_000_000 * out_price)
 
 
 def calculate(api_call_log):

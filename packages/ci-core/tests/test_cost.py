@@ -1,17 +1,18 @@
 """Tests for analysis.cost."""
 
+from ci_core.llm import cost
 from ci_core.llm.cost import calculate, _price_for_model
 
 
 class TestPriceForModel:
     def test_known_model_exact(self):
-        in_p, out_p = _price_for_model("gpt-5.4")
+        in_p, out_p = _price_for_model("gpt-5.4")[:2]
         assert in_p == 2.50
         assert out_p == 15.00
 
     def test_prefix_match(self):
         # A versioned variant like gemini-2.5-flash-0520 should match gemini-2.5-flash
-        in_p, out_p = _price_for_model("gemini-2.5-flash-0520")
+        in_p, out_p = _price_for_model("gemini-2.5-flash-0520")[:2]
         assert in_p == 0.30
 
     def test_unknown_model_returns_fallback(self):
@@ -98,3 +99,112 @@ class TestCalculate:
         result = calculate([entry])
         assert result["total_usd"] > 0
         assert result["pricing_known"] is True
+
+
+class TestCachedTokensAreBilledAtTheCachedRate:
+    """Cached input was billed at the full rate, so caching was invisible.
+
+    Grok caches automatically and xAI prices cached input at $2.00 against
+    $12.50 full — the summary was overstating the cached portion sixfold, which
+    is also why none of the prompt-caching work could be measured.
+    """
+
+    def _entry(self, **tokens):
+        return {"pass": "openai:fact_check", "model": "gpt-5.5", "tokens": tokens}
+
+    def test_cached_tokens_cost_less_than_uncached(self):
+        full = cost.calculate([self._entry(prompt=100_000, completion=0)])
+        half = cost.calculate(
+            [self._entry(prompt=100_000, cached=50_000, completion=0)]
+        )
+        assert half["total_input_usd"] < full["total_input_usd"]
+
+    def test_the_split_is_priced_exactly(self):
+        # gpt-5.5: $5.00 input, $0.50 cached. 50k uncached + 50k cached.
+        got = cost.calculate([self._entry(prompt=100_000, cached=50_000, completion=0)])
+        expected = (50_000 * 5.00 + 50_000 * 0.50) / 1_000_000
+        assert round(got["total_input_usd"], 6) == round(expected, 6)
+
+    def test_no_cached_tokens_prices_exactly_as_before(self):
+        got = cost.calculate([self._entry(prompt=100_000, completion=0)])
+        assert round(got["total_input_usd"], 6) == round(100_000 * 5.00 / 1_000_000, 6)
+
+    def test_a_model_with_no_cached_rate_bills_cached_at_full_rate(self):
+        """Conservative: over-report rather than invent a discount."""
+        entry = {
+            "pass": "x",
+            "model": "sonar-reasoning-pro",
+            "tokens": {"prompt": 10_000, "cached": 10_000, "completion": 0},
+        }
+        with_cache = cost.calculate([entry])["total_input_usd"]
+        entry_plain = {
+            "pass": "x",
+            "model": "sonar-reasoning-pro",
+            "tokens": {"prompt": 10_000, "completion": 0},
+        }
+        assert with_cache == cost.calculate([entry_plain])["total_input_usd"]
+
+    def test_cached_cannot_exceed_prompt(self):
+        """A provider reporting more cached than total must not go negative."""
+        got = cost.calculate([self._entry(prompt=1_000, cached=9_999, completion=0)])
+        assert got["total_input_usd"] > 0
+
+
+class TestOpenAIReportsCachedTokensUnderTwoNames:
+    """OpenAI names this field differently per API, and one name was missed.
+
+    Chat Completions returns `prompt_tokens_details`; the Responses API returns
+    `input_tokens_details`. The Responses API is the pipeline's primary OpenAI
+    path, so reading only the Chat Completions name reported 0 cached tokens for
+    every OpenAI call in every run — while a live check on 2026-08-15 showed the
+    cache serving ~95% of the prompt. The blind measurement was very nearly
+    taken as evidence that prompt_cache_layout did not work.
+
+    Both shapes below are real payloads captured from the live API that day.
+    """
+
+    def test_responses_api_shape(self):
+        from ci_core.llm.tokens import normalize_tokens
+
+        usage = {
+            "input_tokens": 19142,
+            "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 18176},
+            "output_tokens": 28,
+        }
+        assert normalize_tokens(usage) == {
+            "prompt": 19142,
+            "completion": 28,
+            "cached": 18176,
+        }
+
+    def test_chat_completions_shape_still_works(self):
+        from ci_core.llm.tokens import normalize_tokens
+
+        usage = {
+            "prompt_tokens": 24239,
+            "prompt_tokens_details": {"cached_tokens": 23296},
+            "completion_tokens": 16,
+        }
+        assert normalize_tokens(usage)["cached"] == 23296
+
+    def test_a_cold_call_reports_no_cached_key(self):
+        from ci_core.llm.tokens import normalize_tokens
+
+        usage = {
+            "input_tokens": 19142,
+            "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0},
+            "output_tokens": 21,
+        }
+        assert "cached" not in normalize_tokens(usage)
+
+    def test_the_cached_portion_is_billed_at_the_cached_rate(self):
+        from ci_core.llm import cost
+
+        entry = {
+            "model": "gpt-5.5",
+            "tokens": {"prompt": 19142, "cached": 18176, "completion": 28},
+        }
+        in_usd, _ = cost._entry_cost(entry)
+        # 966 uncached @ $5.00/M + 18,176 cached @ $0.50/M
+        expected = (966 * 5.00 + 18176 * 0.50) / 1_000_000
+        assert abs(in_usd - expected) < 1e-9
