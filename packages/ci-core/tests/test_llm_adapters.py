@@ -1869,3 +1869,45 @@ class TestStreamingTimeoutAcrossAdapters:
         assert timeout[1] == 222, (
             f"{module_name} ignored stream_read_timeout override — got {timeout[1]!r} (expected 222)"
         )
+
+
+class TestOpenAIWebSearchPath:
+    """The web_search path had never once worked on a gpt-5.x preset.
+
+    Verified against the live API 2026-08-12: the payload the adapter sent
+    (temperature 0.2 alongside web_search_preview) returns HTTP 400 —
+    "Unsupported parameter: 'temperature' is not supported with this model" — so
+    every call failed and silently fell through to the non-search path, buying a
+    wasted round trip and a warning line. reasoning_effort was never plumbed
+    through either, and the cited sources were dropped.
+    """
+
+    def _payload_from(self, provider_config):
+        from ci_core.llm.adapters import openai as oai
+
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(
+                _sse_responses_lines({"flags": [], "low_confidence": []})
+            )
+            oai.call("system", "user", "key", provider_config=provider_config)
+            return mock_session.post.call_args.kwargs["json"]
+
+    def test_temperature_is_not_sent_with_a_reasoning_model(self):
+        body = self._payload_from(
+            {"model": "gpt-5.5", "web_search": True, "reasoning_effort": "xhigh"}
+        )
+        assert "temperature" not in body, "gpt-5.x 400s on temperature"
+
+    def test_reasoning_effort_reaches_the_search_call(self):
+        body = self._payload_from(
+            {"model": "gpt-5.5", "web_search": True, "reasoning_effort": "xhigh"}
+        )
+        assert body["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+        assert body["tools"] == [{"type": "web_search_preview"}]
+
+    def test_a_non_reasoning_model_still_gets_temperature(self):
+        body = self._payload_from({"model": "gpt-4o", "web_search": True})
+        assert body["temperature"] == 0.2
+        assert "reasoning" not in body
