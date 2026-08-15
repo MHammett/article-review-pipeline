@@ -865,6 +865,11 @@ def run_draft_pipeline(
         sys.exit(1)
 
     run_start_ts = datetime.now(timezone.utc)
+    # archive.org pacing state is module-level and therefore process-wide. A
+    # breaker tripped by an earlier run in this process would otherwise skip
+    # every archive lookup here, reporting each citation as "rate limit tripped
+    # earlier this run" for a limit that expired before this run began.
+    wayback.reset_rate_limit_state()
     # The handoff declares the run number, so re-running without editing it
     # writes a second report with the same number — pipeline_history ended up
     # with two run_16_* files for one article, and the later one is not

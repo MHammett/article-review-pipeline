@@ -110,6 +110,9 @@ def _age_days_from_timestamp(ts):
 # result was an archive thread that had been dead for at least two runs: 49
 # resolved citations, 0 archived, ~49 rate-limited.
 #
+# (Re-probed 2026-08-15: six back-to-back lookups all returned 200. The throttle
+# is episodic, so the guard has to be always-on rather than tuned to one window.)
+#
 # Two mechanisms, because one is not enough:
 #   * a process-wide minimum interval between calls, serialised on a lock. Claim
 #     resolution runs in a thread pool, so without this the pool's width decides
@@ -117,37 +120,92 @@ def _age_days_from_timestamp(ts):
 #   * retry with backoff that honours Retry-After, and a circuit breaker: once
 #     archive.org has said 429 repeatedly, further calls in the same run are
 #     skipped rather than spending the run's time collecting more 429s.
+#
+# Every piece of state below is process-wide, and that is the whole design
+# constraint: ``check()`` is called from ``_MAX_PARALLEL`` resolver threads. Two
+# consequences that the first version of this code got wrong, both of which
+# silently disabled the protection they were meant to provide:
+#
+#   * **Per-thread backoff is not backoff.** Sleeping inside the failing thread
+#     leaves the other workers hammering archive.org at the full pace. A 429 has
+#     to move a clock every thread waits on, so the *process* slows down.
+#   * **"Consecutive" is not well defined across interleaved threads.** Resetting
+#     a shared counter on success let one worker's 200 erase four other workers'
+#     refusals, so a run being throttled 4-in-5 would never trip the breaker —
+#     precisely the case it exists for. The count is now a per-run budget that
+#     only moves up.
 _MIN_INTERVAL_SECONDS = 3.0
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE_SECONDS = 5.0
+
+#: Refused *lookups* tolerated in a run before we stop asking. Counted once per
+#: lookup, not once per attempt, so the number means what it says: the
+#: ``_MAX_ATTEMPTS`` retries inside one lookup are a single refusal. (Counting
+#: attempts made this trip after two lookups rather than five.)
 _CIRCUIT_TRIP_AFTER = 5
 
 _pace_lock = threading.Lock()
 _last_call_at = 0.0
-_consecutive_rate_limits = 0
+
+#: Absolute ``time.monotonic()`` before which no thread may call. A 429 pushes
+#: this forward, which is what makes the backoff process-wide.
+_blocked_until = 0.0
+
+#: Lookups this run that exhausted every attempt against a 429. Never reset on
+#: success — see the note above on why "consecutive" cannot work here.
+_rate_limited_lookups = 0
 
 
 def reset_rate_limit_state():
-    """Clear the pacing clock and circuit breaker. For tests and new runs."""
-    global _last_call_at, _consecutive_rate_limits
+    """Clear the pacing clock, the backoff, and the circuit breaker.
+
+    Call this at the start of every run. The state is process-wide, so without
+    a reset a breaker tripped by one run would skip every archive lookup in the
+    next run inside the same process — a silently degraded run whose citations
+    all report "skipped" for a limit that expired long ago.
+    """
+    global _last_call_at, _blocked_until, _rate_limited_lookups
     with _pace_lock:
         _last_call_at = 0.0
-        _consecutive_rate_limits = 0
+        _blocked_until = 0.0
+        _rate_limited_lookups = 0
 
 
 def rate_limited_out():
     """True once the circuit breaker has tripped for this run."""
-    return _consecutive_rate_limits >= _CIRCUIT_TRIP_AFTER
+    with _pace_lock:
+        return _rate_limited_lookups >= _CIRCUIT_TRIP_AFTER
 
 
 def _pace():
-    """Block until at least _MIN_INTERVAL_SECONDS since the last call."""
+    """Block until the shared clock allows another call.
+
+    Waits for whichever is later: ``_MIN_INTERVAL_SECONDS`` since the last call,
+    or the end of a backoff that a 429 imposed on every thread. Sleeping while
+    holding the lock is deliberate — it is exactly what makes the interval
+    process-wide instead of per-thread.
+    """
     global _last_call_at
     with _pace_lock:
-        wait = _MIN_INTERVAL_SECONDS - (time.monotonic() - _last_call_at)
-        if wait > 0:
-            time.sleep(wait)
+        now = time.monotonic()
+        target = max(_last_call_at + _MIN_INTERVAL_SECONDS, _blocked_until)
+        if target > now:
+            time.sleep(target - now)
         _last_call_at = time.monotonic()
+
+
+def _note_rate_limited(retry_after):
+    """Back every thread off after a 429, not just the one that hit it."""
+    global _blocked_until
+    with _pace_lock:
+        _blocked_until = max(_blocked_until, time.monotonic() + retry_after)
+
+
+def _note_lookup_refused():
+    """Count one lookup that never got past a 429."""
+    global _rate_limited_lookups
+    with _pace_lock:
+        _rate_limited_lookups += 1
 
 
 def _retry_after_seconds(resp, attempt):
@@ -166,9 +224,14 @@ def _get_availability(url, timeout):
 
     Raises the last exception if every attempt fails, so the caller's existing
     error handling is unchanged.
+
+    There is no local sleep between attempts: a 429 pushes the shared clock out
+    and the wait then happens in the next ``_pace()``, which every thread goes
+    through. That is the difference between the process backing off and one
+    thread backing off while seven others keep the pressure on.
     """
-    global _consecutive_rate_limits
     last_exc = None
+    rate_limited = False
     for attempt in range(_MAX_ATTEMPTS):
         _pace()
         try:
@@ -182,17 +245,18 @@ def _get_availability(url, timeout):
             last_exc = exc
             continue
         if resp.status_code == 429:
-            _consecutive_rate_limits += 1
+            rate_limited = True
             last_exc = requests.HTTPError(
                 f"429 Client Error: Too Many Requests for url: {resp.url}",
                 response=resp,
             )
-            if attempt < _MAX_ATTEMPTS - 1:
-                time.sleep(_retry_after_seconds(resp, attempt))
+            _note_rate_limited(_retry_after_seconds(resp, attempt))
             continue
         resp.raise_for_status()
-        _consecutive_rate_limits = 0
         return resp
+    # One refused lookup, however many attempts it took to establish that.
+    if rate_limited:
+        _note_lookup_refused()
     raise last_exc
 
 
@@ -244,10 +308,28 @@ def check(url, timeout=10, stale_days=None):
         }
     try:
         resp = _get_availability(url, timeout)
-        data = resp.json()
     except Exception as exc:
         log.debug("Wayback availability check failed for %s: %s", url, exc)
         return {"url": url, "archived": None, "error": str(exc)}
+
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        # A 200 that isn't JSON means archive.org served something other than an
+        # availability answer — an error or challenge page. Reporting the raw
+        # decoder message ("Expecting value: line 1 column 1") sends the reader
+        # hunting for a parser bug that isn't there; it is the same misdirection
+        # we reported upstream as akamhy/waybackpy#200, where a throttled lookup
+        # surfaces as invalid JSON. Say what actually arrived instead.
+        log.debug("Wayback availability returned non-JSON for %s: %s", url, exc)
+        return {
+            "url": url,
+            "archived": None,
+            "error": (
+                f"archive.org returned a non-JSON {resp.status_code} response "
+                f"({len(resp.content)} bytes) from the availability API"
+            ),
+        }
 
     closest = data.get("archived_snapshots", {}).get("closest", {})
     if not closest.get("available"):

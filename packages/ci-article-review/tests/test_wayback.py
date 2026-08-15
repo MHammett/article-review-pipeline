@@ -1,5 +1,8 @@
 """Tests for adapters.citation.wayback (all HTTP mocked)."""
 
+import itertools
+import threading
+import time
 from unittest.mock import patch, MagicMock
 
 import requests
@@ -298,3 +301,188 @@ class TestFallbackScoping:
     def test_every_reason_has_a_label(self):
         reasons = set(wayback._FALLBACK_STATUSES.values()) | {"timeout", "unreachable"}
         assert reasons <= set(wayback.FALLBACK_REASON_LABELS)
+
+
+def _rate_limited_response(retry_after="0"):
+    """A 429. ``Retry-After: 0`` keeps the shared clock from actually sleeping,
+    which is what makes these tests fast; the one test that cares about the
+    clock moving passes a real value."""
+    m = MagicMock()
+    m.status_code = 429
+    m.url = "https://archive.org/wayback/available"
+    m.headers = {"Retry-After": retry_after}
+    return m
+
+
+def _ok_response():
+    m = MagicMock()
+    m.status_code = 200
+    m.headers = {}
+    m.json.return_value = {"archived_snapshots": {}}
+    m.raise_for_status.return_value = None
+    return m
+
+
+class TestRateLimitGuard:
+    """The guard is process-wide state driven from a resolver thread pool.
+
+    Every test here resets that state first, because it outlives a single test
+    exactly the way it outlives a single run — which is the bug the reset in
+    ``run_draft_pipeline`` exists to prevent.
+    """
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def test_breaker_trips_when_most_lookups_are_refused(self):
+        """A success must not erase other threads' refusals.
+
+        Eight workers against an endpoint refusing four of every five: the run
+        is plainly being throttled and the breaker has to trip. Resetting a
+        shared counter on success made this run forever, because some thread
+        was always succeeding and zeroing the count.
+        """
+        import concurrent.futures
+
+        counter = itertools.count()
+        lock = threading.Lock()
+
+        def flaky_get(*args, **kwargs):
+            with lock:
+                n = next(counter)
+            return _ok_response() if n % 5 == 4 else _rate_limited_response()
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                side_effect=flaky_get,
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                list(
+                    pool.map(
+                        lambda i: wayback.check(f"https://example.com/{i}"),
+                        range(24),
+                    )
+                )
+
+        assert wayback.rate_limited_out() is True
+
+    def test_a_refused_lookup_counts_once_not_once_per_attempt(self):
+        """``_CIRCUIT_TRIP_AFTER`` counts lookups, so it must mean lookups.
+
+        Counting each retry inside a lookup tripped the breaker after two URLs
+        while the constant said five.
+        """
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_rate_limited_response(),
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+        ):
+            wayback.check("https://example.com/one")
+            assert wayback._rate_limited_lookups == 1
+            assert wayback.rate_limited_out() is False
+
+            for i in range(wayback._CIRCUIT_TRIP_AFTER - 1):
+                wayback.check(f"https://example.com/{i}")
+
+        assert wayback._rate_limited_lookups == wayback._CIRCUIT_TRIP_AFTER
+        assert wayback.rate_limited_out() is True
+
+    def test_a_429_backs_off_every_thread_not_just_the_one_that_hit_it(self):
+        """The backoff has to land on shared state, or it is not a backoff.
+
+        Sleeping inside the failing thread left the other workers calling at
+        full pace, so the process never actually slowed down.
+        """
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_rate_limited_response(retry_after="30"),
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+        ):
+            before = time.monotonic()
+            # One attempt is enough to prove the clock moved; the retries would
+            # each sleep out the 30s backoff this test is asserting exists.
+            with patch.object(wayback, "_MAX_ATTEMPTS", 1):
+                wayback.check("https://example.com/blocked")
+
+        # Retry-After: 30 pushes the shared clock into the future for everyone,
+        # not just for the thread that collected the 429.
+        assert wayback._blocked_until >= before + 30.0
+
+    def test_reset_clears_a_tripped_breaker(self):
+        """Without this, run N+1 in the same process skips every lookup."""
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_rate_limited_response(),
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+        ):
+            for i in range(wayback._CIRCUIT_TRIP_AFTER):
+                wayback.check(f"https://example.com/{i}")
+
+        assert wayback.rate_limited_out() is True
+        wayback.reset_rate_limit_state()
+        assert wayback.rate_limited_out() is False
+        assert wayback._blocked_until == 0.0
+
+    def test_a_success_still_returns_normally(self):
+        """The budget must not break the ordinary path."""
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_ok_response(),
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+        ):
+            result = wayback.check("https://example.com")
+
+        assert result["archived"] is False
+        assert wayback.rate_limited_out() is False
+
+
+class TestNonJsonAvailabilityResponse:
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def test_non_json_200_is_not_reported_as_a_parse_error(self):
+        """Say what arrived, not what the JSON decoder thought of it.
+
+        The raw decoder message sends the reader after a parser bug that isn't
+        there — the misdirection reported upstream as akamhy/waybackpy#200.
+        """
+        m = MagicMock()
+        m.status_code = 200
+        m.headers = {}
+        m.content = b"<html><body>archive.org is temporarily unavailable</body></html>"
+        m.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+        m.raise_for_status.return_value = None
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=m,
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+        ):
+            result = wayback.check("https://example.com")
+
+        assert result["archived"] is None
+        assert "non-JSON 200 response" in result["error"]
+        assert "Expecting value" not in result["error"]
