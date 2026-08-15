@@ -640,7 +640,14 @@ def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
             known_urls = cited.candidates_for(claim, source_field)
             if known_urls:
                 anchored += 1
-            own = _extract_source_url(source_field) if url_key else None
+            # ``source_url`` is a dedicated field the prompt asks for outright;
+            # ``source`` is free text a URL has to be dug out of. Prefer the
+            # explicit one and fall back to scraping, so a model that answers
+            # the new schema is not held to the old one — and one that ignores
+            # it still resolves exactly as before.
+            own = _extract_source_url(item.get("source_url", "")) or (
+                _extract_source_url(source_field) if url_key else None
+            )
             if own and own not in known_urls:
                 known_urls = known_urls + [own]
             claims.append(
