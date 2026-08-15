@@ -152,6 +152,27 @@ Every resolved citation URL is checked against the Wayback Machine, and the pipe
 
 **Availability check.** Each resolved URL is looked up via archive.org's availability API. The result records whether a snapshot exists, its timestamp, its age in days, and whether it's stale. "Stale" defaults to older than 180 days and is set by `pipeline.wayback_snapshot_stale_days` in `user.yaml`. If the cited URL is itself a `web.archive.org` link, its date is read straight from the URL and no archive-of-an-archive lookup happens.
 
+**Rate limiting, pacing, and the circuit breaker.** archive.org throttles the availability API at IP level over a long window rather than per-second, and it does not warn first. Measured 2026-08-12: 12 consecutive lookups all returned 429 — including the very first — and it was still 429 after a 45-second cooldown at one request every 6 seconds. With no pacing and no backoff, the archive thread had been effectively dead for two runs: 49 resolved citations, 0 archived, ~49 rate-limited.
+
+Three mechanisms now sit in front of it, because no one of them is sufficient:
+
+| Mechanism | Value | Why |
+|---|---|---|
+| Minimum interval between calls | `3.0s`, serialised on a process-wide lock | Resolution runs in a thread pool, so without this the *pool's width* sets the request rate, not any deliberate choice. |
+| Retry with backoff | up to `3` attempts, `5s × 2^attempt`, capped at the server's `Retry-After` (max 60s) | Prefers archive.org's own answer about when to come back over a number we invented. |
+| Circuit breaker | trips after `5` consecutive 429s | Once archive.org is refusing consistently, further calls only spend the run's time collecting more 429s. |
+
+**What a tripped breaker means for the report.** Every lookup after the trip is skipped, so those citations carry `archived: null` — *the lookup did not complete*, which is not the same as *no snapshot exists*, and nothing is submitted for archiving on the strength of a null. Because the breaker makes this the common case rather than a rare one, Section 9 states it once at the top rather than leaving the reader to infer it from a page of per-entry notices:
+
+```
+> **Archive status is unknown for 65 of these citations.** archive.org
+> rate-limited this run (HTTP 429). `archived: null` means the lookup did not
+> complete, **not** that the page is unarchived — and nothing was submitted for
+> archiving on that basis. Re-run to find out.
+```
+
+An `archived: false` entry is untouched by all of this: that is an answer, and only `null` means the run never found out.
+
 **Save Page Now submission.** After resolution finishes, any resolved citation whose URL is *not* yet archived gets submitted to archive.org's Save Page Now API. This runs as a follow-up pass at a lower concurrency than resolution itself (2 vs. 8), because each submission triggers a real page capture on archive.org's side rather than a cheap read.
 
 Submission is **fire-and-forget by design**. Captures run asynchronously and can take seconds to minutes, and the pipeline does not poll for completion — it won't block your run on someone else's crawler. The console reports it plainly:
