@@ -156,6 +156,10 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
+            # Was never passed, so enabling web_search silently threw away the
+            # preset's reasoning effort as well as 400ing on temperature. The
+            # Responses API accepts web_search_preview and reasoning together.
+            reasoning_effort=cfg.get("reasoning_effort"),
         )
         if not result.get("failed"):
             return result
@@ -212,7 +216,14 @@ def call(
 
 
 def _call_with_web_search(
-    system_prompt, user_prompt, api_key, model, retry, retry_delay, timeout=None
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry,
+    retry_delay,
+    timeout=None,
+    reasoning_effort=None,
 ):
     """Call via the OpenAI Responses API with the web_search_preview tool.
 
@@ -234,9 +245,19 @@ def _call_with_web_search(
         "instructions": system_prompt,
         "input": user_prompt,
         "tools": [{"type": "web_search_preview"}],
-        "temperature": 0.2,
         "stream": True,
     }
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+    else:
+        # Only on non-reasoning models. gpt-5.x rejects temperature outright
+        # ("Unsupported parameter: 'temperature' is not supported with this
+        # model", HTTP 400), and sending it unconditionally is why this path
+        # had never once succeeded on a gpt-5.x preset: every call 400'd and
+        # fell through to the non-search path, logging a warning and buying a
+        # wasted round trip. Observed again live on 2026-08-15 with
+        # `web_search: [fact_check]` enabled against gpt-5.5.
+        payload["temperature"] = 0.2
 
     session = requests.Session()
     t0 = time.monotonic()
