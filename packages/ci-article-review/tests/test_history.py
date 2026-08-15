@@ -311,6 +311,48 @@ class TestPlaceholderTitlesGetNoDirectory:
         assert hist._slug("a.b.c") == "untitled"
 
 
+class TestLookupsDoNotCreateDirectories:
+    """Reading history must not write to it.
+
+    ``find_prior_report_path`` resolved its directory through ``_run_dir``,
+    which creates. Every run asks for a delta baseline through that path, so
+    every first run of an article created its directory before anything decided
+    to write one — and any run whose title was short or a placeholder created
+    ``untitled/``. Deleting the strays did not stop them: an empty ``untitled/``
+    reappeared in real history days after the last cleanup, from a lookup alone.
+    """
+
+    def test_prior_report_lookup_creates_nothing(self, tmp_path):
+        assert hist.find_prior_report_path(str(tmp_path), TITLE) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_placeholder_title_lookup_creates_no_untitled_dir(self, tmp_path):
+        """The exact shape that put an empty untitled/ in pipeline_history."""
+        assert hist.find_prior_report_path(str(tmp_path), "t") is None
+        assert not (tmp_path / "untitled").exists()
+
+    def test_run_number_lookup_creates_nothing(self, tmp_path):
+        assert hist.existing_run_numbers(str(tmp_path), TITLE) == set()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_repeated_lookups_stay_clean(self, tmp_path):
+        for title in (TITLE, "t", "title", "Another Article Entirely"):
+            hist.find_prior_report_path(str(tmp_path), title)
+            hist.existing_run_numbers(str(tmp_path), title)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_saving_still_creates_the_directory(self, tmp_path):
+        """The writer keeps creating — only the read path stopped."""
+        _save(tmp_path, 1, _ts(1))
+        assert (tmp_path / hist._slug(TITLE)).is_dir()
+
+    def test_lookup_still_finds_a_directory_that_exists(self, tmp_path):
+        """Not creating must not mean not finding."""
+        _save(tmp_path, 1, _ts(1))
+        assert hist.find_prior_report_path(str(tmp_path), TITLE) is not None
+        assert hist.existing_run_numbers(str(tmp_path), TITLE) == {1}
+
+
 class TestRunNumberCollision:
     """The handoff declares the run number and authors forget to bump it."""
 

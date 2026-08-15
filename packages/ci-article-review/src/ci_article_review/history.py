@@ -64,10 +64,30 @@ def _slug(title):
 
 
 def _run_dir(history_root, article_title):
+    """Path of an article's history directory, creating it. Writers only.
+
+    Readers must use ``_existing_run_dir``: this creates on the way past, and a
+    lookup that creates is how empty directories appear in ``pipeline_history/``
+    without a run ever having written one.
+    """
     slug = _slug(article_title)
     path = Path(history_root) / slug
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _existing_run_dir(history_root, article_title):
+    """Path of an article's history directory, or None. Never creates it.
+
+    ``find_prior_report_path`` used ``_run_dir``, so asking for the delta
+    baseline *created* the directory it was about to search. Every run does that
+    lookup, so every first run of an article made its directory before anything
+    decided to write one — and any run whose title was short or a placeholder
+    made ``untitled/``. That is where the empty ``t/`` came from, and where an
+    empty ``untitled/`` appeared again after the last cleanup.
+    """
+    path = Path(history_root) / _slug(article_title)
+    return path if path.is_dir() else None
 
 
 def save_run(
@@ -171,9 +191,11 @@ def find_prior_report_path(history_root, article_title, before_ts=None):
     preceded it, reporting large edits where nothing had been edited.
     """
     try:
-        d = _run_dir(history_root, article_title)
+        d = _existing_run_dir(history_root, article_title)
     except OSError as e:
         log.warning(f"Cannot read history directory: {e}")
+        return None
+    if d is None:
         return None
 
     candidates = []
@@ -209,14 +231,6 @@ def load_prior_report(history_root, article_title, before_ts=None):
         return None, None
 
 
-def append_disposition(history_root, article_title, entry):
-    d = _run_dir(history_root, article_title)
-    disp_path = d / "disposition.log"
-    with open(disp_path, "a", encoding="utf-8") as f:
-        timestamp = datetime.now(timezone.utc).isoformat()
-        f.write(f"\n[{timestamp}] {entry}\n")
-
-
 def existing_run_numbers(history_root, article_title):
     """Run numbers already on disk for ``article_title``.
 
@@ -227,8 +241,8 @@ def existing_run_numbers(history_root, article_title):
     directory cannot be read — a numbering nicety must never fail a run.
     """
     try:
-        run_dir = Path(history_root) / _slug(article_title)
-        if not run_dir.is_dir():
+        run_dir = _existing_run_dir(history_root, article_title)
+        if run_dir is None:
             return set()
         numbers = set()
         for path in run_dir.glob("run_*_report.json"):
