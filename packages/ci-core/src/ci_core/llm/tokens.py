@@ -91,9 +91,16 @@ def normalize_tokens(usage):
     if "cached" in usage:
         cached = _first_int(usage, ("cached",))
     else:
-        details = usage.get("prompt_tokens_details")
-        if isinstance(details, dict):
-            cached += _first_int(details, ("cached_tokens",))
+        # OpenAI reports this under two different names. Chat Completions uses
+        # `prompt_tokens_details`; the Responses API uses `input_tokens_details`
+        # — and the Responses API is the pipeline's primary OpenAI path, so
+        # reading only the Chat Completions name reported 0 cached tokens for
+        # every OpenAI call in every run while the cache was in fact serving
+        # ~95% of the prompt. Measured against the live API 2026-08-15.
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(key)
+            if isinstance(details, dict):
+                cached += _first_int(details, ("cached_tokens",))
         cached += _first_int(usage, ("cache_read_input_tokens",))
         cached += _first_int(usage, ("cachedContentTokenCount",))
 
