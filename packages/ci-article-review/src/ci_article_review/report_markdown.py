@@ -65,11 +65,56 @@ def _render_section_1(consensus_flags):
     return lines
 
 
+#: Buckets that state a verdict about a claim, and so are expected to carry
+#: evidence for it. ``unverifiable`` and ``primary_source_needed`` are excluded
+#: deliberately: both are the model declining to reach a verdict, which is the
+#: honest answer when it has nothing to quote, and counting them as missing
+#: evidence would penalise exactly the behaviour the prompt asks for.
+_VERDICT_BUCKETS = ("confirmed", "outdated", "contradicted")
+
+
+def _render_evidence_coverage(fact_check):
+    """A line saying how many verdicts arrived with checkable evidence.
+
+    Section 9 exists because "a model asserts this" and "a document was read"
+    are different things. The same gap opens one section earlier: a `confirmed`
+    verdict is a model's judgment, and until the prompt asked for a verbatim
+    quote and a direct URL there was nothing in the output to tell a reader
+    whether it rested on anything they could open. In the 2026-08-12 run 85
+    claims came back confirmed and 50 carried no URL at all.
+
+    Counted rather than enforced. A model that ignores the field still produces
+    a usable report — it just produces a visibly weaker one, which is the
+    information a reader needs.
+    """
+    items = [i for b in _VERDICT_BUCKETS for i in (fact_check.get(b) or [])]
+    if not items:
+        return []
+    quoted = sum(1 for i in items if (i.get("supporting_quote") or "").strip())
+    linked = sum(1 for i in items if (i.get("source_url") or "").strip())
+    lines = [
+        f"**{quoted} of {len(items)} verdict(s) arrived with a verbatim "
+        f"supporting quote; {linked} with a direct source URL.**",
+        "",
+    ]
+    if quoted < len(items) or linked < len(items):
+        lines += [
+            "A verdict missing either one is the model's assertion rather than "
+            "something you can open and check. It is not necessarily wrong — but "
+            "it has not been shown to be right, and Section 9 will not be able "
+            "to confirm it against a document either.",
+            "",
+        ]
+    return lines
+
+
 def _render_section_2(fact_check):
     lines = ["## SECTION 2: Factual Verification", ""]
     if not fact_check:
         lines.append("_No fact-check results._")
         return lines
+
+    lines.extend(_render_evidence_coverage(fact_check))
 
     labels = {
         "confirmed": "Confirmed",
