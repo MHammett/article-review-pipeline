@@ -403,6 +403,33 @@ def _render_prompt(template: str, **kwargs) -> str:
     return template
 
 
+#: Constant system prompt used by the cache-friendly layout. It has to be
+#: identical for every domain — that is the whole point — so it carries no task
+#: content and only points at where the task now lives.
+_CACHE_LAYOUT_SYSTEM = (
+    "You are a meticulous editorial reviewer. The article and its context come "
+    "first; your specific review task is stated at the end of this message. "
+    "Follow that task exactly and return only the JSON it specifies."
+)
+
+
+def _cache_friendly_layout(system: str, user: str) -> tuple[str, str]:
+    """Move the domain instruction after the draft so the prefix is shareable.
+
+    Returns ``(system, user)`` with the per-domain text relocated to the end of
+    ``user``. The model still receives the entire domain prompt — only its
+    position changes — and putting the task after a long document is a normal
+    long-context arrangement rather than an exotic one.
+
+    The shared prefix is ``_CACHE_LAYOUT_SYSTEM`` plus the article, which is
+    byte-identical across all five domains of a run.
+    """
+    return (
+        _CACHE_LAYOUT_SYSTEM,
+        f"{user}\n\n{'=' * 60}\nYOUR REVIEW TASK\n{'=' * 60}\n{system}",
+    )
+
+
 def _web_search_enabled(setting, domain: str) -> bool:
     """Resolve a model's ``web_search`` setting for one domain.
 
@@ -721,6 +748,20 @@ def _run_domain(
         pre_draft_analysis=handoff.get("pre_draft_analysis", ""),
     )
     user = _build_user_prompt(draft, handoff)
+
+    # Prompt-cache layout. Providers cache on an exact leading prefix, and the
+    # per-domain system prompt sits ahead of the draft, so five calls that share
+    # a 33k-token article share no prefix at all and every one is billed in full.
+    # Measured on the Responses API 2026-08-12: current layout 0 cached tokens on
+    # every call; with the domain text moved after the draft, calls 2+ cached
+    # 1792/2368 (76%). Grok already does this for us — it cached 2496/2531 on a
+    # second identical-prefix call with no changes.
+    #
+    # Off by default: it relocates the domain instruction from before the article
+    # to after it, and this pipeline's output is the product.
+    if pipeline_cfg.get("prompt_cache_layout", False):
+        system, user = _cache_friendly_layout(system, user)
+
     api_key = api_keys.get(model_name, {}).get("api_key", "")
 
     # Live web search is a per-model flag in the adapters, but only one domain

@@ -31,9 +31,22 @@ Stub seam
 ---------
 Model calls are stubbed at ``_run_domain`` rather than at the six provider
 adapters. That is deliberate: ``_run_domain`` is the pipeline's own boundary, so
-the test keeps working when adapters are refactored (exactly the PR #43 scenario)
-while still exercising prompt assembly, the parallel dispatch, timeout wiring,
-result re-keying, the API call log, consolidation, citations, cost and the save.
+the test keeps working when adapters are refactored (exactly the PR #43
+scenario) while still exercising the parallel dispatch, timeout wiring, result
+re-keying, the API call log, consolidation, citations, cost and the save.
+
+What this file cannot see
+-------------------------
+Everything *inside* ``_run_domain`` — prompt template loading, ``_render_prompt``,
+``_build_user_prompt``, the response-schema attachment, the ``web_search``
+domain gate and ``prompt_cache_layout``. The stub replaces the function, so none
+of that code runs here.
+
+That matters because the failure mode is silent and convincing: change how
+prompts are assembled, run this file, get a clean golden diff, and conclude the
+change was safe. The diff was empty because the code never executed. This bit
+prompt_cache_layout in particular — see ``test_prompt_cache_layout.py``, which
+covers the part of that setting a stubbed run cannot.
 """
 
 import json
