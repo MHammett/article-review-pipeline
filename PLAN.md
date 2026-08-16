@@ -7,11 +7,27 @@ The organising principle: **litellm supersedes about a third of what was written
 today.** Anything that touches the provider adapter layer is held until the
 migration decision resolves. Anything above or beside that layer lands now.
 
-> **Status, 2026-08-16.** Sections 0a, 0c and all six PRs in section 1 have
-> landed. **0b is the only "fix first" item still open.** Section 3's migration
-> has been *built* (unmerged, unpushed), which reframes section 5's first
-> decision from "adopt?" to "merge?". Per-item status is marked inline below in
-> the same `~~struck~~ **Done (PR #n).**` style section 5 already used.
+> **Status, 2026-08-16 (second update).** Sections 0a, 0c and all six PRs in
+> section 1 have landed, and **section 3's migration is merged** (#103), which
+> closes section 5's first decision entirely. **0b is the only "fix first" item
+> still open.** Per-item status is marked inline below in the same
+> `~~struck~~ **Done (PR #n).**` style section 5 already used.
+>
+> Two bugs found while landing #103, both merged: `ci-review` could finish its
+> work and never exit ([#104](https://github.com/MHammett/content-intelligence/pull/104)
+> — an abandoned call held the interpreter open through `concurrent.futures`'
+> atexit join; processes were found alive two days on), and any *partial*
+> `pipeline:` block discarded every default
+> ([#105](https://github.com/MHammett/content-intelligence/pull/105) —
+> `task_timeout_seconds` became `None`, a `TypeError` before the first call).
+>
+> **Correction to a finding reported during #103:** `openai:completeness`
+> hitting a 285s wall-clock backstop was written up as gpt-5.5 `xhigh` needing a
+> `timeouts.yaml` calibration. It does not. That run's config set
+> `task_timeout_seconds: 300`, clamping every budget to 285; `user.example.yaml`
+> ships **1100**, which gives that cell **819s** against 231–283s observed and
+> the 456s already measured under `--no-timeout`. No calibration is needed — the
+> harness was wrong, not the table.
 >
 > This file was written on a branch (`fix/grounding-coverage-and-run-quality`,
 > PR #81, closed) and lived only there for four days while six sessions worked
@@ -238,12 +254,26 @@ expire in ~30 days, and resolving them is our problem either way.
 
 ## 3. The litellm migration
 
-> **Phase 1 is built, 2026-08-14 — unmerged and unpushed.** See the note under
-> section 5 decision 1 for what it found and what still blocks merging it.
-> Two deliberate departures from the phase list below: `cost.py` was kept (it
-> reads `pricing.yaml`, which we were told not to replace) and
-> `model_registry.py` was kept (it tracks model supersession, litellm has no
-> equivalent, and `ci-discover` and `ci-style-profile` both consume it).
+> **Phase 1 landed 2026-08-16 as [#103](https://github.com/MHammett/content-intelligence/pull/103)**
+> (merge `2162f4d`), net −1,843 lines. The six adapters and `streaming.py` are
+> gone; `ci_core/llm/client.py` replaces them.
+>
+> **Three deliberate departures from the phase list below**, each for a reason
+> that was measured rather than assumed. `cost.py` was kept (it reads
+> `pricing.yaml`, which we were told not to replace). `model_registry.py` was
+> kept (it tracks model supersession, litellm has no equivalent, and
+> `ci-discover` and `ci-style-profile` both consume it). And `tokens.py` was
+> deleted, then **restored**: the premise for removing it was that litellm
+> normalises usage, and it does not — a `responses()` call returns
+> `input_tokens` / `input_tokens_details` with `prompt_tokens_details` absent
+> entirely, so the inline reader reported **zero cached tokens for every OpenAI
+> call**. That is the same blindness `8b0a9d5` had just fixed, and it is why
+> phases like this need a real run and not only a green suite.
+>
+> Phases 2 and 3 are done as part of #103 (timeouts ported and re-verified; the
+> preserved fields re-checked against the live pipeline, including a 30-call
+> `maximum` run). **Phase 4 — the small swaps, `instructor` / `rapidfuzz` /
+> `language-tool-python` — has not been started.**
 
 Spiked against 1.96.2 on 2026-08-12. **Verdict: migrate.** Everything the
 pipeline depends on survives: Perplexity `citations`/`search_results`, Gemini
@@ -323,16 +353,27 @@ around its output. 239 lines is not where the pain is.
    keepalive producing 500s on ~10% of calls at exactly this pipeline's 1–3s
    spacing.
 
-   So the open question is not "adopt?" but **"merge the finished migration?"**,
-   and the honest blockers on that are:
+   **Answered 2026-08-16: merged as #103.** Every blocker listed here cleared:
 
-   - It has **never been pushed** — invisible on GitHub, and its base is
-     `f163764`, now ~30 commits behind master and widening.
-   - The **OpenAI path is unverified**, because both orgs have been credit-dead
-     since 2026-08-14 and that path is the one hard constraint measured above
-     (`responses()`, not `completion()`).
+   - It was pushed, rebased onto master, and merged.
+   - The **OpenAI path is verified live** — credit was restored, and a `maximum`
+     run put 11k–24k output tokens at `xhigh` through `responses()` across four
+     domains.
+   - Rebasing it exposed the risk that made the delay expensive: master had
+     fixed **four things in the very layer the branch deletes** (`8b0a9d5`,
+     `cef2232`, `0d6b2cc`, `4aab95a`), and a rebase resolves modify/delete in
+     the deletion's favour *without showing what the modification was*. All four
+     were ported deliberately, using master's own tests as the spec. Two of them
+     were fixes for bugs the branch still had. The lesson is in
+     `CLAUDE.md`-shaped terms: push a branch that deletes a hot file the day it
+     is written.
    - Per the note in section 2, only the adapter-wiring half of
-     `fix/credit-exhaustion-detection` actually depends on this answer.
+     `fix/credit-exhaustion-detection` depended on this answer. **The adapters
+     no longer exist**, so that branch now needs a disposition rather than a
+     hold — its useful half (terminal-vs-transient classification) already ships
+     in the shim as `_is_terminal_quota_error`, applied to every retryable
+     status because a dead account arrives as a 429 directly and as a
+     synthesised 503 mid-stream.
 2. **Prompt-cache layout** — built, defaulted off. **Still open, blocked.** It
    moves the domain instruction from before the article to after it (76% of
    input cached on calls 2+, ~$0.56–1.01/run).
@@ -360,9 +401,23 @@ around its output. 239 lines is not where the pain is.
      such setting yet. Recover them from that PR's branch history and land them
      alongside the feature so it does not ship undocumented.
 
-   Blocked on OpenAI credits regardless: the entire measured effect is on
-   OpenAI's prefix, and the account has returned `credit_balance_exhausted`
-   since 2026-08-11.
+   **Unblocked 2026-08-16 — both blockers cleared, and it is now the highest-value
+   item left.** OpenAI credit is restored (verified by a live `maximum` run), and
+   the instrument that made the earlier A/B untrustworthy is fixed: #103 reads
+   cached tokens off the Responses API's `input_tokens_details`, which is where
+   OpenAI actually reports them. Before that, every OpenAI call reported zero
+   cached tokens — so the previous null result was measuring a blind instrument,
+   not an ineffective optimisation. A live run now reports real cache hits
+   (8,320 tokens on a small draft) and prices them at the cached rate.
+
+   Two cautions carried forward: the golden report still cannot verify this (it
+   stubs `_run_domain`, which is where the layout is applied), and the existing
+   `arm_c` / `arm_e` logs predate #94 so they carry elapsed times and no
+   cached-token accounting — a rehearsal of the method, not the measurement.
+
+   What has *not* changed is who decides. This alters prompt structure on a
+   pipeline whose output is the product, so it still wants a golden-report diff
+   and Mike's judgment rather than an agent's.
 3. ~~**Delete the junk history directories?**~~ **Done, 2026-08-14.** `t/` and
    `title/` are gone. The Jun 8 report was refiled into the article's own
    directory as `run_1_20260608_075204_report.json`. It turned out to be the
