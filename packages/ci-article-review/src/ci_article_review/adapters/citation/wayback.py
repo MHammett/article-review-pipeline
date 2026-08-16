@@ -408,9 +408,21 @@ def submit(url, timeout=30, access_key=None, secret_key=None):
 
 
 def format_summary(wb):
-    """One-line human-readable summary of a wayback result."""
+    """One-line human-readable summary of a wayback result.
+
+    The ``archived is None`` branch is the one that matters. It means the lookup
+    never completed — the circuit breaker tripped, or the request failed — which
+    is NOT the same as "there is no snapshot". The old wording ("Wayback check
+    failed: ...") led with the exception and left a reader to infer the rest;
+    since the breaker makes a null the common case rather than a rare one, it
+    now says outright that it implies nothing about the page.
+    """
     if wb.get("archived") is None:
-        return f"Wayback check failed: {wb.get('error', 'unknown error')}"
+        return (
+            f"NOT CHECKED — the archive.org lookup did not complete "
+            f"({wb.get('error', 'unknown error')}). This says nothing about "
+            f"whether the page is archived."
+        )
     if not wb.get("archived"):
         return "Not archived in Wayback Machine"
     age = wb.get("snapshot_age_days")

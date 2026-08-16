@@ -64,6 +64,12 @@ def _wayback_fallback(url, timeout):
     """
     wb = wayback_check(url, timeout=timeout)
     snapshot_url = wb.get("snapshot_url")
+    # Covers both False ("no snapshot exists") and None ("the lookup never
+    # completed") on purpose: with no snapshot URL there is nothing to fetch
+    # either way. The link's own rendering is what has to keep them apart — see
+    # the `archive not checked` branch in pipeline's link summary — because a
+    # link unrecoverable due to the circuit breaker is not the same finding as
+    # one with genuinely no archive.
     if not wb.get("archived") or not snapshot_url:
         return None
     try:
