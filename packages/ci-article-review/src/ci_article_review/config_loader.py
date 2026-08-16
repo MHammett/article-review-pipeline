@@ -308,18 +308,32 @@ def _apply_preset_overrides(pipeline_cfg, models_raw):
     return merged
 
 
+#: Pipeline defaults, applied key by key rather than as a whole-block fallback.
+#:
+#: These used to be the second argument to ``user_config.get("pipeline", ...)``,
+#: which only applies when the key is absent entirely. Any *partial* block
+#: therefore discarded all of them: ``pipeline: {cost_preset: maximum}`` — an
+#: entirely reasonable thing to write — left ``task_timeout_seconds`` as ``None``,
+#: which is a ``TypeError`` inside ``timeout_model.compute_timeout``, and
+#: ``retry_on_failure`` as ``None``, silently disabling retries.
+#:
+#: ``task_timeout_seconds`` is 180 here to preserve the previous no-config
+#: behaviour. Note that ``user.example.yaml`` ships **1100**, and anyone starting
+#: from ``ci-setup`` gets that; this value only governs a config that omits the
+#: key, where failing fast is the safer default.
+PIPELINE_DEFAULTS = {
+    "parallel_review_calls": True,
+    "retry_on_failure": True,
+    "retry_delay_seconds": 10,
+    "abort_if_all_provider_calls_fail": False,
+    "task_timeout_seconds": 180,
+    "thoroughness": "standard",
+}
+
+
 def merge_configs(user_config, pub_config):
-    pipeline = user_config.get(
-        "pipeline",
-        {
-            "parallel_review_calls": True,
-            "retry_on_failure": True,
-            "retry_delay_seconds": 10,
-            "abort_if_all_provider_calls_fail": False,
-            "task_timeout_seconds": 180,
-            "thoroughness": "standard",
-        },
-    )
+    # Per-key, so a partial block keeps the defaults it did not mention.
+    pipeline = {**PIPELINE_DEFAULTS, **(user_config.get("pipeline") or {})}
     models_raw = user_config.get("models", {})
 
     # Apply cost_preset when present — overrides model variants, reasoning flags,
