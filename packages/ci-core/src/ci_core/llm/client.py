@@ -148,6 +148,27 @@ _RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 _SENDS_TEMPERATURE = frozenset({"gemini", "mistral", "grok", "perplexity"})
 _TEMPERATURE = 0.2
 
+# Providers that accept `response_format: {"type": "json_object"}`, i.e. the
+# provider itself guarantees parseable JSON rather than the prompt merely asking
+# for it. Restored after an audit on 2026-08-16 found the migration had dropped
+# it — grok in every preset it runs, mistral in the three that give it no
+# reasoning effort. The prompt was the only thing asking, and json_utils was
+# quietly absorbing the difference.
+#
+# The absentees are absent for a reason, each checked rather than assumed:
+# OpenAI's Responses API has no such parameter at all (the old adapter only sent
+# it on the Azure Chat Completions path), Perplexity does not support it,
+# and Anthropic has no equivalent.
+_JSON_OBJECT_PROVIDERS = frozenset({"grok", "mistral"})
+
+# ...except that Mistral's adapter treated response_format as incompatible with
+# reasoning mode and sent one or the other, never both. A live check on
+# 2026-08-16 found the combination now succeeds, so that may no longer hold —
+# but "one call worked" is not enough to widen a constraint someone put here
+# after presumably watching it fail, and the reasoning presets are the expensive
+# ones to be wrong about. Restored as it was; revisit with evidence.
+_JSON_OBJECT_EXCLUDES_REASONING = frozenset({"mistral"})
+
 
 # ---------------------------------------------------------------------------
 # Provider table
@@ -419,6 +440,17 @@ def _provider_params(provider, cfg):
                 params["allowed_openai_params"] = ["reasoning_effort"]
         if provider == "mistral":
             params["max_tokens"] = int(cfg.get("max_tokens", 8000))
+
+        # Ask the provider to guarantee JSON where it can. Restores what the
+        # adapters sent before the litellm migration dropped it (see
+        # _JSON_OBJECT_PROVIDERS): grok unconditionally, mistral only when it is
+        # not reasoning. Without this the only thing asking for JSON is the
+        # prompt, and json_utils has to clean up after a model that fenced its
+        # answer or wrapped it in prose.
+        if provider in _JSON_OBJECT_PROVIDERS and not (
+            provider in _JSON_OBJECT_EXCLUDES_REASONING and effort
+        ):
+            params["response_format"] = {"type": "json_object"}
 
     # Perplexity search controls, when an operator sets them.
     for key in ("search_mode", "search_recency_filter", "search_domain_filter"):

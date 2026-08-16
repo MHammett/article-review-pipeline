@@ -1268,3 +1268,73 @@ class TestFirstByteEndsOnRealOutput:
 
     def test_a_per_model_override_beats_the_provider_default(self):
         assert client._gap_timeout({"stream_gap_timeout": 15}, "openai") == 15
+
+
+class TestStructuredOutput:
+    """`response_format: json_object` makes the provider guarantee JSON.
+
+    The migration dropped it. Nothing went red, because json_utils quietly
+    absorbed the difference — a fenced or prose-wrapped answer still parsed, and
+    a genuinely malformed one looked like the model's fault. The only signal was
+    that the parameter had stopped being sent, which no test was watching.
+    """
+
+    def _sent(self, provider, cfg=None):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call(provider, provider_config=cfg or {})
+        return seen.get("response_format")
+
+    _JSON = {"type": "json_object"}
+
+    def test_grok_always_asks_for_json(self):
+        """The old adapter put it in the base payload, unconditionally."""
+        assert self._sent("grok") == self._JSON
+        assert self._sent("grok", {"reasoning_effort": "high"}) == self._JSON
+
+    def test_mistral_asks_for_json_only_when_not_reasoning(self):
+        """Mirrors the adapter exactly: one or the other, never both."""
+        assert self._sent("mistral") == self._JSON
+        assert self._sent("mistral", {"reasoning_effort": "high"}) is None
+
+    @pytest.mark.parametrize("provider", ["perplexity", "gemini", "claude"])
+    def test_providers_that_cannot_take_it_are_not_sent_it(self, provider):
+        """Each checked individually rather than generalised from grok — a first
+        pass at this audit claimed five of six providers had lost the parameter,
+        and only one had."""
+        assert self._sent(provider) is None
+
+    def test_openai_is_not_sent_it_either(self):
+        """The Responses API has no response_format; the old adapter only sent
+        one on the Azure Chat Completions path, which this shim does not use."""
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _responses_stream()
+
+        with patch.object(client.litellm, "responses", side_effect=_capture):
+            _call("openai")
+
+        assert "response_format" not in seen
+
+    def test_salvage_still_backs_it_up(self):
+        """A provider guarantee is not a ceiling guarantee. A response cut off
+        at the output limit is still truncated JSON, so json_utils stays in the
+        path rather than being retired on the strength of this."""
+        cut_off = '{"flags": [{"passage": "one"}, {"pass'
+        with patch.object(
+            client.litellm,
+            "completion",
+            return_value=_completion_stream(cut_off, finish_reason="length"),
+        ):
+            result = _call("grok")
+
+        assert result["failed"] is False
+        assert result["truncated"] is True
+        assert result["data"] == {"flags": [{"passage": "one"}]}
