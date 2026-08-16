@@ -95,6 +95,7 @@ import httpx
 import litellm
 
 from .. import redact
+from . import schema as schema_mod
 from .json_utils import extract_json_with_salvage
 from .tokens import normalize_tokens
 
@@ -388,7 +389,7 @@ def _qualified(provider, model):
     return f"{prefix}{model}"
 
 
-def _provider_params(provider, cfg):
+def _provider_params(provider, cfg, response_schema=None):
     """Per-provider request parameters drawn from the model config.
 
     Only parameters the presets actually set are mapped. Anything unrecognised
@@ -441,14 +442,14 @@ def _provider_params(provider, cfg):
         if provider == "mistral":
             params["max_tokens"] = int(cfg.get("max_tokens", 8000))
 
-        # Ask the provider to guarantee JSON where it can. Restores what the
-        # adapters sent before the litellm migration dropped it (see
-        # _JSON_OBJECT_PROVIDERS): grok unconditionally, mistral only when it is
-        # not reasoning. Without this the only thing asking for JSON is the
-        # prompt, and json_utils has to clean up after a model that fenced its
-        # answer or wrapped it in prose.
-        if provider in _JSON_OBJECT_PROVIDERS and not (
-            provider in _JSON_OBJECT_EXCLUDES_REASONING and effort
+        # Ask the provider to guarantee JSON where it can. A schema, when the
+        # caller supplied one, is strictly better and is applied below for every
+        # provider; this is the fallback for a call with no schema, restoring
+        # what the adapters sent before the migration dropped it.
+        if (
+            not response_schema
+            and provider in _JSON_OBJECT_PROVIDERS
+            and not (provider in _JSON_OBJECT_EXCLUDES_REASONING and effort)
         ):
             params["response_format"] = {"type": "json_object"}
 
@@ -456,6 +457,19 @@ def _provider_params(provider, cfg):
     for key in ("search_mode", "search_recency_filter", "search_domain_filter"):
         if provider == "perplexity" and cfg.get(key) is not None:
             params[key] = cfg[key]
+
+    # A schema, where the provider enforces one. Gemini is excluded while
+    # grounded — the provider 400s on that combination, and its search matters
+    # more here than the shape guarantee does.
+    if response_schema:
+        params.update(
+            schema_mod.as_request_params(
+                provider,
+                response_schema["name"],
+                response_schema["schema"],
+                grounded=bool(params.get("tools")),
+            )
+        )
 
     return params
 
@@ -851,10 +865,11 @@ def _attempt(
     retry,
     retry_delay,
     with_reasoning=True,
+    response_schema=None,
 ):
     """One model call, start to finish, as a result dict. Never raises."""
     spec = _PROVIDERS[provider]
-    params = _provider_params(provider, cfg) if with_reasoning else {}
+    params = _provider_params(provider, cfg, response_schema) if with_reasoning else {}
     label = f"{provider} {model}"
     # Two budgets, two jobs: the socket read timeout is the first-byte
     # allowance, and the gap is the liveness detector applied after the stream
@@ -891,6 +906,17 @@ def _attempt(
             # search), so by the time it arrives it is a plain bool.
             if (cfg or {}).get("web_search"):
                 kwargs["tools"] = [{"type": "web_search_preview"}]
+
+            # The schema goes on as `text.format` here rather than through
+            # params, because this surface takes none of the completion() shape.
+            if with_reasoning and response_schema:
+                kwargs.update(
+                    schema_mod.as_request_params(
+                        "openai",
+                        response_schema["name"],
+                        response_schema["schema"],
+                    )
+                )
 
             return _consume_responses_stream(
                 litellm.responses(**kwargs), first_byte, gap
@@ -1026,6 +1052,7 @@ def call(
     retry_delay=10,
     model=None,
     provider_config=None,
+    response_schema=None,
 ):
     """Call ``provider`` and return the shared result dict.
 
@@ -1057,6 +1084,7 @@ def call(
             timeout,
             retry,
             retry_delay,
+            response_schema=response_schema,
         )
 
         # A model that rejects the reasoning parameter is a misconfiguration, not
@@ -1087,6 +1115,7 @@ def call(
                 retry,
                 retry_delay,
                 with_reasoning=False,
+                response_schema=response_schema,
             )
             result["misconfiguration_warning"] = msg
 
