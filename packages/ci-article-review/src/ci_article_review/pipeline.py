@@ -1818,9 +1818,21 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         print(f"\nWARNING: {report['baseline_warning']}")
 
     if report.get("model_failures"):
-        print(
-            f"\nWARNING: These model passes failed: {', '.join(report['model_failures'])}"
-        )
+        print(f"\nWARNING: {len(report['model_failures'])} model pass(es) failed:")
+        details = report.get("model_failure_details") or []
+        if details:
+            for detail in details:
+                elapsed = detail.get("elapsed_seconds")
+                after = (
+                    f" after {elapsed:.0f}s"
+                    if isinstance(elapsed, (int, float))
+                    else ""
+                )
+                print(f"  - {detail['pass']} failed{after}: {detail['error']}")
+                if detail.get("section"):
+                    print(f"    {detail['section']} is short one model.")
+        else:
+            print(f"  {', '.join(report['model_failures'])}")
 
     # Knock-on effects of those failures. Printed adjacent to the failure list
     # because the two are only useful together: "perplexity:fact_check failed"

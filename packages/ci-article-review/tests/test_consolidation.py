@@ -250,6 +250,59 @@ class TestBuildReport:
         assert "gemini:fact_check" in report["model_failures"]
         assert "openai:voice_style" in report["model_failures"]
 
+    def test_failure_details_carry_the_reason_and_the_affected_section(self):
+        """The bare pass name says a model died but not why, and not which
+        section is consequently short a vote."""
+        results = {
+            ("gemini", "fact_check"): {
+                "failed": True,
+                "error": "Response ended prematurely",
+                "model": "gemini-2.5-pro",
+                "elapsed_seconds": 413.23,
+                "tokens": {},
+            },
+            ("openai", "voice_style"): _ok({"flags": [], "low_confidence": []}),
+            ("mistral", "argument_integrity"): _ok({"flags": [], "low_confidence": []}),
+            ("openai", "completeness"): _ok({"flags": [], "low_confidence": []}),
+            ("mistral", "red_team"): _ok({}),
+        }
+        report = build_report(
+            article_title="Test",
+            publication_name="pub",
+            run_number=1,
+            corrected_draft="draft",
+            lt_result={"change_log": [], "flagged_matches": [], "failed": False},
+            results=results,
+            ensemble_cfg={},
+            api_call_log=[],
+        )
+        (detail,) = report["model_failure_details"]
+        assert detail["pass"] == "gemini:fact_check"
+        assert detail["model"] == "gemini-2.5-pro"
+        assert detail["error"] == "Response ended prematurely"
+        assert detail["elapsed_seconds"] == 413.23
+        assert detail["section"] == "SECTION 2: Factual Verification"
+
+    def test_a_skipped_pass_is_not_a_failure(self):
+        results = {
+            ("gemini", "fact_check"): {"failed": True, "skipped": True, "tokens": {}},
+            ("openai", "voice_style"): _ok({"flags": [], "low_confidence": []}),
+            ("mistral", "argument_integrity"): _ok({"flags": [], "low_confidence": []}),
+            ("openai", "completeness"): _ok({"flags": [], "low_confidence": []}),
+            ("mistral", "red_team"): _ok({}),
+        }
+        report = build_report(
+            article_title="Test",
+            publication_name="pub",
+            run_number=1,
+            corrected_draft="draft",
+            lt_result={"change_log": [], "flagged_matches": [], "failed": False},
+            results=results,
+            ensemble_cfg={},
+            api_call_log=[],
+        )
+        assert report["model_failure_details"] == []
+
     def test_lt_failure_flagged(self):
         results = {
             k: _failed()

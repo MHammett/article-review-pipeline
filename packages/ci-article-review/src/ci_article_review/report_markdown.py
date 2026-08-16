@@ -145,8 +145,66 @@ def _render_evidence_coverage(fact_check):
     return lines
 
 
-def _render_section_2(fact_check):
+def _render_model_failures(report):
+    """The failed passes, why they failed, and which section is short a model.
+
+    "WARNING — failed model passes: openai:fact_check" was the whole of it.
+    That says a pass died, but not that it died with "Response ended
+    prematurely" after 413 seconds, and not that Section 2 was consequently
+    built from four models instead of five. The second is the part that changes
+    how the rest of the report should be read: consensus counts are votes, and
+    a missing voter moves the threshold without moving the number printed
+    beside it.
+    """
+    failures = report.get("model_failures") or []
+    if not failures:
+        return []
+
+    details = report.get("model_failure_details") or []
+    lines = [f"## ⚠ Failed model passes ({len(failures)})", ""]
+    if not details:
+        # A report written before the details existed. Say what is known.
+        lines.append(f"Failed: {', '.join(failures)}")
+        lines.append("")
+        return lines
+
+    for detail in details:
+        elapsed = detail.get("elapsed_seconds")
+        after = f" after {elapsed:.0f}s" if isinstance(elapsed, (int, float)) else ""
+        lines.append(
+            f"- **{detail.get('pass')}** ({detail.get('model')}) failed{after}: "
+            f"{detail.get('error')}"
+        )
+        section = detail.get("section")
+        if section:
+            lines.append(
+                f"  - {section} was built without this model. Its consensus "
+                f"counts are out of a smaller pool than the run intended."
+            )
+    lines.append("")
+    return lines
+
+
+def _missing_models_note(report, domain):
+    """One line naming the models that failed on ``domain``, or []."""
+    missing = [
+        d.get("model") or d.get("pass")
+        for d in (report.get("model_failure_details") or [])
+        if d.get("domain") == domain
+    ]
+    if not missing:
+        return []
+    return [
+        f"> **Built without {', '.join(missing)}** — that pass failed this run "
+        f"(see *Failed model passes* above). Anything only that model would have "
+        f"caught is missing here, not absent from the draft.",
+        "",
+    ]
+
+
+def _render_section_2(fact_check, report=None):
     lines = ["## SECTION 2: Factual Verification", ""]
+    lines.extend(_missing_models_note(report or {}, "fact_check"))
     if not fact_check:
         lines.append("_No fact-check results._")
         return lines
@@ -185,8 +243,9 @@ def _render_section_2(fact_check):
     return lines
 
 
-def _render_flags_section(title, flags, passage_key="passage"):
+def _render_flags_section(title, flags, passage_key="passage", note=()):
     lines = [f"## {title}", ""]
+    lines.extend(note)
     if not flags:
         lines.append("_No flags._")
         return lines
@@ -206,8 +265,9 @@ def _render_red_team_entry(label, item):
     return lines
 
 
-def _render_section_6(red_team):
+def _render_section_6(red_team, note=()):
     lines = ["## SECTION 6: Red Team Findings", ""]
+    lines.extend(note)
     if not red_team:
         lines.append("_No red team results._")
         return lines
@@ -847,11 +907,7 @@ def render_report_markdown(report):
         lines.append(f"LanguageTool corrections applied: {len(corrections)}")
     lines.append("")
 
-    if report.get("model_failures"):
-        lines.append(
-            f"WARNING — failed model passes: {', '.join(report['model_failures'])}"
-        )
-        lines.append("")
+    lines.extend(_render_model_failures(report))
 
     if report.get("truncated_results"):
         lines.append(
@@ -882,15 +938,19 @@ def render_report_markdown(report):
     lines.append("")
 
     lines.extend(_render_section_1(report.get("section_1_consensus", [])))
-    lines.extend(_render_section_2(report.get("section_2_fact_check", {})))
+    lines.extend(_render_section_2(report.get("section_2_fact_check", {}), report))
     lines.extend(
         _render_flags_section(
-            "SECTION 3: Voice and AI-Speak", report.get("section_3_voice", [])
+            "SECTION 3: Voice and AI-Speak",
+            report.get("section_3_voice", []),
+            note=_missing_models_note(report, "voice_style"),
         )
     )
     lines.extend(
         _render_flags_section(
-            "SECTION 4: Argument Integrity", report.get("section_4_argument", [])
+            "SECTION 4: Argument Integrity",
+            report.get("section_4_argument", []),
+            note=_missing_models_note(report, "argument_integrity"),
         )
     )
     lines.extend(
@@ -898,9 +958,15 @@ def render_report_markdown(report):
             "SECTION 5: Completeness and Framing",
             report.get("section_5_completeness", []),
             passage_key="passage_reference",
+            note=_missing_models_note(report, "completeness"),
         )
     )
-    lines.extend(_render_section_6(report.get("section_6_red_team", {})))
+    lines.extend(
+        _render_section_6(
+            report.get("section_6_red_team", {}),
+            note=_missing_models_note(report, "red_team"),
+        )
+    )
     lines.extend(_render_section_7(report.get("section_7_low_confidence", [])))
     lines.extend(_render_section_8(report.get("section_8_additional", [])))
     lines.extend(_render_section_9(report.get("section_9_citations", [])))

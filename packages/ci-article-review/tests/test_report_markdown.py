@@ -4,6 +4,7 @@ import re
 
 from ci_article_review import report_markdown
 from ci_article_review.adapters.citation import wayback
+from ci_article_review.consolidation import _DOMAIN_SECTIONS
 from ci_article_review.report_markdown import render_report_markdown
 
 
@@ -30,6 +31,102 @@ def _base_report(**overrides):
     }
     report.update(overrides)
     return report
+
+
+class TestFailedModelPassesAreExplained:
+    """A failed pass has to say what happened and what it cost the report.
+
+    The whole of it used to be "WARNING — failed model passes:
+    openai:fact_check". That names the casualty but not the cause ("Response
+    ended prematurely" after 413s) and not the consequence — Section 2 built
+    from four models instead of five, with consensus counts read against a
+    threshold the run no longer met the same way.
+    """
+
+    def _report(self, **overrides):
+        return _base_report(
+            model_failures=["openai:fact_check"],
+            model_failure_details=[
+                {
+                    "pass": "openai:fact_check",
+                    "model": "gpt-5.5",
+                    "domain": "fact_check",
+                    "section": "SECTION 2: Factual Verification",
+                    "error": "Response ended prematurely",
+                    "elapsed_seconds": 413.23,
+                }
+            ],
+            **overrides,
+        )
+
+    def test_the_reason_is_reported(self):
+        md = render_report_markdown(self._report())
+        assert "Response ended prematurely" in md
+
+    def test_the_model_and_elapsed_time_are_reported(self):
+        md = render_report_markdown(self._report())
+        assert "gpt-5.5" in md
+        assert "413s" in md
+
+    def test_the_affected_section_is_named(self):
+        md = render_report_markdown(self._report())
+        assert "SECTION 2: Factual Verification was built without this model" in md
+
+    def test_the_affected_section_carries_its_own_note(self):
+        """Reading Section 2 should not require having read the header."""
+        md = render_report_markdown(self._report())
+        section = md.split("## SECTION 2")[1].split("## SECTION 3")[0]
+        assert "Built without gpt-5.5" in section
+
+    def test_an_unaffected_section_is_not_annotated(self):
+        md = render_report_markdown(self._report())
+        section = md.split("## SECTION 3")[1].split("## SECTION 4")[0]
+        assert "Built without" not in section
+
+    def test_each_domain_gets_its_own_note(self):
+        report = _base_report(
+            model_failures=["grok:red_team"],
+            model_failure_details=[
+                {
+                    "pass": "grok:red_team",
+                    "model": "grok-4",
+                    "domain": "red_team",
+                    "section": "SECTION 6: Red Team Findings",
+                    "error": "timeout",
+                    "elapsed_seconds": 900,
+                }
+            ],
+        )
+        md = render_report_markdown(report)
+        section = md.split("## SECTION 6")[1]
+        assert "Built without grok-4" in section
+
+    def test_every_named_section_exists_in_the_rendered_report(self):
+        """Drift guard.
+
+        The section names live in consolidation but are the renderer's own
+        headings. Telling a reader "SECTION 6: Red Team was built without this
+        model" when the heading says "SECTION 6: Red Team Findings" sends them
+        looking for something that is not there.
+        """
+        md = render_report_markdown(_base_report())
+        for domain, section in _DOMAIN_SECTIONS.items():
+            assert f"## {section}" in md, (
+                f"_DOMAIN_SECTIONS[{domain!r}] names {section!r}, which the "
+                f"report does not render as a heading."
+            )
+
+    def test_a_clean_run_says_nothing(self):
+        md = render_report_markdown(_base_report())
+        assert "Failed model passes" not in md
+        assert "Built without" not in md
+
+    def test_a_report_predating_the_details_still_renders(self):
+        """Old reports on disk are re-rendered by history; they have the
+        bare list and no details."""
+        md = render_report_markdown(_base_report(model_failures=["openai:fact_check"]))
+        assert "openai:fact_check" in md
+        assert "Failed model passes" in md
 
 
 class TestHeader:
