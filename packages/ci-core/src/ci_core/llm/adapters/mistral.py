@@ -43,7 +43,10 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 # real headroom against the model's 128K+ context window.
 DEFAULT_MAX_TOKENS = 64000
 
-# Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
+# Default FIRST-BYTE allowance (seconds) — how long to wait for the stream to
+# start, not the gap between chunks once it has (that is stream_gap_timeout,
+# a tight constant handled in ci_core/llm/streaming.py) and not the
+# sliding-scale wall-clock budget.
 _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 
 # Fallback chain tried in order when primary model returns a capacity error (503).
@@ -99,9 +102,11 @@ def call(
 ):
     cfg = provider_config or {}
     provider = cfg.get("provider", "mistral")
-    # Streaming socket timeout = inter-token read-gap (small constant). The big
+    # Socket timeout = FIRST-BYTE allowance (how long the stream may take to
+    # start); the inter-chunk stall detector is separate and tight (`gap`). The
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
+    gap = streaming.gap_timeout(cfg)
 
     if provider == "azure":
         return _call_azure(
@@ -112,6 +117,7 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
+            gap=gap,
         )
 
     # --- La Plateforme path with fallback chain ---
@@ -134,6 +140,7 @@ def call(
             reasoning_effort=reasoning_effort,
             max_tokens=max_tokens,
             timeout=timeout,
+            gap=gap,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -172,6 +179,7 @@ def _call_laplateforme(
     reasoning_effort=None,
     max_tokens=None,
     timeout=None,
+    gap=None,
 ):
     return _execute_request(
         system_prompt,
@@ -184,6 +192,7 @@ def _call_laplateforme(
         reasoning_effort=reasoning_effort,
         max_tokens=max_tokens,
         timeout=timeout,
+        gap=gap,
     )
 
 
@@ -193,7 +202,14 @@ def _call_laplateforme(
 
 
 def _call_azure(
-    system_prompt, user_prompt, api_key, cfg, retry=True, retry_delay=10, timeout=None
+    system_prompt,
+    user_prompt,
+    api_key,
+    cfg,
+    retry=True,
+    retry_delay=10,
+    timeout=None,
+    gap=None,
 ):
     endpoint = cfg.get("endpoint", "").rstrip("/")
     model_name = cfg.get("model", DEFAULT_MODEL)
@@ -223,6 +239,7 @@ def _call_azure(
         retry_delay=retry_delay,
         max_tokens=cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
         timeout=timeout,
+        gap=gap,
     )
     result["provider"] = "azure"
     return result
@@ -244,9 +261,12 @@ def _execute_request(
     reasoning_effort=None,
     max_tokens=None,
     timeout=None,
+    gap=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -289,7 +309,9 @@ def _execute_request(
                 url, headers=headers, json=pl, stream=True, timeout=timeout
             )
         resp.raise_for_status()
-        return streaming.accumulate_chat_completions(resp)
+        return streaming.accumulate_chat_completions(
+            resp, first_byte=timeout[1], gap=gap
+        )
 
     try:
         assembled = _post(_build_payload(True))

@@ -125,6 +125,84 @@ class TestSection2FactCheck:
         assert "County records show 1992." in md
 
 
+class TestSection2EvidenceCoverage:
+    """A `confirmed` verdict is a model's judgment. Until the prompt asked for a
+    verbatim quote and a direct URL, nothing in the output told a reader whether
+    it rested on anything openable — 85 confirmed claims in the 2026-08-12 run,
+    50 with no URL at all.
+    """
+
+    def _fc(self, *items):
+        return {"confirmed": list(items)}
+
+    def test_full_evidence_is_reported_without_a_caveat(self):
+        md = render_report_markdown(
+            _base_report(
+                section_2_fact_check=self._fc(
+                    {
+                        "claim": "a",
+                        "supporting_quote": "the page says a",
+                        "source_url": "https://example.gov/a",
+                    }
+                )
+            )
+        )
+        assert "1 of 1 verdict(s) arrived with a verbatim supporting quote" in md
+        assert "1 with a direct source URL" in md
+        assert "the model's assertion rather than" not in md
+
+    def test_missing_evidence_is_counted_and_explained(self):
+        md = render_report_markdown(
+            _base_report(
+                section_2_fact_check=self._fc(
+                    {
+                        "claim": "a",
+                        "supporting_quote": "q",
+                        "source_url": "https://example.gov/a",
+                    },
+                    {"claim": "b", "source": "Some Publisher"},
+                    {"claim": "c"},
+                )
+            )
+        )
+        assert "1 of 3 verdict(s) arrived with a verbatim supporting quote" in md
+        assert "1 with a direct source URL" in md
+        assert "the model's assertion rather than" in md
+
+    def test_whitespace_only_evidence_does_not_count(self):
+        md = render_report_markdown(
+            _base_report(
+                section_2_fact_check=self._fc(
+                    {"claim": "a", "supporting_quote": "   ", "source_url": "  "}
+                )
+            )
+        )
+        assert "0 of 1 verdict(s) arrived with a verbatim supporting quote" in md
+
+    def test_declining_to_reach_a_verdict_is_not_counted_as_missing_evidence(self):
+        """unverifiable and primary_source_needed are the honest answer when the
+        model has nothing to quote. Counting them here would penalise exactly
+        the behaviour the prompt asks for."""
+        report = _base_report(
+            section_2_fact_check={
+                "unverifiable": [{"claim": "a", "reason": "paywalled"}],
+                "primary_source_needed": [{"claim": "b", "best_candidate_source": "x"}],
+            }
+        )
+        md = render_report_markdown(report)
+        assert "verdict(s) arrived with" not in md
+
+    def test_the_quote_reaches_the_reader(self):
+        md = render_report_markdown(
+            _base_report(
+                section_2_fact_check=self._fc(
+                    {"claim": "a", "supporting_quote": "Illinois generated 53%."}
+                )
+            )
+        )
+        assert "Illinois generated 53%." in md
+
+
 class TestSection3Voice:
     def test_flag_rendered_with_rewrite(self):
         report = _base_report(
@@ -656,6 +734,62 @@ class TestSection9Citations:
         ]
         positions = [section.index(f"### {h}") for h in heads]
         assert positions == sorted(positions), dict(zip(heads, positions))
+
+    def test_wholesale_archive_lookup_failure_is_stated_once(self):
+        """Per-entry "NOT CHECKED" is invisible in aggregate: a reader skimming
+        a page of them concludes nothing is archived. The circuit breaker makes
+        this the common case — once archive.org 429s enough, the run stops
+        asking and every remaining citation carries a null."""
+        citations = [
+            {
+                "claim": f"c{i}",
+                "resolved": True,
+                "verification": "checksum",
+                "url": f"https://example.gov/{i}",
+                "wayback": {"archived": None, "rate_limited": True},
+            }
+            for i in range(3)
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+
+        assert "Archive status is unknown for 3 of these citations" in md
+        assert "rate-limited this run (HTTP 429)" in md
+        assert "**not** that the page is unarchived" in md
+
+    def test_partial_archive_failure_reports_the_rate_limited_share(self):
+        citations = [
+            {
+                "claim": "a",
+                "resolved": True,
+                "verification": "checksum",
+                "url": "https://example.gov/a",
+                "wayback": {"archived": None, "rate_limited": True},
+            },
+            {
+                "claim": "b",
+                "resolved": True,
+                "verification": "checksum",
+                "url": "https://example.gov/b",
+                "wayback": {"archived": None},
+            },
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        assert "unknown for 2 of these citations" in md
+        assert "1 of them to archive.org rate limiting" in md
+
+    def test_a_known_unarchived_page_is_not_called_unknown(self):
+        """archived:False is an answer. Only null is "we did not find out"."""
+        citations = [
+            {
+                "claim": "a",
+                "resolved": True,
+                "verification": "checksum",
+                "url": "https://example.gov/a",
+                "wayback": {"archived": False},
+            }
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        assert "Archive status is unknown" not in md
 
     def test_no_confirmed_reconciliation_when_the_bucket_is_absent(self):
         """Reports whose fact-check pass produced no confirmed bucket must not

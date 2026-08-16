@@ -75,6 +75,7 @@ from ci_core.llm import cost as cost_analysis
 from .analysis.webpage import build_handoff_from_url
 from .adapters.citation import draft_citations
 from .adapters.citation import wayback
+from . import ensemble_capture
 
 log = logging.getLogger("pipeline")
 
@@ -538,6 +539,53 @@ def _is_duplicate_claim(key: frozenset, seen_keys: list) -> bool:
     return False
 
 
+def _record_fact_check_degradation(report: dict, results: dict) -> None:
+    """Record that a failed fact-check pass left Sections 2 and 9 incomplete.
+
+    A failed pass in one place quietly degrades another, and nothing in the
+    output used to connect the two: the run summary said
+    "perplexity:fact_check FAILED" in one place and "9 verified" in another,
+    and the drop read as an unexplained regression rather than a known
+    consequence.
+
+    **The mechanism this describes is not the one it originally described.**
+    Until citations resolved against the draft's own sources, a failed
+    fact-check pass cost Section 9 its *grounded-search URLs* — that pass was
+    their only supplier, and losing it took citation resolution from 48% to 22%
+    in the 2026-08-12 run. Grounded URLs are gone; claims are now anchored to
+    the draft's citation block, which no model pass supplies. What a failure
+    costs now is the *claims themselves*: every claim only that pass would have
+    raised is missing from the fact-check results and therefore from citation
+    resolution too. Narrower in effect, wider in scope — it degrades Section 2
+    as well, which the old warning never said.
+    """
+    failed = sorted(
+        f"{model}:{domain}"
+        for (model, domain), r in results.items()
+        if domain == "fact_check" and r.get("failed") and not r.get("skipped")
+    )
+    if not failed:
+        return
+    total = sum(1 for (_model, domain) in results if domain == "fact_check")
+    detail = (
+        f"Sections 2 and 9 are working from an incomplete claim list: "
+        f"{len(failed)} of {total} fact-check pass(es) failed "
+        f"({', '.join(failed)}). Any claim only those passes would have raised "
+        f"is missing from the fact-check results, and so was never put through "
+        f"citation resolution either. Counts in both sections are lower than a "
+        f"clean run would produce — re-run once the provider recovers before "
+        f"treating them as final."
+    )
+    log.warning("Citations: %s", detail)
+    report.setdefault("degradations", []).append(
+        {
+            "section": "SECTION 2: Factual Verification, SECTION 9: Citations",
+            "caused_by": failed,
+            "detail": detail,
+        }
+    )
+
+
 def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
     """Build the Pass 3 claim list from consolidated fact-check output.
 
@@ -593,7 +641,14 @@ def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
             known_urls = cited.candidates_for(claim, source_field)
             if known_urls:
                 anchored += 1
-            own = _extract_source_url(source_field) if url_key else None
+            # ``source_url`` is a dedicated field the prompt asks for outright;
+            # ``source`` is free text a URL has to be dug out of. Prefer the
+            # explicit one and fall back to scraping, so a model that answers
+            # the new schema is not held to the old one — and one that ignores
+            # it still resolves exactly as before.
+            own = _extract_source_url(item.get("source_url", "")) or (
+                _extract_source_url(source_field) if url_key else None
+            )
             if own and own not in known_urls:
                 known_urls = known_urls + [own]
             claims.append(
@@ -796,6 +851,8 @@ def run_draft_pipeline(
     only_domain=None,
     handoff=None,
     seo_suggestions=None,
+    replay_results=None,
+    offline=False,
 ):
     """Run the full draft review pipeline.
 
@@ -956,7 +1013,12 @@ def run_draft_pipeline(
         pre_analysis["readability"]["reading_level"],
     )
 
-    link_check_enabled = pipeline_cfg.get("link_validation", True)
+    # --offline suppresses every pass that reaches the network, so the parts of
+    # the pipeline that only transform data the run already has can be exercised
+    # with no connection and no spend.
+    link_check_enabled = pipeline_cfg.get("link_validation", True) and not offline
+    if offline:
+        log.info("Offline: skipping link validation, Wayback and citation resolution")
     if link_check_enabled:
         from .analysis import links as links_analysis
 
@@ -1172,7 +1234,15 @@ def run_draft_pipeline(
 
     raw_results: dict[str, dict] = {}
 
-    if pipeline_cfg.get("parallel_review_calls", True):
+    if replay_results:
+        # Replay: hand back a previously captured ensemble instead of paying for
+        # it again. The capture is keyed exactly like raw_results, so everything
+        # downstream — re-keying, the call log, consolidation, citations, the
+        # report — runs unchanged and unaware.
+        raw_results = ensemble_capture.load(replay_results)
+        log.info("Pass 2: REPLAY — %s", ensemble_capture.describe(replay_results))
+        log.info("No model calls made; this run costs nothing.")
+    elif pipeline_cfg.get("parallel_review_calls", True):
         # Resolve per-model timeouts. Per-model config key: timeout_seconds.
         # Falls back to the pipeline-level task_timeout_seconds for any model
         # that doesn't set its own. The global ceiling is the maximum of all
@@ -1274,6 +1344,10 @@ def run_draft_pipeline(
                     "_model": name.split(":")[0],
                     "_domain": name.split(":", 1)[1] if ":" in name else name,
                 }
+
+    # Hold the raw ensemble output for capture. Written next to the report once
+    # the save path is known, so a later run can replay this one for free.
+    captured_raw_results = dict(raw_results)
 
     # Re-key results as {(model_name, domain): result}
     results: dict[tuple[str, str], dict] = {}
@@ -1475,7 +1549,18 @@ def run_draft_pipeline(
     from .adapters.citation.resolver import resolve_citations
 
     fact_check = report.get("section_2_fact_check") or {}
+    _record_fact_check_degradation(report, results)
     claims = _collect_citation_claims(fact_check, corrected_draft)
+    if offline:
+        # Claim collection above still runs — it is pure parsing over the draft
+        # and the fact-check section, and it is the part that changes. Only the
+        # network resolution below is skipped.
+        log.info(
+            "Offline: %d claim(s) collected, resolution skipped "
+            "(Section 9 will be empty)",
+            len(claims),
+        )
+        claims = []
     if claims:
         citation_results = resolve_citations(
             claims,
@@ -1548,8 +1633,25 @@ def run_draft_pipeline(
     # and can be rendered by _print_draft_summary.
     report["model_currency"] = currency
 
+    # Mark a replayed run. Its cost figures are the captured run's, carried in
+    # the api_call_log — real when they were incurred, but not spent again here.
+    # Without this the report reads as though every replay cost money, and any
+    # tool summing history would count one run's spend as many.
+    if replay_results:
+        report["replayed_from"] = str(replay_results)
+
+    # A replay is a code test, not a review of the article. Writing it into the
+    # article's own history would give the next real run a replay as its delta
+    # baseline, and would count toward the distinct-article totals in
+    # ci-voice-patterns. It goes to a sibling tree instead: still exercises the
+    # whole save path, still readable, invisible to anything scanning
+    # pipeline_history/ for real runs (that scan looks for reports one level
+    # down, and finds only the nested _replay/<slug>/ directory).
+    history_root = (
+        str(Path(HISTORY_ROOT) / "_replay") if replay_results else HISTORY_ROOT
+    )
     paths = hist.save_run(
-        HISTORY_ROOT,
+        history_root,
         _history_key(handoff),
         run_number,
         report,
@@ -1560,6 +1662,23 @@ def run_draft_pipeline(
         log.info(f"Report saved: {paths['report_path']}")
     if paths.get("markdown_path"):
         log.info(f"Readable review: {paths['markdown_path']}")
+
+    # Capture the raw ensemble beside the report so this run can be replayed.
+    # Skipped on a replay: re-writing a capture from a capture adds nothing and
+    # would quietly make a copy look like a fresh measurement.
+    if paths["report_path"] and not replay_results and captured_raw_results:
+        cap_path = ensemble_capture.save(
+            ensemble_capture.capture_path_for(paths["report_path"]),
+            captured_raw_results,
+            article_title=article_title,
+            run_number=run_number,
+        )
+        if cap_path:
+            log.info(f"Ensemble captured: {cap_path}")
+            log.info(
+                f"  Replay it free with:  ci-review --replay {cap_path} "
+                f"--draft <handoff> --publication {publication_name} --offline"
+            )
 
     elapsed_total = round(time.monotonic() - t_start, 1)
     _print_draft_summary(
@@ -1992,7 +2111,14 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
 
     # Cost summary
     cost = report.get("cost_summary")
-    if cost:
+    if cost and report.get("replayed_from"):
+        # Say plainly that this number was not spent here. A replay carries the
+        # captured run's token counts, so the figure is real history, not a bill.
+        print(
+            f"\nCost: $0.0000 — replayed from a capture, no model calls made."
+            f"\n  (the capture's own run cost ${cost['total_usd']:.4f})"
+        )
+    elif cost:
         known_flag = (
             ""
             if cost["pricing_known"]
@@ -2114,9 +2240,14 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             )
             print("!" * 60)
 
-    print(
-        f"\nFull report: {HISTORY_ROOT}/{hist._slug(report.get('article_title', ''))}/"
-    )
+    # Derive the directory from the file actually written rather than re-slugging
+    # the title. A handoff with a `History key:` saves under that key, so
+    # re-slugging the title printed a path that does not exist.
+    if markdown_path:
+        report_dir = Path(markdown_path).parent
+    else:
+        report_dir = Path(HISTORY_ROOT) / hist._slug(report.get("article_title", ""))
+    print(f"\nFull report: {report_dir}")
     if markdown_path:
         print(f"Readable review (paste into chat): {markdown_path}")
         _print_next_step(markdown_path)
@@ -2379,6 +2510,20 @@ def build_parser():
         "argument_integrity, red_team)",
     )
     parser.add_argument(
+        "--replay",
+        metavar="RESULTS_JSON",
+        help="Replay a captured ensemble instead of calling any models. Every run "
+        "writes a run_N_<ts>_results.json beside its report; point at one to "
+        "re-run consolidation, citations and reporting over it for free.",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip every pass that reaches the network (link validation, Wayback, "
+        "citation resolution). Combine with --replay for a run that makes no "
+        "network calls at all.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable DEBUG logging"
     )
     return parser
@@ -2435,6 +2580,8 @@ def main():
                 only_model=args.only_model,
                 only_domain=args.only_domain,
                 seo_suggestions=False if args.no_seo_suggestions else None,
+                replay_results=args.replay,
+                offline=args.offline,
             )
         elif args.url:
             handoff = build_handoff_from_url(args.url)
@@ -2447,6 +2594,8 @@ def main():
                 only_model=args.only_model,
                 only_domain=args.only_domain,
                 seo_suggestions=False if args.no_seo_suggestions else None,
+                replay_results=args.replay,
+                offline=args.offline,
                 handoff=handoff,
             )
         elif args.raw_draft:
@@ -2469,6 +2618,8 @@ def main():
                 only_model=args.only_model,
                 only_domain=args.only_domain,
                 seo_suggestions=False if args.no_seo_suggestions else None,
+                replay_results=args.replay,
+                offline=args.offline,
                 handoff=handoff,
             )
         elif args.publish:

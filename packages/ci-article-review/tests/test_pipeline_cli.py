@@ -566,3 +566,44 @@ class TestSeoSuggestionConsoleOutput:
         assert "No meta description in handoff SEO METADATA section" not in out
         assert "Template C" in out
         assert "no mistral API key configured" in out
+
+
+class TestReportedDirectoryMatchesWhatWasWritten:
+    """The summary must name the directory the run actually saved into.
+
+    It rebuilt the path by re-slugging the article title while the save uses the
+    history key, so a handoff with a `History key:` line printed a directory that
+    does not exist. Every existing test used a handoff without one, where the two
+    derivations agree and the bug is invisible — this one pins the case where
+    they diverge.
+    """
+
+    _REPORT = {
+        "article_title": "Data Centers Don't Have an Environmental Record. Twelve.",
+        "run_number": 16,
+        "generated": "2026-08-15T00:00:00+00:00",
+        "section_1_consensus": [],
+        "section_2_fact_check": {},
+        "section_3_voice": [],
+        "section_4_argument": [],
+        "section_5_completeness": [],
+        "section_6_red_team": {},
+        "section_7_low_confidence": [],
+        "lt_corrections_applied": [],
+    }
+
+    def _run(self, markdown_path, capsys):
+        from ci_article_review.pipeline import _print_draft_summary
+
+        _print_draft_summary(dict(self._REPORT), {}, markdown_path=markdown_path)
+        return capsys.readouterr().out
+
+    def test_history_key_directory_is_reported_not_the_title_slug(self, capsys):
+        out = self._run("pipeline_history/dc-environment/run_16_x_review.md", capsys)
+        assert "dc-environment" in out
+        assert "data-centers-dont-have" not in out
+
+    def test_falls_back_to_the_title_slug_when_nothing_was_written(self, capsys):
+        """No markdown path (e.g. the save failed) still prints a useful guess."""
+        out = self._run(None, capsys)
+        assert "data-centers-dont-have" in out

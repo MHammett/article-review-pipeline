@@ -376,3 +376,71 @@ class TestClaimDeduplicationByMeaning:
 
     def test_an_empty_claim_never_matches_anything(self):
         assert pipeline._is_duplicate_claim(frozenset(), [frozenset()]) is False
+
+
+class TestFactCheckFailureIsReportedAsADegradation:
+    """A failed fact-check pass silently degrades Sections 2 and 9 — say so.
+
+    The original warning covered grounded-search URLs and was removed with them
+    when citations moved to the draft's own sources. Removing it left
+    ``report["degradations"]`` with a consumer and no producer: the run summary
+    printed a list nothing ever filled, so the knock-on effect went unreported
+    entirely. These guard the replacement.
+    """
+
+    def _results(self, perplexity_failed, **extra):
+        results = {
+            ("gemini", "fact_check"): {"failed": False, "data": {}},
+            ("perplexity", "fact_check"): (
+                {"failed": True, "error": "429 Too Many Requests"}
+                if perplexity_failed
+                else {"failed": False, "data": {}}
+            ),
+        }
+        results.update(extra)
+        return results
+
+    def test_a_clean_run_records_nothing(self):
+        report = {}
+        pipeline._record_fact_check_degradation(report, self._results(False))
+        assert "degradations" not in report
+
+    def test_a_failed_pass_is_recorded_with_its_cause(self):
+        report = {}
+        pipeline._record_fact_check_degradation(report, self._results(True))
+        (entry,) = report["degradations"]
+        assert entry["caused_by"] == ["perplexity:fact_check"]
+        assert "1 of 2 fact-check pass(es) failed" in entry["detail"]
+
+    def test_both_affected_sections_are_named(self):
+        """The old warning named Section 9 only. Losing a pass costs Section 2
+        the same claims, which is where a reader meets them first."""
+        report = {}
+        pipeline._record_fact_check_degradation(report, self._results(True))
+        (entry,) = report["degradations"]
+        assert "SECTION 2" in entry["section"]
+        assert "SECTION 9" in entry["section"]
+
+    def test_a_skipped_pass_is_not_a_failure(self):
+        """Skipped means never asked for — nothing was lost."""
+        report = {}
+        results = self._results(False)
+        results[("grok", "fact_check")] = {"failed": True, "skipped": True}
+        pipeline._record_fact_check_degradation(report, results)
+        assert "degradations" not in report
+
+    def test_only_fact_check_failures_count(self):
+        """Other domains do not contribute citation claims."""
+        report = {}
+        results = self._results(False)
+        results[("openai", "voice_style")] = {"failed": True}
+        pipeline._record_fact_check_degradation(report, results)
+        assert "degradations" not in report
+
+    def test_the_entry_reaches_the_console_summary_shape(self):
+        """_print_draft_summary reads entry["detail"]; a producer that omitted
+        it would print nothing and fail silently, which is the bug this whole
+        class exists because of."""
+        report = {}
+        pipeline._record_fact_check_degradation(report, self._results(True))
+        assert report["degradations"][0]["detail"]

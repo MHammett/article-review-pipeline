@@ -7,10 +7,15 @@ ANCHOR = 62000  # calibration doc size (the 1.0 size bucket)
 
 
 class TestComputeTimeout:
-    def test_gpt55_xhigh_matches_calibration_target(self):
-        # gpt-5.5 xhigh: base 60 × model 1.3 × effort 10.5 × variance 1.25 ≈ 1024s.
+    def test_gpt55_xhigh_is_clamped_by_the_task_ceiling(self):
+        # gpt-5.5 xhigh: base 60 × model 1.3 × effort 10.5 × variance 2.5 ≈ 2047s,
+        # which the task ceiling cuts to CEILING - 15. This cell is the reason the
+        # variance_margin note in timeouts.yaml warns that raising the margin does
+        # nothing here: it was already at the clamp at 1.25 (≈1024s vs a 1085s clamp
+        # under the shipped 1100s task_timeout_seconds), and it is further past it
+        # now. Raising task_timeout_seconds is the only knob that moves this cell.
         t = tm.compute_timeout(ANCHOR, "gpt-5.5", "xhigh", CEILING)
-        assert 980 <= t <= 1070, t
+        assert t == CEILING - 15, t
 
     def test_variance_margin_applied(self):
         # The configured variance_margin must scale the result above the bare
@@ -19,10 +24,14 @@ class TestComputeTimeout:
 
         cfg = copy.deepcopy(tm._CONFIG)
         cfg["variance_margin"] = 1.0
-        bare = tm.compute_timeout(ANCHOR, "gpt-5.5", "xhigh", CEILING, config=cfg)
-        withmargin = tm.compute_timeout(ANCHOR, "gpt-5.5", "xhigh", CEILING)
+        # gpt-5.4 high rather than gpt-5.5 xhigh: the latter clamps at the task
+        # ceiling once the margin is applied, which would hide the ratio being
+        # tested here (see test_gpt55_xhigh_is_clamped_by_the_task_ceiling).
+        bare = tm.compute_timeout(ANCHOR, "gpt-5.4", "high", CEILING, config=cfg)
+        withmargin = tm.compute_timeout(ANCHOR, "gpt-5.4", "high", CEILING)
         assert withmargin > bare
         assert round(withmargin / bare, 2) == tm._CONFIG["variance_margin"]
+        assert withmargin < CEILING - 15, "cell must not clamp, or the ratio is moot"
 
     def test_effort_is_steep(self):
         # Same model: high should be several times none (calibration showed ~5x).
@@ -110,7 +119,8 @@ class TestComputeAll:
     def test_computes_when_unset(self):
         cfgs = {"openai": {"model": "gpt-5.5", "reasoning_effort": "xhigh"}}
         out = tm.compute_all(ANCHOR, cfgs, CEILING)
-        assert 980 <= out["openai"] <= 1070
+        # Clamped by the task ceiling — see test_gpt55_xhigh_is_clamped_by_the_task_ceiling.
+        assert out["openai"] == CEILING - 15
 
     def test_skips_disabled_models(self):
         cfgs = {

@@ -961,6 +961,87 @@ class TestGemini:
             "default — see the 205.78s live timeout this regresses against."
         )
 
+    def test_no_preset_ratchets_the_stall_detector(self):
+        """stream_gap_timeout must stay tight; it only catches dead connections.
+
+        The pre-split failure mode was raising the read timeout to cover
+        slow-but-alive calls (perplexity went 160->280->350->500), which meant a
+        genuinely dead connection took over eight minutes to notice — and an
+        abandoned call holds its socket until that fires, delaying interpreter
+        exit via the executor's atexit join (pipeline._run_with_timeout). Slow
+        generation is the wall-clock backstop's job; if a call needs longer
+        before its FIRST byte, raise stream_read_timeout instead.
+        """
+        from ci_article_review.config_loader import _load_presets_from_yaml
+        from ci_core.llm import streaming
+
+        presets = _load_presets_from_yaml()
+        for tier, tier_cfg in presets.items():
+            for provider, cfg in (tier_cfg.get("models") or {}).items():
+                if not isinstance(cfg, dict):
+                    continue
+                gap = streaming.gap_timeout(cfg)
+                assert gap <= 120, (
+                    f"{tier}/{provider} sets stream_gap_timeout={gap}s. A stall "
+                    f"detector this loose stops detecting stalls; raise "
+                    f"stream_read_timeout (first-byte) or the wall-clock budget "
+                    f"in configs/timeouts.yaml instead."
+                )
+
+    def test_thinking_config_requested_without_an_explicit_budget(self):
+        """includeThoughts must be sent even when no thinking_budget is set.
+
+        gemini-2.5-pro thinks on every call and cannot be told not to. Thought
+        parts are what keeps the socket fed during that phase, so a config with
+        no thinking_budget (the `thorough` preset) previously produced a long
+        silent stretch with only the read-gap to catch it — the same failure
+        that killed 5/5 gpt-5.5 xhigh calls at ~121s before the OpenAI adapter
+        moved to reasoning-summary deltas.
+        """
+        from ci_core.llm.adapters import gemini
+
+        captured = {}
+
+        def _capture_post(url, headers=None, json=None, stream=None, timeout=None):
+            captured["payload"] = json
+            raise RuntimeError("stop after payload capture")
+
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as session_cls:
+            session_cls.return_value.post = _capture_post
+            gemini.call("system", "user", "key", retry=False, provider_config={})
+
+        gen_config = captured["payload"]["generationConfig"]
+        assert gen_config["thinkingConfig"]["includeThoughts"] is True, (
+            "thinkingConfig.includeThoughts must be set unconditionally; without "
+            "it a thinking model streams nothing while it reasons"
+        )
+        assert "thinkingBudget" not in gen_config["thinkingConfig"], (
+            "with no thinking_budget configured the budget key must be omitted so "
+            "the model keeps its own default thinking behaviour"
+        )
+
+    def test_explicit_thinking_budget_is_still_forwarded(self):
+        from ci_core.llm.adapters import gemini
+
+        captured = {}
+
+        def _capture_post(url, headers=None, json=None, stream=None, timeout=None):
+            captured["payload"] = json
+            raise RuntimeError("stop after payload capture")
+
+        with patch("ci_core.llm.adapters.gemini.requests.Session") as session_cls:
+            session_cls.return_value.post = _capture_post
+            gemini.call(
+                "system",
+                "user",
+                "key",
+                retry=False,
+                provider_config={"thinking_budget": 16000},
+            )
+
+        thinking = captured["payload"]["generationConfig"]["thinkingConfig"]
+        assert thinking == {"includeThoughts": True, "thinkingBudget": 16000}
+
     def test_401_captures_response_body(self, caplog):
         # See TestGrok.test_401_captures_response_body: raise_for_status() alone
         # only yields the bare status line for both the grounded and (after
@@ -1869,3 +1950,45 @@ class TestStreamingTimeoutAcrossAdapters:
         assert timeout[1] == 222, (
             f"{module_name} ignored stream_read_timeout override — got {timeout[1]!r} (expected 222)"
         )
+
+
+class TestOpenAIWebSearchPath:
+    """The web_search path had never once worked on a gpt-5.x preset.
+
+    Verified against the live API 2026-08-12: the payload the adapter sent
+    (temperature 0.2 alongside web_search_preview) returns HTTP 400 —
+    "Unsupported parameter: 'temperature' is not supported with this model" — so
+    every call failed and silently fell through to the non-search path, buying a
+    wasted round trip and a warning line. reasoning_effort was never plumbed
+    through either, and the cited sources were dropped.
+    """
+
+    def _payload_from(self, provider_config):
+        from ci_core.llm.adapters import openai as oai
+
+        with patch("ci_core.llm.adapters.openai.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+            mock_session.post.return_value = _sse_mock(
+                _sse_responses_lines({"flags": [], "low_confidence": []})
+            )
+            oai.call("system", "user", "key", provider_config=provider_config)
+            return mock_session.post.call_args.kwargs["json"]
+
+    def test_temperature_is_not_sent_with_a_reasoning_model(self):
+        body = self._payload_from(
+            {"model": "gpt-5.5", "web_search": True, "reasoning_effort": "xhigh"}
+        )
+        assert "temperature" not in body, "gpt-5.x 400s on temperature"
+
+    def test_reasoning_effort_reaches_the_search_call(self):
+        body = self._payload_from(
+            {"model": "gpt-5.5", "web_search": True, "reasoning_effort": "xhigh"}
+        )
+        assert body["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+        assert body["tools"] == [{"type": "web_search_preview"}]
+
+    def test_a_non_reasoning_model_still_gets_temperature(self):
+        body = self._payload_from({"model": "gpt-4o", "web_search": True})
+        assert body["temperature"] == 0.2
+        assert "reasoning" not in body

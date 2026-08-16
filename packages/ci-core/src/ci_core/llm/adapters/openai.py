@@ -54,7 +54,7 @@ DEFAULT_MODEL = "gpt-5.4"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
-# Inter-token read-gap timeout (seconds) for the streaming socket. Constant, not
+# Default FIRST-BYTE allowance (seconds) for the streaming socket. Constant, not
 # derived from the sliding-scale timeout_seconds — see ci_core/llm/streaming.py.
 _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 
@@ -128,11 +128,12 @@ def call(
     cfg = provider_config or {}
     provider = cfg.get("provider", "openai")
 
-    # Streaming: the socket timeout is the inter-token read-gap, not the whole
-    # generation time, so it stays small and constant regardless of how long the
-    # model reasons. The big sliding-scale timeout_seconds is no longer a socket
-    # timeout — it survives only as the pipeline's per-task wall-clock backstop.
+    # Streaming: the socket timeout is the FIRST-BYTE allowance, not the whole
+    # generation time. The inter-chunk stall detector is separate and tight
+    # (`gap`); the big sliding-scale timeout_seconds is neither — it survives
+    # only as the pipeline's per-task wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
+    gap = streaming.gap_timeout(cfg)
 
     if provider == "azure":
         return _call_azure(
@@ -143,6 +144,7 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
+            gap=gap,
         )
 
     # web_search: true → try Responses API with live search, fall back if unavailable
@@ -156,6 +158,11 @@ def call(
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
+            gap=gap,
+            # Was never passed, so enabling web_search silently threw away the
+            # preset's reasoning effort as well as 400ing on temperature. The
+            # Responses API accepts web_search_preview and reasoning together.
+            reasoning_effort=cfg.get("reasoning_effort"),
         )
         if not result.get("failed"):
             return result
@@ -183,6 +190,7 @@ def call(
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
+            gap=gap,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -212,7 +220,15 @@ def call(
 
 
 def _call_with_web_search(
-    system_prompt, user_prompt, api_key, model, retry, retry_delay, timeout=None
+    system_prompt,
+    user_prompt,
+    api_key,
+    model,
+    retry,
+    retry_delay,
+    timeout=None,
+    gap=None,
+    reasoning_effort=None,
 ):
     """Call via the OpenAI Responses API with the web_search_preview tool.
 
@@ -225,6 +241,8 @@ def _call_with_web_search(
     """
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -234,9 +252,19 @@ def _call_with_web_search(
         "instructions": system_prompt,
         "input": user_prompt,
         "tools": [{"type": "web_search_preview"}],
-        "temperature": 0.2,
         "stream": True,
     }
+    if reasoning_effort:
+        payload["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+    else:
+        # Only on non-reasoning models. gpt-5.x rejects temperature outright
+        # ("Unsupported parameter: 'temperature' is not supported with this
+        # model", HTTP 400), and sending it unconditionally is why this path
+        # had never once succeeded on a gpt-5.x preset: every call 400'd and
+        # fell through to the non-search path, logging a warning and buying a
+        # wasted round trip. Observed again live on 2026-08-15 with
+        # `web_search: [fact_check]` enabled against gpt-5.5.
+        payload["temperature"] = 0.2
 
     session = requests.Session()
     t0 = time.monotonic()
@@ -268,7 +296,9 @@ def _call_with_web_search(
 
     try:
         resp = _post()
-        assembled = streaming.accumulate_openai_responses(resp)
+        assembled = streaming.accumulate_openai_responses(
+            resp, first_byte=timeout[1], gap=gap
+        )
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         error_body = redact.capture_error_body(e)
@@ -343,6 +373,7 @@ def _call_openai(
     retry_delay=10,
     reasoning_effort=None,
     timeout=None,
+    gap=None,
 ):
     """Call the openai.com Responses API — the primary (non-search) path.
 
@@ -386,6 +417,7 @@ def _call_openai(
         retry=retry,
         retry_delay=retry_delay,
         timeout=timeout,
+        gap=gap,
     )
 
     # If the model rejected reasoning, retry without it so the pass still runs.
@@ -412,6 +444,7 @@ def _call_openai(
             retry=retry,
             retry_delay=retry_delay,
             timeout=timeout,
+            gap=gap,
         )
         retry_result["misconfiguration_warning"] = msg
         return retry_result
@@ -433,7 +466,14 @@ def _is_reasoning_param_error(body_text):
 
 
 def _call_azure(
-    system_prompt, user_prompt, api_key, cfg, retry=True, retry_delay=10, timeout=None
+    system_prompt,
+    user_prompt,
+    api_key,
+    cfg,
+    retry=True,
+    retry_delay=10,
+    timeout=None,
+    gap=None,
 ):
     endpoint = cfg.get("endpoint", "").rstrip("/")
     deployment = cfg.get("deployment", "")
@@ -478,6 +518,7 @@ def _call_azure(
         retry=retry,
         retry_delay=retry_delay,
         timeout=timeout,
+        gap=gap,
     )
     # Tag so callers know which endpoint was used
     result["provider"] = "azure"
@@ -490,7 +531,7 @@ def _call_azure(
 
 
 def _execute_openai_responses(
-    headers, payload, model, url, retry, retry_delay, timeout=None
+    headers, payload, model, url, retry, retry_delay, timeout=None, gap=None
 ):
     """POST to the Responses API, stream via ``accumulate_openai_responses``,
     and parse the assembled text as JSON. Mirrors ``_execute_request``'s
@@ -499,6 +540,8 @@ def _execute_openai_responses(
     """
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     session = requests.Session()
     t0 = time.monotonic()
 
@@ -520,7 +563,9 @@ def _execute_openai_responses(
 
     try:
         resp = _post()
-        assembled = streaming.accumulate_openai_responses(resp)
+        assembled = streaming.accumulate_openai_responses(
+            resp, first_byte=timeout[1], gap=gap
+        )
     except requests.HTTPError as e:
         elapsed = round(time.monotonic() - t0, 2)
         body = redact.capture_error_body(e)
@@ -586,10 +631,12 @@ def _execute_openai_responses(
 
 
 def _execute_request(
-    headers, payload, model, api_key, url, retry, retry_delay, timeout=None
+    headers, payload, model, api_key, url, retry, retry_delay, timeout=None, gap=None
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     session = requests.Session()
     t0 = time.monotonic()
 
@@ -611,7 +658,9 @@ def _execute_request(
 
     try:
         resp = _post()
-        assembled = streaming.accumulate_chat_completions(resp)
+        assembled = streaming.accumulate_chat_completions(
+            resp, first_byte=timeout[1], gap=gap
+        )
     except requests.HTTPError as e:
         elapsed = round(time.monotonic() - t0, 2)
         body = redact.capture_error_body(e)

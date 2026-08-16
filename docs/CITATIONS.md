@@ -9,6 +9,8 @@ After the fact-check pass, the pipeline takes the claims that came out of it and
 Failing that — a claim the draft attaches no citation to — the URL named in the claim's own source field (`source`, or `best_candidate_source` for `primary_source_needed`) is used instead. A claim with neither gets no URL at all and falls through to the source adapters. That is deliberate: "the draft cites nothing here" is a true and useful thing to report, and it is the honest answer where a guess used to go.
 
 > **What used to be here.** Until this changed, a claim with no source of its own inherited a *response-level* grounded URL — the first entry of the provider's search-results list for the whole response, which was never about any particular claim. In one run that stamped a single LBNL energy report onto 44 unrelated claims (Yorkville water rates, ICNIRP exposure limits, IARC classifications) and the relevance checker correctly reported that an energy report does not discuss any of them. Two real findings sat inside 47 false positives. A section that flags everything flags nothing.
+>
+> **Do not restore it by adding more grounding sources.** The obvious-looking repair — wire a second provider's grounding in so there are more URLs to draw on — was built (Gemini grounding, PR #81) and is now moot: the defect was never a shortage of grounded URLs, it was that a *response-level* URL is not about any particular claim, so a better or more numerous supply of them changes nothing. PR #81 was closed unmerged and the grounded-URL path no longer exists to plug into. The fix for low coverage is more claims traceable to a citation, not more URLs to guess with.
 
 The results land in **Section 9** of the report — both in `run_N_<timestamp>_report.json` and in the readable `run_N_<timestamp>_review.md`.
 
@@ -48,9 +50,9 @@ The other URLs checked are recorded on the entry as `alternates_checked`, so "on
 
 ## Confidence tiers
 
-Every entry carries a `verification` field. Four outcomes reach the report.
+Every entry carries a `verification` field. Four values reach the report — `checksum`, `pointer`, `unverifiable`, `content_mismatch` — plus the entries that never reached a tier at all, which the readable report splits by whether a URL was tried. Six blocks in all; the table at the top of Section 9 lists them in this order and every claim appears under exactly one.
 
-### Verified — `verification: "checksum"`
+### Read, and supports the claim — `verification: "checksum"`
 
 The strongest tier. The source URL was fetched, its content SHA-256 checksummed and recorded, **and** a model read that content and confirmed it supports the specific claim.
 
@@ -64,11 +66,11 @@ This tier is only reachable two ways:
 
 **How much to trust it:** high. The source was retrieved and its relevance affirmatively checked. Still worth a glance — the relevance check is one cheap model call, not a human — but this tier is doing real verification work.
 
-> **If the relevance check can't run,** the entry does not stay here — it moves to *Could not be verified* below. Reaching this tier always means a model read the extracted content and affirmed it. With no Mistral key configured, expect no verified `known_url` entries at all.
+> **If the relevance check can't run,** the entry does not stay here — it moves to *Fetched, but could not be read* below. Reaching this tier always means a model read the extracted content and affirmed it. With no Mistral key configured, expect no verified `known_url` entries at all.
 
 **What the model actually reads.** The fetched body is reduced to readable text before verification: main-article extraction for HTML (nav, header, footer, script and style blocks stripped) and `pypdf` text extraction for PDFs. The excerpt sent to the model is then centred on the passage containing the claim's distinctive terms and figures, rather than the first N characters of the document — in a long PDF the supporting sentence is rarely near the top.
 
-### Pointer-only — `verification: "pointer"`
+### Pointer only — `verification: "pointer"`
 
 A topic-relevant source was identified. **Nothing was verified.**
 
@@ -76,11 +78,11 @@ Six adapters are pointer-only: `epa`, `ferc`, `fhwa`, `icc`, `ilga`, `pjm`. They
 
 The report labels this tier "topic-relevant source identified, NOT independently verified — confirm manually before citing," and that label is literal.
 
-Keyword matching is gated by `topic_match.py`, which discards a keyword hit when it appears in the same sentence as a credential phrase ("credentials in", "degree in", "expertise in", …). Without that gate, a sentence like *"He does not hold credentials in environmental engineering or air quality analysis"* genuinely contains "air quality" and would resolve to the EPA Air Quality System portal — a claim about a person's background pointed at an emissions database. The gate deliberately errs toward not resolving rather than resolving to the wrong topic, so expect some claims to land in *Unresolved* that a human would have matched.
+Keyword matching is gated by `topic_match.py`, which discards a keyword hit when it appears in the same sentence as a credential phrase ("credentials in", "degree in", "expertise in", …). Without that gate, a sentence like *"He does not hold credentials in environmental engineering or air quality analysis"* genuinely contains "air quality" and would resolve to the EPA Air Quality System portal — a claim about a person's background pointed at an emissions database. The gate deliberately errs toward not resolving rather than resolving to the wrong topic, so expect some claims to land in *No source identified* that a human would have matched.
 
 **How much to trust it:** treat it as a research lead, not a citation. Open the URL and confirm before the claim ships.
 
-### Unresolved — `resolved: false`
+### No source identified / fetch refused — `resolved: false`, no `verification`
 
 No configured adapter matched, or the source URL couldn't be fetched. The entry carries a `note` explaining which. Nothing was established.
 
@@ -96,9 +98,9 @@ This is worth more attention than an ordinary unresolved entry. An ordinary one 
 
 **Every source cited for the claim failed**, not just one. When the draft cites several, all of them are checked before the entry lands here, and `alternates_checked` lists the ones that are not shown. Reporting a mismatch after checking one of three cited sources would say something false about a draft that cited the right source second.
 
-This tier asserts something about the source, so it is only ever reached when the document was genuinely read. If the content could not be extracted, or the check could not run, the entry becomes *Could not be verified* instead — never this.
+This tier asserts something about the source, so it is only ever reached when the document was genuinely read. If the content could not be extracted, or the check could not run, the entry becomes *Fetched, but could not be read* instead — never this.
 
-### Could not be verified — `verification: "unverifiable"`
+### Fetched, but could not be read — `verification: "unverifiable"`
 
 The source URL fetched and checksummed fine, but no judgement about it was possible. Either the content could not be read, or the relevance check could not run:
 
@@ -109,7 +111,7 @@ The source URL fetched and checksummed fine, but no judgement about it was possi
 
 `resolved` stays `true` — a real document was fetched, and it is still archived and shown to you for manual checking. But nothing was confirmed and, importantly, **nothing was refuted**.
 
-**How much to trust it:** treat it exactly like pointer-only — a lead to check by hand. The one thing it never means is that the source failed to support the claim. That distinction is the point of the tier: an honest "we couldn't read this" is useful, while a wrong "this source doesn't back you up" is actively misleading.
+**How much to trust it:** treat it exactly like *Pointer only* — a lead to check by hand. The one thing it never means is that the source failed to support the claim. That distinction is the point of the tier: an honest "we couldn't read this" is useful, while a wrong "this source doesn't back you up" is actively misleading.
 
 ---
 
@@ -149,6 +151,27 @@ There's no drift check on a first run against an empty or missing `pipeline_hist
 Every resolved citation URL is checked against the Wayback Machine, and the pipeline actively works to get sources archived rather than only reporting on them.
 
 **Availability check.** Each resolved URL is looked up via archive.org's availability API. The result records whether a snapshot exists, its timestamp, its age in days, and whether it's stale. "Stale" defaults to older than 180 days and is set by `pipeline.wayback_snapshot_stale_days` in `user.yaml`. If the cited URL is itself a `web.archive.org` link, its date is read straight from the URL and no archive-of-an-archive lookup happens.
+
+**Rate limiting, pacing, and the circuit breaker.** archive.org throttles the availability API at IP level over a long window rather than per-second, and it does not warn first. Measured 2026-08-12: 12 consecutive lookups all returned 429 — including the very first — and it was still 429 after a 45-second cooldown at one request every 6 seconds. With no pacing and no backoff, the archive thread had been effectively dead for two runs: 49 resolved citations, 0 archived, ~49 rate-limited.
+
+Three mechanisms now sit in front of it, because no one of them is sufficient:
+
+| Mechanism | Value | Why |
+|---|---|---|
+| Minimum interval between calls | `3.0s`, serialised on a process-wide lock | Resolution runs in a thread pool, so without this the *pool's width* sets the request rate, not any deliberate choice. |
+| Retry with backoff | up to `3` attempts, `5s × 2^attempt`, capped at the server's `Retry-After` (max 60s) | Prefers archive.org's own answer about when to come back over a number we invented. |
+| Circuit breaker | trips after `5` consecutive 429s | Once archive.org is refusing consistently, further calls only spend the run's time collecting more 429s. |
+
+**What a tripped breaker means for the report.** Every lookup after the trip is skipped, so those citations carry `archived: null` — *the lookup did not complete*, which is not the same as *no snapshot exists*, and nothing is submitted for archiving on the strength of a null. Because the breaker makes this the common case rather than a rare one, Section 9 states it once at the top rather than leaving the reader to infer it from a page of per-entry notices:
+
+```
+> **Archive status is unknown for 65 of these citations.** archive.org
+> rate-limited this run (HTTP 429). `archived: null` means the lookup did not
+> complete, **not** that the page is unarchived — and nothing was submitted for
+> archiving on that basis. Re-run to find out.
+```
+
+An `archived: false` entry is untouched by all of this: that is an answer, and only `null` means the run never found out.
 
 **Save Page Now submission.** After resolution finishes, any resolved citation whose URL is *not* yet archived gets submitted to archive.org's Save Page Now API. This runs as a follow-up pass at a lower concurrency than resolution itself (2 vs. 8), because each submission triggers a real page capture on archive.org's side rather than a cheap read.
 

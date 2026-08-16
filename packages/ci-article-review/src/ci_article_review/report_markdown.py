@@ -65,11 +65,56 @@ def _render_section_1(consensus_flags):
     return lines
 
 
+#: Buckets that state a verdict about a claim, and so are expected to carry
+#: evidence for it. ``unverifiable`` and ``primary_source_needed`` are excluded
+#: deliberately: both are the model declining to reach a verdict, which is the
+#: honest answer when it has nothing to quote, and counting them as missing
+#: evidence would penalise exactly the behaviour the prompt asks for.
+_VERDICT_BUCKETS = ("confirmed", "outdated", "contradicted")
+
+
+def _render_evidence_coverage(fact_check):
+    """A line saying how many verdicts arrived with checkable evidence.
+
+    Section 9 exists because "a model asserts this" and "a document was read"
+    are different things. The same gap opens one section earlier: a `confirmed`
+    verdict is a model's judgment, and until the prompt asked for a verbatim
+    quote and a direct URL there was nothing in the output to tell a reader
+    whether it rested on anything they could open. In the 2026-08-12 run 85
+    claims came back confirmed and 50 carried no URL at all.
+
+    Counted rather than enforced. A model that ignores the field still produces
+    a usable report — it just produces a visibly weaker one, which is the
+    information a reader needs.
+    """
+    items = [i for b in _VERDICT_BUCKETS for i in (fact_check.get(b) or [])]
+    if not items:
+        return []
+    quoted = sum(1 for i in items if (i.get("supporting_quote") or "").strip())
+    linked = sum(1 for i in items if (i.get("source_url") or "").strip())
+    lines = [
+        f"**{quoted} of {len(items)} verdict(s) arrived with a verbatim "
+        f"supporting quote; {linked} with a direct source URL.**",
+        "",
+    ]
+    if quoted < len(items) or linked < len(items):
+        lines += [
+            "A verdict missing either one is the model's assertion rather than "
+            "something you can open and check. It is not necessarily wrong — but "
+            "it has not been shown to be right, and Section 9 will not be able "
+            "to confirm it against a document either.",
+            "",
+        ]
+    return lines
+
+
 def _render_section_2(fact_check):
     lines = ["## SECTION 2: Factual Verification", ""]
     if not fact_check:
         lines.append("_No fact-check results._")
         return lines
+
+    lines.extend(_render_evidence_coverage(fact_check))
 
     labels = {
         "confirmed": "Confirmed",
@@ -374,6 +419,38 @@ def _render_section_9(citations):
             f"for {unread} no document was read at all.** A `confirmed` bucket is "
             "that pass's judgment about the claim, not a retrieval result. Where "
             "the two disagree, this section is the one that opened the document."
+        )
+        lines.append("")
+
+    # A wholesale archive-lookup failure is invisible one entry at a time: every
+    # citation reads "Archive: NOT CHECKED", and a reader skimming for archive
+    # coverage concludes nothing is archived. Say it once, with a count.
+    #
+    # The circuit breaker makes this the common case rather than a rare one —
+    # once archive.org has 429'd enough times the run stops asking, so every
+    # remaining citation carries a null from that point on. That is a statement
+    # about the run, not about the pages.
+    unchecked = [
+        c
+        for c in citations
+        if isinstance(c.get("wayback"), dict)
+        and c["wayback"].get("archived") is None
+        and c.get("url")
+    ]
+    if unchecked:
+        rate_limited = sum(1 for c in unchecked if c["wayback"].get("rate_limited"))
+        reason = (
+            " archive.org rate-limited this run (HTTP 429)"
+            if rate_limited == len(unchecked)
+            else f" {rate_limited} of them to archive.org rate limiting"
+            if rate_limited
+            else ""
+        )
+        lines.append(
+            f"> **Archive status is unknown for {len(unchecked)} of these "
+            f"citations.**{reason}. `archived: null` means the lookup did not "
+            f"complete, **not** that the page is unarchived — and nothing was "
+            f"submitted for archiving on that basis. Re-run to find out."
         )
         lines.append("")
 

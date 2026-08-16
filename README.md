@@ -267,6 +267,20 @@ Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required —
 | `--no-timeout` | Disable timeout truncation so true completion times are measured, never cut off |
 | `--only-model PROVIDER` | Run only one provider (e.g. `openai`) instead of the full ensemble |
 | `--only-domain DOMAIN` | Run only one domain (`fact_check`, `voice_style`, `completeness`, `argument_integrity`, `red_team`) |
+| `--replay RESULTS_JSON` | Replay a captured ensemble instead of calling any models — free |
+| `--offline` | Skip every pass that reaches the network (link validation, Wayback, citation resolution) |
+
+### Iterating on the code without paying for the ensemble
+
+The ensemble is nearly all of a run's cost, and most changes don't touch it: of the 25 PRs merged to 2026-08-15, **15 touched no live-LLM code at all**. Every run now writes a `run_N_<ts>_results.json` beside its report holding the raw ensemble output, so that run can be replayed for free:
+
+```powershell
+uv run ci-review --draft handoff.md --publication mypub --replay pipeline_history/<article>/run_16_20260815_140635_results.json --offline
+```
+
+That re-runs consolidation, claim collection, report building, markdown rendering and the history save over real captured model output, with **no model calls and no network**. It's the fast loop for anything in `consolidation.py`, `report_markdown.py`, `history.py`, `config_loader.py` or the analysis passes.
+
+`--offline` on its own (without `--replay`) still calls the models but skips the network passes. `--replay` on its own replays the ensemble but still resolves citations and checks links, which is what you want when changing the citation adapters themselves.
 
 Example — measure one model/domain's true latency cheaply:
 
@@ -316,6 +330,7 @@ content-intelligence/
 │   │   │   ├── setup.py               first-run scaffolding for configs/
 │   │   │   ├── config_loader.py       config parsing and validation
 │   │   │   ├── consolidation.py       weighted ensemble consolidation → one report
+│   │   │   ├── ensemble_capture.py    saves/loads raw ensemble output for --replay
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
