@@ -1700,18 +1700,26 @@ class TestWaybackRateLimitHandling:
         assert wayback._retry_after_seconds(resp, 0) == 60.0
 
     def test_the_circuit_breaker_stops_further_lookups(self):
-        wayback._consecutive_rate_limits = wayback._CIRCUIT_TRIP_AFTER
+        wayback._rate_limited_lookups = wayback._CIRCUIT_TRIP_AFTER
         with patch.object(wayback.requests, "get") as mock_get:
             result = wayback.check("https://example.org/page")
         mock_get.assert_not_called()
         assert result["archived"] is None
         assert "rate limit tripped" in result["error"]
 
-    def test_a_success_resets_the_breaker(self):
-        wayback._consecutive_rate_limits = 3
+    def test_a_success_does_not_erase_other_lookups_refusals(self):
+        """The budget only moves up, and that is deliberate.
+
+        This used to reset to zero on any success. Under the resolver's thread
+        pool that meant one worker's 200 wiped out every other worker's
+        refusals, so a run being throttled four-in-five never tripped the
+        breaker — the exact situation it was built for. "Consecutive" is not a
+        quantity eight interleaved threads can agree on; a per-run budget is.
+        """
+        wayback._rate_limited_lookups = 3
         ok = MagicMock(status_code=200, headers={})
         ok.raise_for_status = MagicMock()
         with patch.object(wayback.requests, "get", return_value=ok):
             with patch.object(wayback.time, "sleep"):
                 wayback._get_availability("https://example.org", 10)
-        assert wayback._consecutive_rate_limits == 0
+        assert wayback._rate_limited_lookups == 3
