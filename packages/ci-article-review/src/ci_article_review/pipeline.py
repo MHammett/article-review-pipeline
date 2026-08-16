@@ -65,6 +65,7 @@ from .handoff_parser import (
 from . import history as hist
 from . import consolidation
 from ci_core import redact
+from ci_core.config_helpers import normalize_model_configs
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from .analysis import readability as readability_analysis
@@ -259,13 +260,44 @@ def _warn_on_domains_left_unreviewed(assignments, drafting_model: str | None) ->
             )
 
 
+def _model_blocked_reason(model_name: str, cfg: dict, api_keys: dict) -> str | None:
+    """Return why a model can run no domain at all, or None if it can run.
+
+    Model-level gates only. A ``prompts:`` override narrows which domains a
+    model runs but never stops it running, so it is not checked here.
+    """
+    if not cfg.get("enabled", True):
+        return "disabled in config (enabled: false)"
+    if not _model_has_credentials(model_name, api_keys, cfg):
+        return "no credentials configured"
+    return None
+
+
+def _prompt_override(cfg: dict) -> list[str] | None:
+    """Return the domains a model's ``prompts:`` override limits it to.
+
+    ``None`` means no override is set — the model runs whatever the preset
+    asks of it. An empty list (``prompts:`` written with no value) means the
+    override admits no domains at all.
+    """
+    if "prompts" not in cfg:
+        return None
+    return cfg["prompts"] or []
+
+
 def _build_assignments(
     thoroughness: str,
     model_configs: dict,
     api_keys: dict,
     drafting_model: str | None = None,
+    skips: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Return list of (model_name, domain) pairs to execute.
+
+    ``model_configs`` accepts either form documented in user.example.yaml —
+    simple (``openai: gpt-5.5``) or extended (a dict). The pipeline hands over
+    configs already normalised by config_loader; normalising again here is what
+    lets a direct call with a hand-written config behave the same way.
 
     Assignment logic:
     1. Start with the thoroughness preset.
@@ -275,20 +307,50 @@ def _build_assignments(
        that model only runs those domains regardless of the preset.
     5. Drop the drafting model from the domains it cannot judge.
     6. Deduplicate (model, domain) pairs.
+
+    Pass a list as ``skips`` to find out what steps 2-5 dropped: every model the
+    preset (or an explicit ``prompts:`` entry) asked for but that contributes
+    fewer calls than asked appends one line naming it, the reason, and the
+    domains it did not run. Without that, an ensemble smaller than the preset
+    implies looks identical to one the preset never asked for.
     """
+    model_configs = normalize_model_configs(model_configs)
     preset = _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
     assignments: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
+    # What each model was asked to run, in preset order — the denominator every
+    # skip line below is measured against.
+    requested: dict[str, list[str]] = {}
     for domain, model_list in preset.items():
         for model_name in model_list:
-            cfg = model_configs.get(model_name, {})
-            if not cfg.get("enabled", True):
+            requested.setdefault(model_name, []).append(domain)
+    # An explicit prompts: entry can name domains the preset never asked this
+    # model for; the second loop below assigns those, so they count as requested.
+    for model_name, cfg in model_configs.items():
+        for domain in _prompt_override(cfg) or []:
+            if domain in _DOMAIN_PROMPTS and domain not in requested.get(
+                model_name, []
+            ):
+                requested.setdefault(model_name, []).append(domain)
+
+    # Model-level verdicts, resolved once per model rather than once per pair,
+    # so the assignment loops and the skip report cannot disagree.
+    blocked: dict[str, str] = {}
+    for model_name in requested:
+        reason = _model_blocked_reason(
+            model_name, model_configs.get(model_name, {}), api_keys
+        )
+        if reason:
+            blocked[model_name] = reason
+
+    for domain, model_list in preset.items():
+        for model_name in model_list:
+            if model_name in blocked:
                 continue
             # Per-model prompt override: skip this domain if not in the list
-            if "prompts" in cfg and domain not in cfg["prompts"]:
-                continue
-            if not _model_has_credentials(model_name, api_keys, cfg):
+            allowed = _prompt_override(model_configs.get(model_name, {}))
+            if allowed is not None and domain not in allowed:
                 continue
             if _drafter_is_excluded(model_name, domain, drafting_model):
                 continue
@@ -300,11 +362,9 @@ def _build_assignments(
     # Handle explicit per-model prompts for models not covered by the preset
     # (e.g. a model configured with prompts: [fact_check] that isn't in standard preset)
     for model_name, cfg in model_configs.items():
-        if not cfg.get("enabled", True):
+        if model_name in blocked:
             continue
-        if not _model_has_credentials(model_name, api_keys, cfg):
-            continue
-        for domain in cfg.get("prompts", []):
+        for domain in _prompt_override(cfg) or []:
             if _drafter_is_excluded(model_name, domain, drafting_model):
                 continue
             pair = (model_name, domain)
@@ -313,6 +373,44 @@ def _build_assignments(
                 assignments.append(pair)
 
     _warn_on_domains_left_unreviewed(assignments, drafting_model)
+
+    if skips is not None:
+        for model_name, domains in requested.items():
+            reason = blocked.get(model_name)
+            if reason:
+                skips.append(
+                    f"{model_name} — {reason}; {len(domains)} domain(s) not run: "
+                    + ", ".join(domains)
+                )
+                continue
+            allowed = _prompt_override(model_configs.get(model_name, {}))
+            by_override = [
+                d for d in domains if allowed is not None and d not in allowed
+            ]
+            # Same precedence as the loops above, which apply the override
+            # first: a domain it already dropped is not re-attributed here.
+            by_drafter = [
+                d
+                for d in domains
+                if d not in by_override
+                and _drafter_is_excluded(model_name, d, drafting_model)
+            ]
+            groups = []
+            if by_override:
+                groups.append(
+                    f"{', '.join(by_override)} "
+                    f"(prompts: override limits it to {allowed})"
+                )
+            if by_drafter:
+                groups.append(
+                    f"{', '.join(by_drafter)} "
+                    f"(drafted this article — it cannot judge its own prose)"
+                )
+            if groups:
+                skips.append(
+                    f"{model_name} — {len(by_override) + len(by_drafter)} "
+                    "domain(s) not run: " + "; ".join(groups)
+                )
 
     return assignments
 
@@ -1165,8 +1263,9 @@ def run_draft_pipeline(
             drafting_model,
             ", ".join(_DRAFTER_EXCLUDED_DOMAINS),
         )
+    assignment_skips: list[str] = []
     assignments = _build_assignments(
-        thoroughness, model_configs, api_keys, drafting_model
+        thoroughness, model_configs, api_keys, drafting_model, assignment_skips
     )
 
     # Custom publication-defined domains
@@ -1179,6 +1278,9 @@ def run_draft_pipeline(
             log.info("  Custom: %s → %s", model_name, domain)
 
     if not assignments:
+        # The reasons matter most here — this is the run that produced nothing.
+        for skip_line in assignment_skips:
+            log.info(f"  Skipped: {skip_line}")
         log.error(
             "No model assignments could be built. "
             "Check that at least one model has credentials and is enabled."
@@ -1212,6 +1314,8 @@ def run_draft_pipeline(
     )
     for model_name, domain in assignments:
         log.info(f"  Assigned: {model_name} → {domain}")
+    for skip_line in assignment_skips:
+        log.info(f"  Skipped: {skip_line}")
 
     # Build runner list — custom domains pass their prompt string directly
     runners = [
