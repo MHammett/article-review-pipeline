@@ -15,6 +15,8 @@ The pricing / model_registry / timeouts data files moved to ci-core alongside
 their loaders; their equivalents live in ci-core/tests/test_llm_config_data.py.
 """
 
+import pytest
+
 import os
 
 import yaml
@@ -113,3 +115,69 @@ class TestPresetsStructure:
                 assert effort in ("high", "none"), (
                     f"{name}: mistral reasoning_effort={effort!r} invalid"
                 )
+
+
+class TestPartialPipelineBlockKeepsDefaults:
+    """A partial `pipeline:` block must not discard the keys it omits.
+
+    The defaults used to be the fallback argument of
+    `user_config.get("pipeline", {...})`, which applies only when the key is
+    absent entirely. So a config as ordinary as
+
+        pipeline:
+          cost_preset: maximum
+
+    silently dropped every default: `task_timeout_seconds` became None, which is
+    a TypeError inside timeout_model.compute_timeout, and `retry_on_failure`
+    became None, disabling retries without saying so.
+    """
+
+    def _pipeline(self, user):
+        from ci_article_review.config_loader import merge_configs
+
+        return merge_configs(user, {})["pipeline"]
+
+    def test_absent_block_gets_every_default(self):
+        from ci_article_review.config_loader import PIPELINE_DEFAULTS
+
+        assert self._pipeline({}) == PIPELINE_DEFAULTS
+
+    @pytest.mark.parametrize(
+        "partial",
+        [
+            {"cost_preset": "maximum"},
+            {"grammar_pass": False},
+            {"link_validation": False},
+        ],
+    )
+    def test_a_partial_block_keeps_the_keys_it_did_not_mention(self, partial):
+        merged = self._pipeline({"pipeline": dict(partial)})
+        assert merged["task_timeout_seconds"] == 180
+        assert merged["retry_on_failure"] is True
+        assert merged["retry_delay_seconds"] == 10
+        # ...and still carries what the user did say.
+        for key, value in partial.items():
+            assert merged[key] == value
+
+    def test_an_explicit_null_block_is_not_a_crash(self):
+        """`pipeline:` with nothing under it parses as None, not {}."""
+        assert self._pipeline({"pipeline": None})["task_timeout_seconds"] == 180
+
+    def test_user_values_still_win(self):
+        merged = self._pipeline(
+            {"pipeline": {"task_timeout_seconds": 1100, "retry_on_failure": False}}
+        )
+        assert merged["task_timeout_seconds"] == 1100
+        assert merged["retry_on_failure"] is False
+
+    def test_the_computed_backstop_survives_a_partial_block(self):
+        """The actual failure: None reached compute_timeout and raised TypeError."""
+        from ci_core.llm import timeout_model
+
+        merged = self._pipeline({"pipeline": {"cost_preset": "maximum"}})
+        budget = timeout_model.compute_all(
+            2054,
+            {"openai": {"model": "gpt-5.5", "reasoning_effort": "xhigh"}},
+            merged["task_timeout_seconds"],
+        )["openai"]
+        assert budget > 0
