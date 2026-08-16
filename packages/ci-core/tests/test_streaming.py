@@ -8,6 +8,8 @@ mocking ``iter_lines`` at the already-decoded-string level.
 """
 
 import json
+
+import pytest
 from unittest.mock import patch, MagicMock
 
 import requests
@@ -189,3 +191,120 @@ class TestPerplexityAdapterEndToEndDecoding:
         summary = result["data"]["summary"]
         assert "\x80" not in summary
         assert "’" in summary
+
+
+class _StallingRaw:
+    """A body that yields some chunks and then blocks forever.
+
+    Models the failure the gap timeout exists to catch: the connection is open
+    and the socket read is still pending, but no more bytes are coming. A real
+    socket would eventually raise on its own read timeout -- which is exactly the
+    generous first-byte value we do NOT want to wait for mid-stream.
+    """
+
+    def __init__(self, chunks, released):
+        self._chunks = chunks
+        self._released = released
+        self.stream_exited_early = False
+
+    def stream(self, chunk_size=1, decode_content=True):
+        yield from self._chunks
+        # Block until the consumer gives up and closes the response.
+        if self._released.wait(timeout=10):
+            self.stream_exited_early = True
+            raise OSError("socket closed by consumer")
+
+
+def _stalling_response(chunks, released):
+    resp = requests.Response()
+    resp.status_code = 200
+    resp.headers = requests.structures.CaseInsensitiveDict(
+        {"Content-Type": "text/event-stream"}
+    )
+    resp.encoding = "utf-8"
+    raw = _StallingRaw(chunks, released)
+    resp.raw = raw
+    # ``Response.close`` calls ``raw.close()`` and then ``raw.release_conn()``
+    # when present. Both unblock the reader here, the way closing a real socket
+    # would release a thread parked in a pending read.
+    raw.close = released.set
+    raw.release_conn = released.set
+    return resp, raw
+
+
+class TestGapTimeoutResolution:
+    """``stream_read_timeout`` and ``stream_gap_timeout`` are separate knobs."""
+
+    def test_gap_defaults_when_unset(self):
+        assert streaming.gap_timeout(None) == streaming.DEFAULT_GAP_TIMEOUT
+        assert streaming.gap_timeout({}) == streaming.DEFAULT_GAP_TIMEOUT
+
+    def test_gap_is_overridable_per_model(self):
+        assert streaming.gap_timeout({"stream_gap_timeout": 45}) == 45
+
+    def test_stream_read_timeout_does_not_change_the_gap(self):
+        """The two are independent: a grounded model needs a long first-byte
+        allowance without loosening its stall detector."""
+        cfg = {"stream_read_timeout": 500}
+        assert streaming.stream_timeout(cfg)[1] == 500
+        assert streaming.gap_timeout(cfg) == streaming.DEFAULT_GAP_TIMEOUT
+
+    def test_socket_timeout_carries_the_first_byte_allowance(self):
+        connect, read = streaming.stream_timeout({"stream_read_timeout": 500})
+        assert connect == streaming.DEFAULT_CONNECT_TIMEOUT
+        assert read == 500
+
+
+class TestInterChunkGapEnforcement:
+    def test_healthy_stream_is_unaffected(self):
+        body = b'data: {"n": 1}\n\ndata: {"n": 2}\n\ndata: [DONE]\n\n'
+        resp = _sse_response_with_split_multibyte_char([body])
+        got = list(streaming.iter_sse_data(resp, first_byte=30, gap=30))
+        assert got == [{"n": 1}, {"n": 2}]
+
+    def test_stall_after_first_chunk_raises_before_the_socket_would(self):
+        """The whole point of the split: a mid-stream stall is caught on the gap
+        (short), not on the first-byte allowance (long)."""
+        import threading
+        import time as _time
+
+        released = threading.Event()
+        resp, raw = _stalling_response([b'data: {"n": 1}\n\n'], released)
+        t0 = _time.monotonic()
+        with pytest.raises(requests.exceptions.ReadTimeout) as exc:
+            # first_byte is deliberately huge; only the gap should govern here.
+            list(streaming.iter_sse_data(resp, first_byte=600, gap=1))
+        elapsed = _time.monotonic() - t0
+        assert "mid-stream" in str(exc.value)
+        assert elapsed < 10, f"gap timeout did not fire promptly ({elapsed:.1f}s)"
+
+    def test_stall_before_first_chunk_uses_the_first_byte_allowance(self):
+        """A grounded model's search phase must not trip the (short) gap."""
+        import threading
+        import time as _time
+
+        released = threading.Event()
+        resp, raw = _stalling_response([], released)
+        t0 = _time.monotonic()
+        with pytest.raises(requests.exceptions.ReadTimeout) as exc:
+            list(streaming.iter_sse_data(resp, first_byte=1, gap=600))
+        elapsed = _time.monotonic() - t0
+        assert "before first chunk" in str(exc.value)
+        assert elapsed < 10
+
+    def test_stalled_response_is_closed_so_the_reader_thread_exits(self):
+        """A dead call must not keep holding a socket -- the reason the stall
+        detector exists at all (see pipeline._run_with_timeout)."""
+        import threading
+
+        released = threading.Event()
+        resp, _raw = _stalling_response([b'data: {"n": 1}\n\n'], released)
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            list(streaming.iter_sse_data(resp, first_byte=600, gap=1))
+        assert released.wait(timeout=5), "response was not closed on stall"
+
+    def test_omitting_gap_keeps_the_pre_split_behaviour(self):
+        """Callers that pass no gap iterate the response directly."""
+        body = b'data: {"n": 1}\n\ndata: [DONE]\n\n'
+        resp = _sse_response_with_split_multibyte_char([body])
+        assert list(streaming.iter_sse_data(resp)) == [{"n": 1}]

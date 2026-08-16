@@ -30,7 +30,10 @@ from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
 DEFAULT_MODEL = "sonar-reasoning-pro"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 
-# Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
+# Default FIRST-BYTE allowance (seconds) — how long to wait for the stream to
+# start, not the gap between chunks once it has (that is stream_gap_timeout,
+# a tight constant handled in ci_core/llm/streaming.py) and not the
+# sliding-scale wall-clock budget.
 # sonar runs a live web search before the first token, so allow a wider gap than
 # the non-grounded chat models to cover time-to-first-byte.
 _READ_TIMEOUT = 160
@@ -60,9 +63,11 @@ def call(
     cfg = provider_config or {}
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     reasoning_effort = cfg.get("reasoning_effort")
-    # Streaming socket timeout = inter-token read-gap (small constant). The big
+    # Socket timeout = FIRST-BYTE allowance (how long the stream may take to
+    # start); the inter-chunk stall detector is separate and tight (`gap`). The
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
+    gap = streaming.gap_timeout(cfg)
     models_to_try = [requested_model] + [
         m for m in _FALLBACK_MODELS if m != requested_model
     ]
@@ -78,6 +83,7 @@ def call(
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
+            gap=gap,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -136,9 +142,12 @@ def _call_perplexity(
     retry_delay,
     reasoning_effort=None,
     timeout=None,
+    gap=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -189,7 +198,9 @@ def _call_perplexity(
 
     try:
         resp = _post()
-        assembled = streaming.accumulate_chat_completions(resp)
+        assembled = streaming.accumulate_chat_completions(
+            resp, first_byte=timeout[1], gap=gap
+        )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
         elapsed = round(time.monotonic() - t0, 2)
         log.error(

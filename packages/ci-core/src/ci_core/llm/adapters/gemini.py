@@ -36,7 +36,10 @@ from ... import redact
 from ..json_utils import extract_json_with_salvage as _extract_json_with_salvage
 
 DEFAULT_MODEL = "gemini-2.5-flash"
-# Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
+# Default FIRST-BYTE allowance (seconds) — how long to wait for the stream to
+# start, not the gap between chunks once it has (that is stream_gap_timeout,
+# a tight constant handled in ci_core/llm/streaming.py) and not the
+# sliding-scale wall-clock budget.
 # Grounded fact-check runs a live Google Search before the first token, so allow a
 # wider first-byte gap than the non-grounded chat models.
 _READ_TIMEOUT = 160
@@ -330,22 +333,29 @@ def _execute_request(
     # responseMimeType is incompatible with grounding — used only on plain payload.
     _plain_gen_config = {"temperature": 0.2, "responseMimeType": "application/json"}
 
-    # Optional thinking budget from provider_config (e.g. thinking_budget: 8192).
-    # gemini-2.5-flash already uses dynamic thinking by default; setting an explicit
-    # budget controls how many tokens the model can spend on internal reasoning.
-    # Set to 0 in config to disable thinking entirely (faster/cheaper for simple tasks).
+    # includeThoughts is set UNCONDITIONALLY, not only when a thinking_budget is
+    # configured. Two reasons, and the second is the load-bearing one:
+    #
+    #   1. Thought parts have to be present for the filtering below to strip them;
+    #      without the flag the API may omit them entirely on some models.
+    #   2. Under streaming, thought parts are what keeps the socket fed while the
+    #      model reasons. gemini-2.5-pro thinks on every call and cannot be told
+    #      not to, so a config with no thinking_budget (the `thorough` preset)
+    #      previously sent NO thinkingConfig at all — producing a long silent
+    #      stretch on the wire with nothing but the read-gap to catch it. That is
+    #      the same failure that killed 5/5 gpt-5.5 xhigh calls at ~121s before
+    #      the OpenAI adapter moved to reasoning-summary deltas.
+    #
+    # Optional thinking budget from provider_config (e.g. thinking_budget: 8192)
+    # controls how many tokens the model may spend reasoning; set 0 to disable
+    # thinking entirely on models that allow it. When absent, the budget key is
+    # omitted so the model keeps its own default (dynamic) thinking behaviour.
     thinking_budget = (provider_config or {}).get("thinking_budget")
+    _thinking_config = {"includeThoughts": True}
     if thinking_budget is not None:
-        # includeThoughts: true ensures the response includes thought parts so our
-        # filtering logic can strip them. Without it the API may omit them on some models.
-        _grounded_gen_config["thinkingConfig"] = {
-            "thinkingBudget": thinking_budget,
-            "includeThoughts": True,
-        }
-        _plain_gen_config["thinkingConfig"] = {
-            "thinkingBudget": thinking_budget,
-            "includeThoughts": True,
-        }
+        _thinking_config["thinkingBudget"] = thinking_budget
+    _grounded_gen_config["thinkingConfig"] = dict(_thinking_config)
+    _plain_gen_config["thinkingConfig"] = dict(_thinking_config)
 
     payload_grounded = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -359,9 +369,11 @@ def _execute_request(
         "generationConfig": _plain_gen_config,
     }
 
-    # Streaming socket timeout = inter-token read-gap (small constant). The big
+    # Socket timeout = FIRST-BYTE allowance (how long the stream may take to
+    # start); the inter-chunk stall detector is separate and tight (`gap`). The
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(provider_config, _READ_TIMEOUT)
+    gap = streaming.gap_timeout(provider_config)
 
     session = requests.Session()
     t0 = time.monotonic()
@@ -381,7 +393,7 @@ def _execute_request(
                 url, headers=headers, json=payload, stream=True, timeout=timeout
             )
         resp.raise_for_status()
-        return streaming.accumulate_gemini(resp)
+        return streaming.accumulate_gemini(resp, first_byte=timeout[1], gap=gap)
 
     grounding_available = True
     try:
@@ -399,10 +411,11 @@ def _execute_request(
         # domain) bookkeeping.
         log.error(
             f"Gemini {model} timed out after {elapsed}s on the grounded call. "
-            f"Not retrying without grounding. This is the inter-token read-gap "
-            f"timeout (default {_READ_TIMEOUT}s, covers time-to-first-byte while "
-            f"the model searches/thinks) — raise stream_read_timeout for gemini "
-            f"in user.yaml if this repeats, not timeout_seconds."
+            f"Not retrying without grounding. This is the first-byte allowance "
+            f"(default {_READ_TIMEOUT}s, covers the time the model spends "
+            f"searching/thinking before the stream starts) — raise "
+            f"stream_read_timeout for gemini in user.yaml if this repeats, not "
+            f"timeout_seconds or stream_gap_timeout."
         )
         session.close()
         return {
