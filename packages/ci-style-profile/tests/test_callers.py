@@ -2,47 +2,67 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import litellm
 
 
-import json as _json
+# ---------------------------------------------------------------------------
+# litellm-shaped stream mocks
+# ---------------------------------------------------------------------------
+# These patch the litellm call itself rather than the HTTP transport. The old
+# versions mocked requests.Session, which after the litellm migration no longer
+# intercepts anything — the calls went out to the real providers, and the
+# failure-path tests "passed" because a real call fails too.
 
 
-def _mock_sse_response(lines: list[str]) -> MagicMock:
-    resp = MagicMock()
-    resp.status_code = 200
-    resp.iter_lines.return_value = [line.encode() for line in lines]
-    return resp
+def _completion_stream(text: str):
+    """A litellm.completion(stream=True) response carrying ``text`` and usage."""
 
+    def chunk(content=None, finish_reason=None, usage=None):
+        choice = SimpleNamespace(
+            delta=SimpleNamespace(content=content), finish_reason=finish_reason
+        )
+        return SimpleNamespace(
+            choices=[choice] if (content or finish_reason) else [],
+            usage=usage,
+            citations=None,
+            search_results=None,
+            vertex_ai_grounding_metadata=None,
+        )
 
-def _anthropic_sse(text: str) -> list[str]:
-    t = _json.dumps(
-        text
-    )  # properly escaped JSON string value including surrounding quotes
     return [
-        'data: {"type": "message_start", "message": {"usage": {"input_tokens": 100, "output_tokens": 0}}}',
-        f'data: {{"type": "content_block_delta", "delta": {{"type": "text_delta", "text": {t}}}}}',
-        'data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 20}}',
-        "data: [DONE]",
+        chunk(content=text),
+        chunk(finish_reason="stop"),
+        chunk(
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=20,
+                prompt_tokens_details=None,
+                cache_read_input_tokens=None,
+            )
+        ),
     ]
 
 
-def _openai_sse(text: str) -> list[str]:
-    """Responses API (/v1/responses) typed events — what the openai.com backend streams."""
-    t = _json.dumps(text)
+def _responses_stream(text: str):
+    """A litellm.responses(stream=True) event stream — the OpenAI surface."""
     return [
-        f'data: {{"type": "response.output_text.delta", "delta": {t}}}',
-        'data: {"type": "response.completed", "response": {"usage": '
-        '{"input_tokens": 100, "output_tokens": 20}}}',
-        "data: [DONE]",
-    ]
-
-
-def _gemini_sse(text: str) -> list[str]:
-    t = _json.dumps(text)
-    return [
-        f'data: {{"candidates": [{{"content": {{"parts": [{{"text": {t}}}]}}}}], "usageMetadata": {{"promptTokenCount": 100, "candidatesTokenCount": 20}}}}',
-        "data: [DONE]",
+        SimpleNamespace(type="response.output_text.delta", delta=text),
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                    prompt_tokens_details=None,
+                    cache_read_input_tokens=None,
+                ),
+                status="completed",
+                incomplete_details=None,
+            ),
+        ),
     ]
 
 
@@ -62,19 +82,15 @@ _MOCK_USER_CONFIG = {
 
 class TestCallOneAnthropic:
     def test_anthropic_success(self):
-        """call_one Anthropic: mock SSE → content and tokens returned."""
         from ci_style_profile.callers import call_one, clear_api_call_log
 
         clear_api_call_log()
 
-        resp = _mock_sse_response(_anthropic_sse('{"style_profile": "test"}'))
-        with patch("requests.Session") as mock_session_cls:
-            mock_session = MagicMock()
-            mock_session_cls.return_value.__enter__ = lambda s: mock_session
-            mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-            mock_session_cls.return_value = mock_session
-            mock_session.post.return_value = resp
-
+        with patch.object(
+            litellm,
+            "completion",
+            return_value=_completion_stream('{"style_profile": "test"}'),
+        ):
             result = call_one(
                 "claude",
                 {"provider": "anthropic", "model": "claude-sonnet-4-6"},
@@ -89,16 +105,14 @@ class TestCallOneAnthropic:
         assert '{"style_profile": "test"}' in result["content"]
 
     def test_anthropic_http_error(self):
-        """call_one returns failed=True on HTTP error; does not raise."""
+        """call_one returns failed=True on a transport error; does not raise."""
         from ci_style_profile.callers import call_one, clear_api_call_log
 
         clear_api_call_log()
 
-        with patch("requests.Session") as mock_session_cls:
-            mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
-            mock_session.post.side_effect = Exception("Connection refused")
-
+        with patch.object(
+            litellm, "completion", side_effect=Exception("Connection refused")
+        ):
             result = call_one(
                 "claude",
                 {"provider": "anthropic", "model": "claude-sonnet-4-6"},
@@ -113,17 +127,16 @@ class TestCallOneAnthropic:
 
 class TestCallOneOpenAI:
     def test_openai_success(self):
-        """call_one OpenAI: mock Responses API SSE → correct content."""
+        """OpenAI goes through responses(), not completion() — see ci_core.llm.client."""
         from ci_style_profile.callers import call_one, clear_api_call_log
 
         clear_api_call_log()
 
-        resp = _mock_sse_response(_openai_sse('{"style_profile": "openai result"}'))
-        with patch("requests.Session") as mock_session_cls:
-            mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
-            mock_session.post.return_value = resp
-
+        with patch.object(
+            litellm,
+            "responses",
+            return_value=_responses_stream('{"style_profile": "openai result"}'),
+        ):
             result = call_one(
                 "openai",
                 {"provider": "openai", "model": "gpt-5.4"},
@@ -141,11 +154,9 @@ class TestCallOneOpenAI:
 
         clear_api_call_log()
 
-        with patch("requests.Session") as mock_session_cls:
-            mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
-            mock_session.post.side_effect = Exception("503 Server Error")
-
+        with patch.object(
+            litellm, "responses", side_effect=Exception("503 Server Error")
+        ):
             result = call_one(
                 "openai",
                 {"provider": "openai", "model": "gpt-5.4"},
@@ -159,17 +170,15 @@ class TestCallOneOpenAI:
 
 class TestCallOneGemini:
     def test_gemini_success(self):
-        """call_one Gemini: mock SSE → usageMetadata mapped to tokens."""
         from ci_style_profile.callers import call_one, clear_api_call_log
 
         clear_api_call_log()
 
-        resp = _mock_sse_response(_gemini_sse('{"style_profile": "gemini result"}'))
-        with patch("requests.Session") as mock_session_cls:
-            mock_session = MagicMock()
-            mock_session_cls.return_value = mock_session
-            mock_session.post.return_value = resp
-
+        with patch.object(
+            litellm,
+            "completion",
+            return_value=_completion_stream('{"style_profile": "gemini result"}'),
+        ):
             result = call_one(
                 "gemini",
                 {"provider": "ai_studio", "model": "gemini-2.5-flash"},

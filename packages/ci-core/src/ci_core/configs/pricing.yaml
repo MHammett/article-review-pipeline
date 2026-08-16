@@ -19,6 +19,30 @@
 # Sort longer IDs before shorter ones if two share a prefix.
 #
 # To add a new model: append a line and bump the date in model_registry.yaml.
+#
+# Why this table survived the litellm migration
+# ---------------------------------------------
+# litellm ships its own cost table (`litellm.model_cost`) and the obvious move
+# was to drop this file and use it. Checked model by model on 2026-08-14
+# (litellm 1.96.2), it disagrees with the rates here on five of the models
+# actually run:
+#
+#   model                   here          litellm
+#   mistral-large-latest     3.00/ 9.00    0.50/ 1.50
+#   mistral-medium-3-5       2.00/ 6.00    1.50/ 7.50
+#   mistral-small-latest     0.10/ 0.30    0.06/ 0.18
+#   sonar-pro                1.00/ 8.00    3.00/15.00
+#   sonar                    0.50/ 1.50    1.00/ 1.00
+#
+# The disagreements run in both directions, so adopting it wholesale would not
+# even be uniformly conservative: it would under-report Perplexity and
+# over-report Mistral on every run.
+#
+# One correction goes the other way and is worth recording. grok-build-0.1 was
+# [0.30, 1.00] here, which matched no published xAI rate; litellm said
+# 1.00/2.00 and docs.x.ai agreed, so the 2026-08-15 check fixed this file. The
+# lesson is not "litellm is unreliable" — it is that a second source is worth
+# having, and that the provider's own documentation settles it either way.
 
 unknown_price: [2.50, 10.00]   # fallback for unrecognized model IDs (conservative mid-range)
 

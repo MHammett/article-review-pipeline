@@ -132,7 +132,7 @@ class TestSupportsVerdictMustBeGrounded:
 
     def _verify(self, verdict_data, content=_SUPPORTING_PAGE):
         with patch(
-            "ci_article_review.adapters.citation.resolver.mistral.call",
+            "ci_article_review.adapters.citation.resolver.llm.call_provider",
             return_value={
                 "failed": False,
                 "data": verdict_data,
@@ -221,7 +221,7 @@ class TestInjectedPageCannotForgeAVerifiedCitation:
         to unverifiable rather than presented as verified.
         """
         with patch(
-            "ci_article_review.adapters.citation.resolver.mistral.call",
+            "ci_article_review.adapters.citation.resolver.llm.call_provider",
             return_value={
                 "failed": False,
                 "data": {"verdict": "supports", "reason": "The page confirms this."},
@@ -308,7 +308,7 @@ class TestVerificationCallsAreThrottled:
                     live["n"] -= 1
 
         with patch(
-            "ci_article_review.adapters.citation.resolver.mistral.call",
+            "ci_article_review.adapters.citation.resolver.llm.call_provider",
             side_effect=fake_call,
         ):
             threads = [

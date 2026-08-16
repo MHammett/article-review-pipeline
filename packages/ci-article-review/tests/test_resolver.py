@@ -281,7 +281,7 @@ class TestResolveCitations:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call"
+                "ci_article_review.adapters.citation.resolver.llm.call_provider"
             ) as mock_mistral,
         ):
             results = resolver.resolve_citations(
@@ -310,7 +310,7 @@ class TestResolveCitations:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 return_value={
                     "failed": False,
                     "data": {
@@ -351,7 +351,7 @@ class TestResolveCitations:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 return_value={
                     "failed": False,
                     "data": {
@@ -391,7 +391,7 @@ class TestResolveCitations:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 return_value={
                     "failed": True,
                     "error": "rate limited",
@@ -428,7 +428,7 @@ class TestResolveCitations:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 side_effect=RuntimeError("boom"),
             ),
         ):
@@ -474,7 +474,7 @@ class TestMultipleCitedSources:
     """
 
     def _verdicts(self, *by_url):
-        """Return a mistral.call double that answers per fetched URL."""
+        """Return an llm.call_provider double that answers per fetched URL."""
         table = dict(by_url)
         seen = []
 
@@ -482,7 +482,7 @@ class TestMultipleCitedSources:
             seen.append(url)
             return _page_response()
 
-        def _fake_call(_system, user_prompt, _api_key, model=None):
+        def _fake_call(_provider, _system, user_prompt, _api_key, model=None):
             verdict = table[seen[-1]]
             return {
                 "failed": False,
@@ -509,7 +509,7 @@ class TestMultipleCitedSources:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 side_effect=fake_call,
             ),
         ):
@@ -661,7 +661,7 @@ class TestVerifierSeesReadableContent:
     def _run(self, html, verdict="supports"):
         captured = {}
 
-        def fake_call(system, user, api_key, model=None):
+        def fake_call(provider, system, user, api_key, model=None):
             captured["user"] = user
             return {
                 "failed": False,
@@ -687,7 +687,7 @@ class TestVerifierSeesReadableContent:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 side_effect=fake_call,
             ),
         ):
@@ -738,7 +738,7 @@ class TestPdfCitations:
     def _run(self, extracted_text):
         captured = {}
 
-        def fake_call(system, user, api_key, model=None):
+        def fake_call(provider, system, user, api_key, model=None):
             captured["user"] = user
             return {
                 "failed": False,
@@ -769,7 +769,7 @@ class TestPdfCitations:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 side_effect=fake_call,
             ),
         ):
@@ -838,7 +838,7 @@ class TestAccessWallIsNotAMismatch:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call"
+                "ci_article_review.adapters.citation.resolver.llm.call_provider"
             ) as mock_mistral,
         ):
             results = resolver.resolve_citations(
@@ -1400,7 +1400,7 @@ class TestContentDriftDetection:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 return_value={
                     "failed": False,
                     "data": {
@@ -1454,7 +1454,7 @@ class TestContentDriftDetection:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 return_value={
                     "failed": False,
                     "data": {
@@ -1504,7 +1504,7 @@ class TestContentDriftDetection:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 return_value={
                     "data": {"verdict": "contradicts", "reason": "no"},
                     "model": "mistral-small-latest",

@@ -25,7 +25,7 @@ own pass name, and any failure degrading to "no review this run".
 import logging
 
 from ci_core import redact
-from ci_core.llm.adapters import mistral
+from ci_core import llm
 
 from . import seo as seo_analysis
 
@@ -164,7 +164,9 @@ def review(text, handoff=None, pub_config=None, api_keys=None, suggestions=None)
     user_prompt = _build_user_prompt(text, handoff, candidates)
 
     try:
-        result = mistral.call(_SYSTEM_PROMPT, user_prompt, api_key, model=_REVIEW_MODEL)
+        result = llm.call_provider(
+            "mistral", _SYSTEM_PROMPT, user_prompt, api_key, model=_REVIEW_MODEL
+        )
     except Exception as e:
         log.warning("SEO content review call raised: %s", e)
         return {"status": "failed", "reason": f"content review raised: {e}"}, None

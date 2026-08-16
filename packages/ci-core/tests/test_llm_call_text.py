@@ -1,198 +1,147 @@
-"""Tests for the ci_core.llm.adapters dispatch layer and call_text.
+"""Tests for the ci_core.llm dispatch layer and call_text.
 
-``call_provider`` is a thin name-based dispatch over the six adapter modules.
+``call_provider`` is a thin name-based dispatch onto the litellm shim.
 ``call_text`` sits on top of it for callers that want the assembled response
-text rather than the adapters' JSON-parsing verdict — ci-style-profile parses
-JSON itself downstream and feeds some model output into a later prompt
-verbatim, so for it a prose reply is usable rather than fatal.
+text rather than the shim's JSON-parsing verdict — ci-style-profile parses the
+output itself across several passes and feeds some of it back into a later
+prompt verbatim, so a prose reply is usable to it rather than fatal.
+
+The distinction that matters: a *malformed JSON* failure carrying text is not a
+failure to those callers, but a transport failure still is. Collapsing the two
+would feed an HTTP error body into a synthesis prompt as if it were content.
 """
+
+from unittest.mock import patch
 
 import pytest
 
-from ci_core.llm import adapters
+from ci_core import llm
 
 
-class TestGetAdapter:
-    def test_every_declared_adapter_imports(self):
-        for name in adapters.ADAPTER_MODULES:
-            mod = adapters.get_adapter(name)
-            assert callable(mod.call), f"{name} has no call()"
-
-    def test_unknown_adapter_raises_keyerror(self):
-        with pytest.raises(KeyError, match="Unknown adapter"):
-            adapters.get_adapter("not-a-provider")
-
-    def test_all_six_providers_declared(self):
-        assert set(adapters.ADAPTER_MODULES) == {
-            "openai",
-            "gemini",
-            "mistral",
-            "grok",
-            "claude",
-            "perplexity",
-        }
+def _shim_result(**overrides):
+    result = {
+        "failed": False,
+        "raw": '{"a": 1}',
+        "data": {"a": 1},
+        "model": "some-model",
+        "tokens": {"prompt": 10, "completion": 5, "cached": 0},
+        "elapsed_seconds": 1.5,
+    }
+    result.update(overrides)
+    return result
 
 
 class TestCallProvider:
-    def test_passes_arguments_through_to_adapter(self, monkeypatch):
-        seen = {}
-
-        def fake_call(system_prompt, user_prompt, api_key, **kwargs):
-            seen.update(
-                system=system_prompt, user=user_prompt, key=api_key, kwargs=kwargs
+    def test_dispatches_by_name_and_passes_arguments_through(self):
+        with patch.object(llm.client, "call", return_value=_shim_result()) as shim:
+            out = llm.call_provider(
+                "claude",
+                "sys",
+                "user",
+                "key",
+                retry=False,
+                retry_delay=3,
+                model="claude-opus-4-8",
+                provider_config={"effort": "high"},
             )
-            return {"failed": False, "data": {}, "raw": "{}"}
 
-        monkeypatch.setattr(adapters.get_adapter("grok"), "call", fake_call)
-        adapters.call_provider(
-            "grok", "sys", "usr", "xai-key", model="grok-4.3", retry=False
-        )
+        assert out == _shim_result()
+        args, kwargs = shim.call_args
+        assert args[0] == "claude"
+        assert args[1:4] == ("sys", "user", "key")
+        assert kwargs["retry"] is False
+        assert kwargs["retry_delay"] == 3
+        assert kwargs["model"] == "claude-opus-4-8"
+        assert kwargs["provider_config"] == {"effort": "high"}
 
-        assert seen["system"] == "sys"
-        assert seen["user"] == "usr"
-        assert seen["key"] == "xai-key"
-        assert seen["kwargs"]["model"] == "grok-4.3"
-        assert seen["kwargs"]["retry"] is False
+    def test_result_is_returned_unchanged(self):
+        payload = _shim_result(citations=["https://epa.gov"], truncated=True)
+        with patch.object(llm.client, "call", return_value=payload):
+            assert llm.call_provider("perplexity", "s", "u", "k") == payload
 
-    def test_returns_adapter_result_unchanged(self, monkeypatch):
-        payload = {
-            "failed": False,
-            "data": {"a": 1},
-            "raw": '{"a": 1}',
-            "extra": "kept",
-        }
-        monkeypatch.setattr(
-            adapters.get_adapter("claude"), "call", lambda *a, **kw: dict(payload)
-        )
-        assert adapters.call_provider("claude", "s", "u", "k") == payload
+    def test_unknown_provider_raises(self):
+        with pytest.raises(KeyError):
+            llm.call_provider("nope", "s", "u", "k")
 
-
-def _stub(monkeypatch, name, result):
-    monkeypatch.setattr(adapters.get_adapter(name), "call", lambda *a, **kw: result)
+    def test_every_advertised_provider_is_routable(self):
+        """PROVIDERS is what the pipeline validates model names against; a name
+        listed there that the shim cannot route is a config error at runtime."""
+        for name in llm.PROVIDERS:
+            with patch.object(llm.client, "call", return_value=_shim_result()):
+                assert llm.call_provider(name, "s", "u", "k")["failed"] is False
 
 
 class TestCallText:
-    def test_success_returns_raw_text_not_parsed_data(self, monkeypatch):
-        _stub(
-            monkeypatch,
-            "openai",
-            {
-                "failed": False,
-                "data": {"style_profile": "terse"},
-                "raw": '{"style_profile": "terse"}',
-                "model": "gpt-5.4",
-                "tokens": {"prompt": 10, "completion": 3},
-                "elapsed_seconds": 1.5,
-            },
-        )
-        out = adapters.call_text("openai", "s", "u", "k")
+    def test_successful_call_returns_text(self):
+        with patch.object(llm.client, "call", return_value=_shim_result()):
+            out = llm.call_text("mistral", "s", "u", "k")
 
         assert out["failed"] is False
-        assert out["content"] == '{"style_profile": "terse"}'
-        assert out["model"] == "gpt-5.4"
-        assert out["tokens"] == {"prompt": 10, "completion": 3}
+        assert out["content"] == '{"a": 1}'
+        assert out["tokens"] == {"prompt": 10, "completion": 5, "cached": 0}
         assert out["elapsed"] == 1.5
+        assert out["model"] == "some-model"
 
-    def test_malformed_json_with_text_is_passed_through_as_success(self, monkeypatch):
-        # The adapters require JSON because the review pipeline needs structured
-        # findings. Text-mode callers parse it themselves, so prose is usable.
-        _stub(
-            monkeypatch,
-            "mistral",
-            {
-                "failed": True,
-                "error": "Malformed JSON response",
-                "raw": "Here is my analysis, in prose.",
-                "model": "mistral-medium-3-5",
-                "tokens": {"prompt": 5, "completion": 7},
-                "elapsed_seconds": 0.5,
-            },
+    def test_malformed_json_with_text_is_rescued_as_success(self):
+        """The shim calls a prose reply a failure because the review pipeline
+        needs structured findings. Style synthesis does its own parsing, so the
+        text is the answer, not the error."""
+        prose = _shim_result(
+            failed=True,
+            error="Malformed JSON response",
+            raw="The author's voice is direct and unhedged.",
+            data=None,
         )
-        out = adapters.call_text("mistral", "s", "u", "k")
+        with patch.object(llm.client, "call", return_value=prose):
+            out = llm.call_text("claude", "s", "u", "k")
 
         assert out["failed"] is False
-        assert out["content"] == "Here is my analysis, in prose."
-        assert "error" not in out
+        assert out["content"] == "The author's voice is direct and unhedged."
 
-    def test_malformed_json_with_no_text_stays_failed(self, monkeypatch):
-        # An empty body is a real failure — there is nothing to hand downstream.
-        _stub(
-            monkeypatch,
-            "gemini",
-            {
-                "failed": True,
-                "error": "Malformed JSON response",
-                "raw": "",
-                "model": "gemini-2.5-flash",
-                "tokens": {},
-                "elapsed_seconds": 0.2,
-            },
+    def test_malformed_json_without_text_stays_failed(self):
+        """Nothing came back. There is no content to rescue."""
+        empty = _shim_result(
+            failed=True, error="Malformed JSON response", raw="", data=None
         )
-        out = adapters.call_text("gemini", "s", "u", "k")
+        with patch.object(llm.client, "call", return_value=empty):
+            out = llm.call_text("claude", "s", "u", "k")
 
         assert out["failed"] is True
-        assert out["content"] == ""
 
-    def test_transport_failure_stays_failed_and_keeps_error_body(self, monkeypatch):
-        _stub(
-            monkeypatch,
-            "perplexity",
-            {
-                "failed": True,
-                "error": "401 Client Error: Unauthorized",
-                "error_body": '{"error": "invalid api key"}',
-                "raw": None,
-                "model": "sonar-pro",
-                "tokens": {},
-                "elapsed_seconds": 0.1,
-            },
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "HTTP 401",
+            "Timed out after 300s",
+            "Connection aborted",
+        ],
+    )
+    def test_transport_failures_stay_failed(self, error):
+        """Rescuing these would feed an HTTP error body into the next prompt as
+        if a model had written it."""
+        failure = _shim_result(
+            failed=True, error=error, raw="", data=None, error_body="upstream said no"
         )
-        out = adapters.call_text("perplexity", "s", "u", "k")
+        with patch.object(llm.client, "call", return_value=failure):
+            out = llm.call_text("grok", "s", "u", "k")
 
         assert out["failed"] is True
-        assert out["error"] == "401 Client Error: Unauthorized"
-        assert out["error_body"] == '{"error": "invalid api key"}'
-        assert out["content"] == ""
+        assert out["error"] == error
+        assert out["error_body"] == "upstream said no"
 
-    def test_empty_response_failure_stays_failed(self, monkeypatch):
-        _stub(
-            monkeypatch,
-            "claude",
-            {
-                "failed": True,
-                "error": "Empty text response (stop_reason='max_tokens')",
-                "raw": None,
-                "model": "claude-opus-4-8",
-                "tokens": {},
-                "elapsed_seconds": 3.0,
-            },
+    def test_transport_failure_carrying_text_stays_failed(self):
+        """A partial body received before the socket dropped is not an answer."""
+        partial = _shim_result(
+            failed=True, error="Connection aborted", raw='{"partial": tru', data=None
         )
-        out = adapters.call_text("claude", "s", "u", "k")
+        with patch.object(llm.client, "call", return_value=partial):
+            out = llm.call_text("grok", "s", "u", "k")
+
         assert out["failed"] is True
 
-    def test_model_falls_back_to_adapter_name_when_absent(self, monkeypatch):
-        _stub(monkeypatch, "grok", {"failed": False, "raw": "{}"})
-        assert adapters.call_text("grok", "s", "u", "k")["model"] == "grok"
+    def test_model_falls_back_to_the_requested_name(self):
+        """The cost log is keyed on this; a blank model bills at unknown_price."""
+        with patch.object(llm.client, "call", return_value=_shim_result(model=None)):
+            out = llm.call_text("grok", "s", "u", "k", model="grok-4.3")
 
-
-class TestAdaptersReturnRawOnSuccess:
-    """Every adapter must include the assembled text as ``raw`` on success.
-
-    ``call_text`` is built on that key; an adapter that stopped emitting it
-    would silently start returning empty content instead of failing loudly.
-    """
-
-    @pytest.mark.parametrize("name", sorted(adapters.ADAPTER_MODULES))
-    def test_success_return_includes_raw(self, name):
-        import inspect
-
-        src = inspect.getsource(adapters.get_adapter(name))
-        successes = src.count('"failed": False,')
-        raws = src.count('"raw": ')
-        assert successes > 0, f"{name}: no success return found"
-        # Each success return is immediately followed by a "raw" key; failure
-        # paths may add more, so raws >= successes.
-        assert raws >= successes, (
-            f"{name}: {successes} success return(s) but only {raws} 'raw' key(s) — "
-            f"a success path is missing the assembled text"
-        )
+        assert out["model"] == "grok-4.3"

@@ -33,7 +33,7 @@ import logging
 import re
 
 from ci_core import redact
-from ci_core.llm.adapters import mistral
+from ci_core import llm
 
 from . import seo as seo_analysis
 
@@ -326,7 +326,8 @@ def generate(text, handoff=None, pub_config=None, api_keys=None, seo_result=None
     )
 
     try:
-        result = mistral.call(
+        result = llm.call_provider(
+            "mistral",
             _SYSTEM_PROMPT,
             user_prompt,
             api_key,
