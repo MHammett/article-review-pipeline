@@ -1116,7 +1116,7 @@ class TestCitationsPairLiveAndArchiveLinks:
         is what decides which branch this function takes.
         """
         wayback.reset_rate_limit_state()
-        wayback._consecutive_rate_limits = wayback._CIRCUIT_TRIP_AFTER
+        wayback._rate_limited_lookups = wayback._CIRCUIT_TRIP_AFTER
         try:
             result = wayback.check("https://example.org/page")
         finally:
