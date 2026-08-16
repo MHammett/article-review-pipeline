@@ -159,9 +159,11 @@ as if lookups were sequential, and `check()` runs on `_MAX_PARALLEL` resolver
 threads. Under that, the backoff slept in the failing thread while the others
 kept the pace up, and a success zeroed a counter shared with every other thread,
 so a run throttled four-in-five never tripped the breaker at all. Fixed properly
-in PR #99, where the 429 moves a clock every thread waits on and the count is a
-per-run budget. Recording the sequence because the first fix looked right and
-tested green: concurrency was the part nobody checked.
+in #99 (merged 2026-08-16), where a 429 moves a clock every thread waits on and
+the count is a per-run budget. Recording the sequence because the first fix
+looked right and tested green: concurrency was the part nobody checked, and the
+test that proves it has to drive `check()` from a pool — a single-threaded test
+passes against the broken version.
 `submit()` already supported authenticated SPN2 via an archive.org S3-style key
 pair (`Authorization: LOW <access>:<secret>`).
 
