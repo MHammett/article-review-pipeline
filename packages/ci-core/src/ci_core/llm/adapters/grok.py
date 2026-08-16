@@ -10,7 +10,10 @@ from ... import redact
 DEFAULT_MODEL = "grok-4.3"
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 
-# Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
+# Default FIRST-BYTE allowance (seconds) — how long to wait for the stream to
+# start, not the gap between chunks once it has (that is stream_gap_timeout,
+# a tight constant handled in ci_core/llm/streaming.py) and not the
+# sliding-scale wall-clock budget.
 _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 
 # Fallback chain tried in order when primary model returns a capacity error (503).
@@ -47,10 +50,12 @@ def call(
         m for m in _FALLBACK_MODELS if m != requested_model
     ]
 
-    # Streaming socket timeout = inter-token read-gap (small constant). The big
-    # sliding-scale timeout_seconds is no longer a socket timeout; it survives only
-    # as the pipeline's per-task wall-clock backstop.
+    # Socket timeout = FIRST-BYTE allowance (how long the stream may take to
+    # start). The inter-chunk stall detector is separate and tight (`gap`), and
+    # the sliding-scale timeout_seconds is neither — it survives only as the
+    # pipeline's per-task wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
+    gap = streaming.gap_timeout(cfg)
 
     for attempt_model in models_to_try:
         result = _call_model(
@@ -62,6 +67,7 @@ def call(
             retry_delay=retry_delay,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
+            gap=gap,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -94,9 +100,12 @@ def _call_model(
     retry_delay=10,
     reasoning_effort=None,
     timeout=None,
+    gap=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -142,7 +151,9 @@ def _call_model(
 
     try:
         resp = _post()
-        assembled = streaming.accumulate_chat_completions(resp)
+        assembled = streaming.accumulate_chat_completions(
+            resp, first_byte=timeout[1], gap=gap
+        )
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         safe_err = _redact_key(e, api_key)

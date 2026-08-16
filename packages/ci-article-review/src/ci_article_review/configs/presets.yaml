@@ -24,12 +24,26 @@
 # Grok note: reasoning is model-selection based. Use grok-4.20-0309-reasoning for CoT;
 #   reasoning_effort is not a supported Grok API parameter.
 #
-# stream_read_timeout note: the review adapters stream (SSE); the socket read
-# timeout is normally a small constant "max gap between chunks" (see
-# ci_core/llm/streaming.py), NOT the total generation budget. High/xhigh
-# reasoning effort can produce a long SILENT period — zero bytes on the wire,
-# not even a keep-alive — while the model reasons before it starts emitting
-# visible output.
+# stream_read_timeout note: the review adapters stream (SSE). There are now TWO
+# streaming knobs, and they do different jobs (see ci_core/llm/streaming.py):
+#
+#   stream_read_timeout — the FIRST-BYTE allowance, i.e. the socket read timeout.
+#     Covers everything before generation starts: queueing, a grounded model's web
+#     search, and any reasoning done with zero bytes on the wire. Necessarily large
+#     for grounded models. This is what every value below is sizing.
+#   stream_gap_timeout  — the INTER-CHUNK gap once the stream has started, i.e. the
+#     liveness detector. Defaults to 60s for every provider and should almost never
+#     be overridden: a stream that has begun emitting keeps emitting, so a long
+#     silence mid-response means a dead connection, not a slow model.
+#
+# These used to be one value, which is why the numbers below crept upward: each
+# bump was chasing a slow-but-alive call, and the side effect was that a genuinely
+# dead connection took just as long to notice. Slow-but-alive is the wall-clock
+# backstop's job (configs/timeouts.yaml); the gap only catches dead.
+#
+# High/xhigh reasoning effort can produce a long SILENT period — zero bytes on the
+# wire, not even a keep-alive — while the model reasons before emitting visible
+# output. That is a first-byte problem, so it belongs to stream_read_timeout.
 #
 # OpenAI: originally hit this hard — gpt-5.5 at xhigh failed 5/5 calls at ~121s
 # with 0 output tokens against the default 120s read-gap under Chat Completions,
@@ -45,6 +59,16 @@
 # Mistral was NOT migrated (still Chat Completions, no reasoning-summary
 # equivalent available) and keeps its stopgap bump: mistral-medium-3-5 high
 # effort saw a marginal timeout in the wild (124s vs the 120s default).
+# Worth revisiting: streaming.accumulate_chat_completions shows Mistral emits
+# typed {"type": "thinking"} chunks in delta.content, so it may already be
+# feeding the socket during reasoning and not need the override at all. Measure
+# with --no-timeout before removing it.
+#
+# Gemini: the adapter now sends thinkingConfig.includeThoughts unconditionally,
+# not only when thinking_budget is set. gemini-2.5-pro thinks on every call, so
+# the `thorough` entry below (no thinking_budget) previously streamed nothing
+# while it reasoned. Thought parts now keep the socket fed during that phase,
+# which should reduce first-byte pressure on both tiers.
 
 economy:
   thoroughness: standard
@@ -113,18 +137,22 @@ thorough:
       stream_read_timeout: 200   # not migrated — see the Mistral note above
     perplexity:
       model: sonar-reasoning-pro
-      stream_read_timeout: 500   # Third incremental bump in a row was still marginal:
-                                  # 160→280→350, each exceeded within days (350 was hit
-                                  # at 352.29s and 354.18s on two domains in the same
-                                  # run, plus the wall-clock budget got hit directly on
-                                  # a third — see timeouts.yaml's sonar model_multiplier).
-                                  # sonar's near-exact matches to whatever the read-gap
-                                  # value is suggest one long silent stretch dominates
-                                  # the call, not a genuine inter-chunk stall — i.e. this
-                                  # is closer to a total-time bound than a real read-gap
-                                  # for this provider. Jumped decisively (350->500) rather
-                                  # than nudging again; root cause (why sonar got this
-                                  # much slower) is being investigated separately.
+      stream_read_timeout: 500   # FIRST-BYTE allowance. Reached by three bumps that
+                                  # each looked marginal within days: 160→280→350→500
+                                  # (350 was hit at 352.29s and 354.18s on two domains in
+                                  # the same run, plus the wall-clock budget got hit
+                                  # directly on a third — see timeouts.yaml's sonar
+                                  # model_multiplier).
+                                  #
+                                  # The diagnosis that drove those bumps is now the
+                                  # design: sonar's failures landed at near-exactly
+                                  # whatever the value was set to, meaning one long
+                                  # silent stretch — its search phase — dominates the
+                                  # call rather than any inter-chunk stall. That is a
+                                  # first-byte cost, which is what this knob now means.
+                                  # It no longer doubles as the stall detector, so 500s
+                                  # here costs nothing in dead-connection detection
+                                  # (stream_gap_timeout stays at the 60s default).
     grok:
       model: grok-4.20-0309-reasoning
     claude:

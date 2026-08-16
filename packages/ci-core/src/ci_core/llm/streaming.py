@@ -10,14 +10,26 @@ is the gap between successive chunks, so it becomes a small, roughly constant
 
 Timeout model
 -------------
-``requests`` accepts ``timeout=(connect, read)``. When ``stream=True`` the read
-component applies to each socket read while iterating the body, i.e. it is the
-inter-token gap. :func:`stream_timeout` builds that tuple. It deliberately does
-NOT use the sliding-scale ``timeout_seconds`` value the pipeline computes — under
-streaming that big number is a wall-clock *backstop* enforced by the pipeline's
-per-task thread wrapper, not a socket timeout. A per-model ``stream_read_timeout``
-overrides the adapter default if a grounded/search model needs a longer first-byte
-allowance (search runs before the first token arrives).
+Three layers, each with exactly one job:
+
+  1. **First-byte allowance** (``stream_read_timeout``, socket read timeout via
+     :func:`stream_timeout`) — covers everything before generation starts:
+     queueing, a grounded model's web search, silent reasoning. Necessarily
+     generous; sonar-reasoning-pro needs hundreds of seconds here.
+  2. **Inter-chunk gap** (``stream_gap_timeout``, enforced by
+     :func:`_iter_lines_with_gap`) — the liveness detector. Tight and roughly
+     constant: a stream that has started emitting keeps emitting, so a long
+     silence mid-response means the connection is dead, not slow.
+  3. **Wall-clock backstop** (the pipeline's sliding-scale ``timeout_seconds``,
+     enforced by ``ci_article_review.pipeline._run_with_timeout``) — "this call
+     is alive but I'm not waiting any longer". Deliberately ignored here.
+
+Layers 1 and 2 used to be a single value, which meant the stall detector had to
+be sized for the *search* phase. That is how perplexity's read timeout reached
+500s: each bump was chasing slow-but-alive calls, and the side effect was that a
+genuinely dead sonar connection took over eight minutes to notice — the exact
+thing a stall detector exists to prevent. Splitting them lets layer 1 stay
+generous while layer 2 goes back to catching dead connections quickly.
 
 Parsers
 -------
@@ -38,6 +50,10 @@ accumulated string.
 
 import json
 import logging
+import queue
+import threading
+
+import requests
 
 log = logging.getLogger(__name__)
 
@@ -45,32 +61,126 @@ log = logging.getLogger(__name__)
 # the TCP/TLS connection has nothing to do with generation length.
 DEFAULT_CONNECT_TIMEOUT = 30
 
-# Default inter-token / read-gap timeout (seconds) when a model config does not
-# set ``stream_read_timeout``. This is the maximum allowed stall between chunks,
-# NOT the total generation budget. Grounded models (Gemini, Perplexity) run a web
-# search before the first token, so they default higher to cover time-to-first-byte.
-DEFAULT_READ_TIMEOUT = 120
+# Default FIRST-BYTE allowance (seconds) when a model config does not set
+# ``stream_read_timeout``. This covers everything that happens before generation
+# starts: queueing, a grounded model's web search, and any reasoning the provider
+# does without putting bytes on the wire. Grounded models (Gemini, Perplexity)
+# override it upward because their search phase runs before the first token.
+DEFAULT_FIRST_BYTE_TIMEOUT = 120
+
+# Backwards-compatible alias. The old name described this value as an inter-token
+# gap, but every value ever set for it was chosen to survive a pre-first-byte
+# silence, which is what it now means explicitly.
+DEFAULT_READ_TIMEOUT = DEFAULT_FIRST_BYTE_TIMEOUT
+
+# Default inter-chunk GAP (seconds) — the liveness detector. Once a stream has
+# produced its first chunk, a healthy provider keeps emitting: the worst gap ever
+# observed here is ~8s (gpt-5.5 xhigh reasoning-summary deltas). Anything past a
+# minute means the connection is dead, not slow.
+#
+# This is deliberately NOT sized to cover slow generation. Sizing the stall
+# detector to survive slow-but-alive calls is what drove perplexity's value from
+# 160 -> 280 -> 350 -> 500, and a 500s stall detector means an abandoned call
+# holds a socket (and delays interpreter exit via the executor's atexit join —
+# see ci_article_review.pipeline._run_with_timeout) for over eight minutes.
+# Slow-but-alive is the wall-clock backstop's job; this one only catches dead.
+DEFAULT_GAP_TIMEOUT = 60
 
 
-def stream_timeout(cfg, default_read=DEFAULT_READ_TIMEOUT):
-    """Return the ``(connect, read)`` timeout tuple for a streaming request.
+def stream_timeout(cfg, default_read=DEFAULT_FIRST_BYTE_TIMEOUT):
+    """Return the ``(connect, read)`` socket timeout tuple for a streaming request.
 
-    ``read`` is the inter-token gap, not the total generation time. A per-model
-    ``stream_read_timeout`` in the provider config overrides the adapter default;
-    the sliding-scale ``timeout_seconds`` is intentionally ignored here (it is the
-    pipeline's wall-clock backstop, not a socket read timeout).
+    ``read`` here is the FIRST-BYTE allowance, not the inter-chunk gap. It has to
+    stay generous enough to survive a grounded model's search phase, so it cannot
+    also serve as the stall detector — :func:`gap_timeout` supplies that, enforced
+    independently of the socket (see :func:`_iter_lines_with_gap`).
+
+    A per-model ``stream_read_timeout`` in the provider config overrides the
+    default. The sliding-scale ``timeout_seconds`` is intentionally ignored here:
+    it is the pipeline's wall-clock backstop, not a socket timeout.
     """
     read = (cfg or {}).get("stream_read_timeout") or default_read
     return (DEFAULT_CONNECT_TIMEOUT, read)
 
 
-def iter_sse_data(resp):
+def gap_timeout(cfg, default_gap=DEFAULT_GAP_TIMEOUT):
+    """Return the inter-chunk stall timeout (seconds) for a streaming request.
+
+    Overridden per model with ``stream_gap_timeout``. Unlike the first-byte
+    allowance this should rarely need raising: a provider that streams at all
+    streams steadily, and a long gap mid-response means a dead connection.
+    """
+    return (cfg or {}).get("stream_gap_timeout") or default_gap
+
+
+def _iter_lines_with_gap(resp, first_byte_seconds, gap_seconds):
+    """Yield decoded lines, aborting if the stream goes quiet for too long.
+
+    Two separate allowances: ``first_byte_seconds`` before the first chunk, and
+    ``gap_seconds`` between every chunk after it.
+
+    Why a reader thread rather than a clock check in the loop: ``iter_lines``
+    blocks inside a socket read, so the consumer only regains control when a line
+    arrives or the socket's own timeout fires. Since the socket timeout has to
+    stay generous enough for the first byte, it cannot double as a tight stall
+    detector. Reading in a daemon thread and consuming through a queue decouples
+    the two — the consumer's ``Queue.get`` timeout enforces the gap regardless of
+    what the socket is willing to wait for.
+
+    On a stall the response is closed, which unblocks the reader's pending socket
+    read so the thread exits promptly instead of lingering until the generous
+    socket timeout expires. The thread is a daemon as a second line of defence:
+    a stuck reader must never keep the interpreter alive.
+    """
+    q = queue.Queue()  # unbounded: a bounded queue could block the reader in
+    # ``put`` after the consumer has given up and stopped draining.
+    done = object()
+
+    def _read():
+        try:
+            for line in resp.iter_lines(decode_unicode=True):
+                q.put(line)
+        except BaseException as exc:  # noqa: BLE001 — relayed to the consumer
+            q.put(exc)
+        finally:
+            q.put(done)
+
+    reader = threading.Thread(target=_read, name="sse-reader", daemon=True)
+    reader.start()
+
+    budget = first_byte_seconds
+    started = False
+    while True:
+        try:
+            item = q.get(timeout=budget)
+        except queue.Empty:
+            resp.close()
+            phase = "mid-stream" if started else "before first chunk"
+            raise requests.exceptions.ReadTimeout(
+                f"SSE stream stalled {phase}: nothing received for {budget}s"
+            )
+        if item is done:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        started = True
+        budget = gap_seconds
+        yield item
+
+
+def iter_sse_data(resp, first_byte=None, gap=None):
     """Yield the parsed JSON object from each ``data:`` line of an SSE response.
 
     Stops at the ``data: [DONE]`` sentinel. Non-``data:`` lines (``event:``,
     ``id:``, comments, blank keep-alives) and unparseable payloads are skipped.
-    A read-gap timeout while iterating propagates out of ``iter_lines`` as a
-    ``requests`` exception, which the calling adapter treats as a failed call.
+    A stall while iterating propagates as a ``requests`` exception, which the
+    calling adapter treats as a failed call.
+
+    When ``gap`` is supplied the stream is read through :func:`_iter_lines_with_gap`,
+    which enforces a tight inter-chunk stall timeout independently of the socket's
+    (generous) first-byte allowance. With ``gap`` omitted the response is iterated
+    directly and the socket timeout is the only bound — the pre-split behaviour,
+    kept so tests and callers that hand in a plain stub response still work.
 
     ``resp.encoding`` is forced to UTF-8 before any iteration starts. SSE
     (``text/event-stream``) is UTF-8 by spec, but none of the six providers'
@@ -88,7 +198,13 @@ def iter_sse_data(resp):
     through this function.
     """
     resp.encoding = "utf-8"
-    for raw_line in resp.iter_lines(decode_unicode=True):
+    if gap:
+        lines = _iter_lines_with_gap(
+            resp, first_byte or DEFAULT_FIRST_BYTE_TIMEOUT, gap
+        )
+    else:
+        lines = resp.iter_lines(decode_unicode=True)
+    for raw_line in lines:
         if not raw_line:
             continue
         # iter_lines may hand back bytes if decode_unicode is ignored by a mock.
@@ -105,7 +221,7 @@ def iter_sse_data(resp):
             continue
 
 
-def accumulate_chat_completions(resp):
+def accumulate_chat_completions(resp, first_byte=None, gap=None):
     """Accumulate an OpenAI-compatible chat-completions stream.
 
     Shared by OpenAI, Grok, Mistral, and Perplexity. Returns a dict with the
@@ -132,7 +248,7 @@ def accumulate_chat_completions(resp):
     search_results = []
     stream_error = None
 
-    for obj in iter_sse_data(resp):
+    for obj in iter_sse_data(resp, first_byte=first_byte, gap=gap):
         if obj.get("usage"):
             usage = obj["usage"]
         if obj.get("citations"):
@@ -163,7 +279,7 @@ def accumulate_chat_completions(resp):
     }
 
 
-def accumulate_anthropic(resp):
+def accumulate_anthropic(resp, first_byte=None, gap=None):
     """Accumulate an Anthropic ``/v1/messages`` SSE stream.
 
     Anthropic emits ``message_start`` (carries input-token usage),
@@ -177,7 +293,7 @@ def accumulate_anthropic(resp):
     usage = {}
     stop_reason = None
 
-    for obj in iter_sse_data(resp):
+    for obj in iter_sse_data(resp, first_byte=first_byte, gap=gap):
         etype = obj.get("type")
         if etype == "message_start":
             msg_usage = obj.get("message", {}).get("usage", {})
@@ -202,7 +318,7 @@ def accumulate_anthropic(resp):
     return {"content": "".join(parts), "usage": usage, "stop_reason": stop_reason}
 
 
-def accumulate_gemini(resp):
+def accumulate_gemini(resp, first_byte=None, gap=None):
     """Accumulate a Gemini ``streamGenerateContent?alt=sse`` stream.
 
     Each ``data:`` chunk is a partial ``GenerateContentResponse``. Text parts are
@@ -219,7 +335,7 @@ def accumulate_gemini(resp):
     usage = {}
     finish_reason = None
 
-    for obj in iter_sse_data(resp):
+    for obj in iter_sse_data(resp, first_byte=first_byte, gap=gap):
         if obj.get("usageMetadata"):
             usage = obj["usageMetadata"]
         for cand in obj.get("candidates") or []:
@@ -232,7 +348,7 @@ def accumulate_gemini(resp):
     return {"content": "".join(parts), "usage": usage, "finish_reason": finish_reason}
 
 
-def accumulate_openai_responses(resp):
+def accumulate_openai_responses(resp, first_byte=None, gap=None):
     """Accumulate an OpenAI Responses API (``/v1/responses``) SSE stream.
 
     The Responses API streams typed events: ``response.output_text.delta`` carries
@@ -255,7 +371,7 @@ def accumulate_openai_responses(resp):
     reasoning_parts = []
     usage = {}
 
-    for obj in iter_sse_data(resp):
+    for obj in iter_sse_data(resp, first_byte=first_byte, gap=gap):
         etype = obj.get("type")
         if etype == "response.output_text.delta":
             parts.append(obj.get("delta", "") or "")

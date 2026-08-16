@@ -14,6 +14,15 @@
 # (escape hatch). Otherwise the pipeline computes each model's backstop from the
 # draft's character count and the model + reasoning effort.
 #
+# HOW TO CHANGE A CELL: measure it, do not nudge it. Run with --no-timeout so the
+# call runs to completion and its true elapsed time is recorded, then set the cell
+# from that number. Every value below that was raised incrementally against a
+# ceiling it had just hit has needed raising again — sonar's read-gap went
+# 160->280->350->500 and its multiplier 3.0->5.0->7.0, grok 1.2->2.0, mistral
+# 1.3->1.7 — because a timed-out call reports the ceiling, not the real duration,
+# so the next guess is built on the previous guess. The one cell measured properly
+# (gpt-5.5 xhigh, max 456s under --no-timeout) is the one that has stayed put.
+#
 # CALIBRATION NOTE: the model_multipliers and effort_multipliers are anchored at
 # the "≤80000" size bucket (size_mult = 1.0), from one ~62,000-char document.
 #
@@ -57,7 +66,27 @@ floor_seconds: 90
 # grounded search latency varies widely). Sized so each cell clears its observed tail:
 # mistral high seen >285s (budget→341), gemini grounded seen 220s (→300), gpt-5.5
 # xhigh seen >632s (→1024). Raise for more headroom; lower to fail-fast sooner.
-variance_margin: 1.25
+#
+# 1.25 -> 2.5 (2026-08-16). Two reasons to be generous here now:
+#
+#   * Provider load is a real, unmeasured axis. Published monitoring puts peak-hour
+#     latency at roughly 2x off-peak (OpenAI P99 3-5x its P50; Anthropic ~1.8x
+#     P95/P50), and nothing we run samples the clock densely enough to tell a slow
+#     model from a busy afternoon. A flat 2x absorbs the whole diurnal envelope
+#     without needing a time-of-day table nobody can calibrate.
+#   * Since the read-gap split (see ci_core/llm/streaming.py) this value governs
+#     ONLY the wall-clock backstop, whose sole job is "this call is alive but I am
+#     not waiting any longer". Dead connections are caught by the inter-chunk gap
+#     in ~60s regardless of what this says. Over-sizing it therefore costs almost
+#     nothing, while under-sizing it throws away a call that was going to succeed
+#     — along with the elapsed-time measurement needed to size the cell correctly.
+#
+# NOTE: several cells are clamped by task_timeout_seconds (default 1100 -> 1085)
+# before this margin can apply — openai/gpt-5.5 xhigh already sits at the clamp, so
+# raising this does nothing for it. Raise task_timeout_seconds if the wall-clock
+# genuinely needs to go higher; that is a "how long am I willing to wait" decision,
+# not a latency measurement.
+variance_margin: 2.5
 
 # By draft character count. 62k (this calibration doc) sits in the 1.0 anchor bucket.
 size_multipliers:
@@ -71,6 +100,15 @@ size_multipliers:
 # Prefix match, longest key first (like the pricing table).
 # Grounded models (gemini, sonar) carry a high base because their search latency
 # is large and variable by domain, and isn't captured by a reasoning-effort knob.
+#
+# WHY SOME OF THESE LOOK ABSURD (gemini 4.0, sonar 7.0, grok 2.0): those three
+# providers have no reasoning_effort parameter at all — gemini uses thinking_budget,
+# grok selects reasoning by model name, perplexity has no knob — so they fall through
+# to effort_multipliers.default (1.0) and their model multiplier ends up carrying the
+# reasoning cost as well as the model cost. The number is doing two jobs. Don't
+# "clean it up" by comparing it against gpt-5.4's 1.0; they are not measuring the
+# same thing. Splitting the axes properly is only worth it if these cells start
+# drifting again now that the wall-clock is a backstop rather than a tight budget.
 model_multipliers:
   grok:               2.0   # was 1.2 (-> 126s at the 1.4 size bucket), which grok used
                             # 100% of on a 130k-char run: completeness timed out at 126s

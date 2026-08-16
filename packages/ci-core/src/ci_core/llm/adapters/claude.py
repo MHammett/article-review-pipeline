@@ -46,7 +46,10 @@ DEFAULT_MODEL = "claude-opus-4-8"
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
-# Inter-token read-gap timeout (seconds); constant, not the sliding-scale value.
+# Default FIRST-BYTE allowance (seconds) — how long to wait for the stream to
+# start, not the gap between chunks once it has (that is stream_gap_timeout,
+# a tight constant handled in ci_core/llm/streaming.py) and not the
+# sliding-scale wall-clock budget.
 _READ_TIMEOUT = streaming.DEFAULT_READ_TIMEOUT
 
 # Models that use adaptive thinking (always on).
@@ -118,9 +121,11 @@ def call(
     requested_model = model or cfg.get("model") or DEFAULT_MODEL
     thinking_budget = cfg.get("thinking_budget")
     effort = cfg.get("effort")
-    # Streaming socket timeout = inter-token read-gap (small constant). The big
+    # Socket timeout = FIRST-BYTE allowance (how long the stream may take to
+    # start); the inter-chunk stall detector is separate and tight (`gap`). The
     # sliding-scale timeout_seconds survives only as the pipeline's wall-clock backstop.
     timeout = streaming.stream_timeout(cfg, _READ_TIMEOUT)
+    gap = streaming.gap_timeout(cfg)
     models_to_try = [requested_model] + [
         m for m in _FALLBACK_MODELS if m != requested_model
     ]
@@ -136,6 +141,7 @@ def call(
             thinking_budget=thinking_budget,
             effort=effort,
             timeout=timeout,
+            gap=gap,
         )
         if not result.get("failed"):
             if attempt_model != requested_model:
@@ -169,9 +175,12 @@ def _call_model(
     thinking_budget=None,
     effort=None,
     timeout=None,
+    gap=None,
 ):
     if timeout is None:
         timeout = streaming.stream_timeout(None, _READ_TIMEOUT)
+    if gap is None:
+        gap = streaming.gap_timeout(None)
     adaptive = _is_adaptive_model(model)
 
     # Warn if thinking_budget is set on an adaptive model — switch to adaptive path.
@@ -245,7 +254,7 @@ def _call_model(
 
     try:
         resp = _post()
-        assembled = streaming.accumulate_anthropic(resp)
+        assembled = streaming.accumulate_anthropic(resp, first_byte=timeout[1], gap=gap)
     except Exception as e:
         elapsed = round(time.monotonic() - t0, 2)
         safe_err = _redact_key(e, api_key)
