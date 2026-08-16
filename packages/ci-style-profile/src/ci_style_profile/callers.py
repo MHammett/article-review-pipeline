@@ -24,8 +24,8 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from concurrent.futures import TimeoutError as FuturesTimeout
 
+from ci_core.concurrency import run_with_timeout
 from ci_core.config_helpers import normalize_model_configs
 from ci_core.llm import timeout_model
 from ci_core.llm import call_text
@@ -182,25 +182,26 @@ def call_all(
     def _task(name: str, cfg: dict) -> tuple[str, dict]:
         """Run one call under its wall-clock backstop.
 
-        Same shape as the review pipeline's ``_run_with_timeout``: an inner
-        single-worker executor so the budget applies to this call alone rather
-        than to the position of its future in a completion queue.
+        Same shape as the review pipeline's ``_run_with_timeout``, and the same
+        shared helper: the budget applies to this call alone rather than to the
+        position of its future in a completion queue, and a timed-out call is
+        abandoned rather than killed. See :mod:`ci_core.concurrency` for why
+        that abandonment has to happen on a daemon thread.
         """
         budget = backstops.get(name)
-        inner = ThreadPoolExecutor(max_workers=1)
-        fut = inner.submit(
-            call_one,
-            name,
-            cfg,
-            api_keys,
-            system_prompt,
-            user_prompt,
-            pass_name=pass_name,
-        )
         try:
-            return name, fut.result(timeout=budget)
-        except FuturesTimeout:
-            fut.cancel()
+            return name, run_with_timeout(
+                lambda: call_one(
+                    name,
+                    cfg,
+                    api_keys,
+                    system_prompt,
+                    user_prompt,
+                    pass_name=pass_name,
+                ),
+                budget,
+            )
+        except TimeoutError:
             log.error("call_all: %s exceeded its %ss wall-clock backstop", name, budget)
             return name, {
                 "failed": True,
@@ -211,13 +212,6 @@ def call_all(
                 # record the budget as a lower bound rather than 0.
                 "elapsed": float(budget or 0.0),
             }
-        finally:
-            # wait=False so a timed-out call is genuinely abandoned. A running
-            # thread cannot be killed, so it lives on until its socket read-gap
-            # timeout fires — but the run stops waiting on it now, which is the
-            # whole point of a wall-clock backstop. (The context-manager form
-            # would re-join the thread here and undo the timeout.)
-            inner.shutdown(wait=False, cancel_futures=True)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_task, name, cfg): name for name, cfg in active.items()}

@@ -66,6 +66,7 @@ from . import consolidation
 from ci_core import redact
 from ci_core.config_helpers import normalize_model_configs
 from ci_core import llm
+from ci_core.concurrency import run_with_timeout
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from .analysis import readability as readability_analysis
@@ -903,32 +904,17 @@ def _global_ceiling(per_task_timeouts, retry_delay):
 def _run_with_timeout(fn, timeout, name):
     """Run ``fn`` under a per-task wall-clock backstop. Raises TimeoutError on expiry.
 
-    An inner single-worker executor so the budget applies to this call alone
-    rather than to the position of its future in a completion queue.
+    The budget applies to this call alone rather than to the position of its
+    future in a completion queue, and on expiry the call is genuinely abandoned
+    rather than killed — a running thread cannot be killed, and the run stops
+    *waiting* on it now, which is the whole point of a wall-clock backstop.
 
-    The executor is shut down with ``wait=False`` rather than used as a context
-    manager: a running thread cannot be killed, so on expiry the call is
-    genuinely abandoned and lives on until its socket read-gap timeout fires —
-    but the run stops *waiting* on it now, which is the whole point of a
-    wall-clock backstop. (The context-manager form re-joins the thread on the
-    way out, which would block until the slow call finished and undo the
-    timeout entirely.) Mirrors ci_style_profile.callers.call_all's ``_task``.
-
-    An abandoned thread can still delay interpreter exit, because
-    concurrent.futures joins its workers via atexit. That is accepted rather
-    than worked around: the delay is bounded by the adapter's read-gap timeout,
-    and the alternative (daemonizing the pool's threads) means reaching into
-    ThreadPoolExecutor internals to kill sockets mid-write.
+    See :mod:`ci_core.concurrency` for why this is a daemon thread and not a
+    single-worker executor. Short version: the executor form left abandoned
+    calls holding the interpreter open at exit, and ``ci-review`` processes were
+    found alive two days after finishing their work.
     """
-    inner = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    inner_future = inner.submit(fn)
-    try:
-        return inner_future.result(timeout=timeout)
-    except concurrent.futures.TimeoutError:
-        inner_future.cancel()
-        raise TimeoutError(f"Timed out after {timeout}s")
-    finally:
-        inner.shutdown(wait=False, cancel_futures=True)
+    return run_with_timeout(fn, timeout)
 
 
 def run_draft_pipeline(

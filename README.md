@@ -386,6 +386,8 @@ content-intelligence/
 │   │   │   │   └── model_registry.py  current/superseded model detection
 │   │   │   ├── extract.py        HTML/PDF -> readable text, claim-centred excerpts
 │   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
+│   │   │   ├── concurrency.py    run_with_timeout — the wall-clock backstop both
+│   │   │   │                     applications run their provider calls under
 │   │   │   ├── redact.py         scrubs API keys from error output before logging
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
 │   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml
