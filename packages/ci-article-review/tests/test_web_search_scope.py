@@ -65,22 +65,20 @@ class TestRunDomainAppliesTheScope:
 
     @staticmethod
     def _provider_config_for(domain, web_search_setting):
-        """Run one domain and return the provider_config the adapter received."""
+        """Run one domain and return the provider_config the LLM layer received."""
         captured = {}
 
-        class _FakeAdapter:
-            @staticmethod
-            def call(system, user, api_key, **kwargs):
-                captured.update(kwargs["provider_config"])
-                return {"raw": "{}"}
+        def _fake_call(provider, system, user, api_key, **kwargs):
+            captured.update(kwargs["provider_config"])
+            return {"raw": "{}"}
 
         model_configs = {"openai": {"model": "gpt-5.4"}}
         if web_search_setting is not None:
             model_configs["openai"]["web_search"] = web_search_setting
 
         with patch(
-            "ci_article_review.pipeline.importlib.import_module",
-            return_value=_FakeAdapter,
+            "ci_article_review.pipeline.llm.call_provider",
+            side_effect=_fake_call,
         ):
             _run_domain(
                 "openai",

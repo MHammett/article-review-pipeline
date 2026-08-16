@@ -474,7 +474,7 @@ class TestMultipleCitedSources:
     """
 
     def _verdicts(self, *by_url):
-        """Return a mistral.call double that answers per fetched URL."""
+        """Return an llm.call_provider double that answers per fetched URL."""
         table = dict(by_url)
         seen = []
 
@@ -482,7 +482,7 @@ class TestMultipleCitedSources:
             seen.append(url)
             return _page_response()
 
-        def _fake_call(_system, user_prompt, _api_key, model=None):
+        def _fake_call(_provider, _system, user_prompt, _api_key, model=None):
             verdict = table[seen[-1]]
             return {
                 "failed": False,
@@ -509,7 +509,7 @@ class TestMultipleCitedSources:
                 side_effect=_no_wayback,
             ),
             patch(
-                "ci_article_review.adapters.citation.resolver.mistral.call",
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
                 side_effect=fake_call,
             ),
         ):

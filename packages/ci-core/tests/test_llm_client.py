@@ -5,9 +5,9 @@ framing, provider auth, and error classes; re-testing those through a mock would
 only assert that our mock matches our assumptions. What this file covers is
 everything that would break silently if the shim mapped something wrong:
 
-  * the read-gap timeout — the single most load-bearing knob in the layer, and
-    the one whose regression looks like "the provider got slow" rather than
-    like a bug;
+  * the two streaming timeouts — the first-byte allowance and the inter-chunk
+    stall detector, which need opposite sizes and whose regression looks like
+    "the provider got slow" rather than like a bug;
   * ``num_retries=0`` — because litellm calls credit exhaustion a rate limit,
     and its retry loop would sit on a dead account until the run's wall clock
     ran out;
@@ -18,6 +18,7 @@ everything that would break silently if the shim mapped something wrong:
     empty rather than by raising.
 """
 
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -317,7 +318,7 @@ class TestResultContract:
         assert result["data"] == {"flags": [{"passage": "a"}]}
         assert result["raw"] == '{"flags": [{"passage": "a"}]}'
         assert result["model"] == "mistral-large-latest"
-        assert result["tokens"] == {"prompt": 100, "completion": 50, "cached": 0}
+        assert result["tokens"] == {"prompt": 100, "completion": 50}
         assert isinstance(result["elapsed_seconds"], float)
 
     def test_malformed_json_is_a_failure_that_keeps_the_text(self):
@@ -341,7 +342,7 @@ class TestResultContract:
             result = _call("mistral")
 
         assert result["failed"] is False
-        assert result["tokens"] == {"prompt": 0, "completion": 0, "cached": 0}
+        assert result["tokens"] == {"prompt": 0, "completion": 0}
 
     def test_error_body_is_captured(self):
         """A bare 401 status cannot distinguish an invalid key from a revoked one
@@ -374,14 +375,30 @@ class TestResultContract:
 
 class TestTokens:
     def test_cached_tokens_read_from_details(self):
+        """Cached is a subset of prompt, so the fixture keeps it under the
+        total — normalize_tokens clamps, and a fixture that ignores that tests
+        the clamp rather than the read."""
         with patch.object(
             client.litellm,
             "completion",
-            return_value=_completion_stream(usage=_usage(cached=800)),
+            return_value=_completion_stream(usage=_usage(prompt=1000, cached=800)),
         ):
             result = _call("grok")
 
         assert result["tokens"]["cached"] == 800
+        assert result["tokens"]["prompt"] == 1000
+
+    def test_nested_details_object_is_not_read_as_absent(self):
+        """normalize_tokens tests the details value with isinstance(dict), so a
+        details field left as an object reads as no cache hit at all — zero on a
+        call that cached most of its prompt. That is the failure this area
+        already had once under a different name."""
+        usage = SimpleNamespace(
+            prompt_tokens=1000,
+            completion_tokens=50,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=800),
+        )
+        assert client._read_tokens(usage)["cached"] == 800
 
     def test_anthropic_cache_key_is_read(self):
         """Anthropic reports cache hits on its own key rather than in the
@@ -395,14 +412,16 @@ class TestTokens:
 
         assert result["tokens"]["cached"] == 640
 
-    def test_no_cache_reports_zero_not_none(self):
-        """cost.calculate multiplies this; None would raise mid-report."""
+    def test_a_cold_call_omits_the_cached_key(self):
+        """Matches normalize_tokens: absent means no cache hit, and cost.py
+        reads it with .get(). A hardcoded 0 would claim a measurement that
+        never happened."""
         with patch.object(
             client.litellm, "completion", return_value=_completion_stream()
         ):
             result = _call("mistral")
 
-        assert result["tokens"]["cached"] == 0
+        assert "cached" not in result["tokens"]
 
 
 class TestTruncation:
@@ -990,3 +1009,262 @@ class TestMistralReasoningEscapeHatch:
         reasoning — a quiet quality regression instead of a loud failure — and
         it is global, so it would mask the next mismatch too."""
         assert client.litellm.drop_params is False
+
+
+class TestWebSearch:
+    """Live search on the Responses API.
+
+    The pipeline resolves `web_search` per domain before calling, because only
+    fact_check has any use for it and every search bills. By the time it reaches
+    here it is a plain bool.
+    """
+
+    def test_search_tool_requested_when_enabled(self):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _responses_stream()
+
+        with patch.object(client.litellm, "responses", side_effect=_capture):
+            _call("openai", provider_config={"web_search": True})
+
+        assert seen["tools"] == [{"type": "web_search_preview"}]
+
+    def test_no_search_tool_when_disabled_or_absent(self):
+        for cfg in ({"web_search": False}, {}):
+            seen = {}
+
+            def _capture(**kwargs):
+                seen.update(kwargs)
+                return _responses_stream()
+
+            with patch.object(client.litellm, "responses", side_effect=_capture):
+                _call("openai", provider_config=cfg)
+
+            assert "tools" not in seen, f"unrequested search tool for cfg={cfg}"
+
+    def test_search_with_reasoning_sends_no_temperature(self):
+        """The bug this pairing caused: `web_search` was switched on against a
+        payload that hardcoded temperature, and gpt-5.x rejects it outright —
+        HTTP 400 on every search call, falling through to the non-search path
+        for a warning and a wasted round trip and no live search at all."""
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _responses_stream()
+
+        with patch.object(client.litellm, "responses", side_effect=_capture):
+            _call(
+                "openai",
+                provider_config={"web_search": True, "reasoning_effort": "high"},
+            )
+
+        assert "temperature" not in seen
+        assert seen["reasoning"] == {"effort": "high", "summary": "auto"}
+        assert seen["tools"] == [{"type": "web_search_preview"}]
+
+    def test_search_without_reasoning_still_sends_temperature(self):
+        """A non-reasoning model accepts it, and dropping it everywhere would
+        quietly loosen determinism on the models that do honour it."""
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _responses_stream()
+
+        with patch.object(client.litellm, "responses", side_effect=_capture):
+            _call("openai", provider_config={"web_search": True})
+
+        assert seen["temperature"] == 0.2
+
+
+# ---------------------------------------------------------------------------
+# The stall detector
+# ---------------------------------------------------------------------------
+
+
+def _slow_stream(chunks, first_delay=0.0, gap_delay=0.0):
+    """A stream that sleeps before the first chunk and between the rest."""
+
+    def _gen():
+        if first_delay:
+            time.sleep(first_delay)
+        for i, chunk in enumerate(chunks):
+            if i and gap_delay:
+                time.sleep(gap_delay)
+            yield chunk
+
+    return _gen()
+
+
+class TestStallDetector:
+    """One socket timeout cannot be both a first-byte allowance and a stall
+    detector, and conflating them is what drove perplexity's value to 500s —
+    at which point a genuinely dead connection took over eight minutes to
+    notice, removing the one property a stall detector exists to provide.
+
+    So: `stream_read_timeout` waits for the stream to *start*, and
+    `stream_gap_timeout` catches a started stream that *died*.
+    """
+
+    def test_a_stalled_stream_is_caught_by_the_gap_not_the_socket(self):
+        """The case the split exists for: a generous first-byte allowance and a
+        tight gap. A stream that starts then dies must be caught by the gap."""
+        stream = _slow_stream(
+            [_chunk(content="{"), _chunk(content='"a": 1}')], gap_delay=0.5
+        )
+        with pytest.raises(client.StreamStalled, match="mid-stream"):
+            list(client._iter_with_gap(stream, first_byte=30.0, gap=0.05))
+
+    def test_a_slow_first_byte_is_allowed_by_the_first_byte_budget(self):
+        """A grounded model searches before emitting anything. That silence is
+        healthy and must not trip the tight gap."""
+        stream = _slow_stream([_chunk(content="ok")], first_delay=0.3)
+        received = list(client._iter_with_gap(stream, first_byte=5.0, gap=0.05))
+        assert len(received) == 1
+
+    def test_a_stream_that_never_starts_is_caught_before_the_first_chunk(self):
+        stream = _slow_stream([_chunk(content="ok")], first_delay=5.0)
+        with pytest.raises(client.StreamStalled, match="before the first chunk"):
+            list(client._iter_with_gap(stream, first_byte=0.05, gap=30.0))
+
+    def test_a_healthy_stream_passes_every_chunk_through_in_order(self):
+        chunks = [_chunk(content=c) for c in "hello"]
+        received = list(client._iter_with_gap(_slow_stream(chunks), 5.0, 5.0))
+        assert [c.choices[0].delta.content for c in received] == list("hello")
+
+    def test_a_reader_exception_reaches_the_consumer(self):
+        """A provider error raised mid-iteration must not be swallowed by the
+        reader thread and reported as a stall."""
+
+        def _explodes():
+            yield _chunk(content="{")
+            raise RuntimeError("provider blew up")
+
+        with pytest.raises(RuntimeError, match="provider blew up"):
+            list(client._iter_with_gap(_explodes(), 5.0, 5.0))
+
+    def test_a_stall_is_retried(self):
+        """A stall means the connection died, and a new socket fixes that —
+        the same reasoning that makes a dropped keepalive worth one retry."""
+        attempts = []
+
+        def _stall_once(**kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                # Two chunks: the gap only elapses *between* them, so a
+                # single-chunk stream would end cleanly and never stall.
+                return _slow_stream(
+                    [_chunk(content="{"), _chunk(content='"a": 1}')], gap_delay=5.0
+                )
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_stall_once):
+            result = _call(
+                "mistral",
+                retry=True,
+                retry_delay=0,
+                provider_config={"stream_gap_timeout": 0.05},
+            )
+
+        assert len(attempts) == 2
+        assert result["failed"] is False
+
+    def test_gap_default_and_override(self):
+        assert client._gap_timeout(None) == 60
+        assert client._gap_timeout({}) == 60
+        assert client._gap_timeout({"stream_gap_timeout": 15}) == 15
+
+    def test_gap_is_independent_of_the_first_byte_allowance(self):
+        """perplexity's 500s first-byte allowance must not become a 500s stall
+        detector — that is the regression the split undoes."""
+        cfg = {"stream_read_timeout": 500}
+        assert client._stream_timeout(cfg, 160).read == 500
+        assert client._gap_timeout(cfg) == 60
+
+
+class TestFirstByteEndsOnRealOutput:
+    """Framing events must not start the stall clock.
+
+    The Responses API emits `response.created`, `response.in_progress` and
+    `response.output_item.added` inside the first second — before the model has
+    thought at all. Treating "first chunk" as "first progress" starts the tight
+    gap clock against the reasoning phase, which is exactly what the generous
+    first-byte allowance exists to cover.
+
+    This passed every unit test and an isolated live call (1.3s worst gap). It
+    failed on the pipeline's six concurrent xhigh calls against a real draft,
+    where every OpenAI domain died on a 60s gap.
+    """
+
+    def test_responses_framing_events_do_not_end_the_first_byte_phase(self):
+        def _stream():
+            yield SimpleNamespace(type="response.created")
+            yield SimpleNamespace(type="response.in_progress")
+            yield SimpleNamespace(type="response.output_item.added")
+            # The model now thinks for longer than the gap allows.
+            time.sleep(0.3)
+            yield SimpleNamespace(
+                type="response.reasoning_summary_text.delta", delta="…"
+            )
+
+        received = list(
+            client._iter_with_gap(
+                _stream(),
+                first_byte=5.0,
+                gap=0.05,
+                is_progress=client._responses_is_progress,
+            )
+        )
+        assert len(received) == 4
+
+    def test_a_stall_after_real_output_is_still_caught(self):
+        """The predicate must not disable the detector, only delay its start."""
+
+        def _stream():
+            yield SimpleNamespace(type="response.created")
+            yield SimpleNamespace(
+                type="response.reasoning_summary_text.delta", delta="a"
+            )
+            time.sleep(5)
+            yield SimpleNamespace(type="response.output_text.delta", delta="b")
+
+        with pytest.raises(client.StreamStalled, match="mid-stream"):
+            list(
+                client._iter_with_gap(
+                    _stream(), 5.0, 0.05, client._responses_is_progress
+                )
+            )
+
+    def test_completion_role_only_chunk_is_not_progress(self):
+        """Providers open with a role-only delta carrying no content."""
+        role_only = _chunk()
+        role_only.choices = [
+            SimpleNamespace(delta=SimpleNamespace(content=None), finish_reason=None)
+        ]
+        assert client._completion_is_progress(role_only) is False
+        assert client._completion_is_progress(_chunk(content="hi")) is True
+
+    def test_completion_finish_and_usage_count_as_progress(self):
+        """A stream whose only remaining chunks are the terminator and usage has
+        plainly not stalled."""
+        assert client._completion_is_progress(_chunk(finish_reason="stop")) is True
+        assert client._completion_is_progress(_chunk(usage=_usage())) is True
+
+    def test_openai_keeps_its_pre_migration_liveness_bound(self):
+        """Not a looser number, the same one.
+
+        Before the stall detector existed, OpenAI's only liveness bound was its
+        socket read timeout, which httpx applies per read — an effective 120s
+        gap. gpt-5.5 at xhigh exceeds 60s between reasoning-summary deltas once
+        six of them run at once, so a 60s detector is *tighter* than what the
+        provider had and failed two domains a run.
+        """
+        assert client._gap_timeout(None, "openai") == 120
+        for provider in ("gemini", "mistral", "grok", "claude", "perplexity"):
+            assert client._gap_timeout(None, provider) == 60
+
+    def test_a_per_model_override_beats_the_provider_default(self):
+        assert client._gap_timeout({"stream_gap_timeout": 15}, "openai") == 15

@@ -17,21 +17,36 @@ instead — TTFB 0.8s, 1318 summary deltas. Since the read-gap timeout below is
 the only thing standing between a slow call and a hung one, a surface that goes
 silent for 79s is unusable. Do not "simplify" OpenAI onto ``completion()``.
 
-The read-gap timeout
---------------------
-Every call streams, so the HTTP read timeout is the gap *between* chunks, not
-the total generation budget. A 20-minute answer that emits a token every second
-is fine; 130 seconds of silence is not. That distinction is what lets the
-timeouts stay small and constant while models get slower.
+Three timeout layers, not one
+-----------------------------
+Every call streams, and the waiting splits into three jobs that need opposite
+sizes. Conflating any two of them breaks one of the others:
 
-:func:`_stream_timeout` builds an ``httpx.Timeout``. litellm passes it through
-intact for OpenAI and Azure; for the other five providers it coerces the object
-down to ``float(timeout.read)`` (``CompletionTimeout.resolve``). That coercion
-is harmless and was verified in the spike: httpx applies a bare float
-per-operation, so ``read`` still means "gap between reads" and gemini/mistral
-completed 7-second calls under a 3-second read timeout without tripping. The
-only thing lost is the separate 30s connect bound — those five inherit the read
-value as their connect timeout, which is more permissive, never less.
+1. **First-byte allowance** (``stream_read_timeout``, the socket read timeout).
+   Generous, and per-model: it has to survive a grounded provider's search and
+   a reasoning model's silent thinking before any byte is emitted.
+2. **Inter-chunk gap** (``stream_gap_timeout``, enforced by
+   :func:`_iter_with_gap`) — the liveness detector. Tight and roughly constant:
+   a stream that has started emitting keeps emitting, so a long silence
+   mid-response means the connection is dead, not slow.
+3. **Wall-clock backstop** (the pipeline's sliding-scale ``timeout_seconds``,
+   enforced by ``ci_article_review.pipeline._run_with_timeout``) — "this call is
+   alive but I am not waiting any longer". Deliberately ignored here.
+
+Layers 1 and 2 were a single value until 2026-08-15, which meant the stall
+detector had to be sized for the *search* phase. That is how perplexity's read
+timeout reached 500s: each bump chased slow-but-alive calls, and the side effect
+was that a genuinely dead sonar connection took over eight minutes to notice —
+the exact thing a stall detector exists to prevent.
+
+:func:`_stream_timeout` builds the ``httpx.Timeout`` for layer 1. litellm passes
+it through intact for OpenAI and Azure; for the other five providers it coerces
+the object down to ``float(timeout.read)`` (``CompletionTimeout.resolve``). That
+coercion is harmless — httpx applies a bare float per-operation — and the only
+thing lost is the separate 30s connect bound, which those five replace with the
+read value: more permissive, never less. Layer 2 does not depend on the socket
+at all, which is the point: iterating the stream blocks inside a socket read, so
+a tight gap can only be enforced from outside it.
 
 Retries stay ours
 -----------------
@@ -59,7 +74,9 @@ report generator all read it:
   ``raw``              assembled response text
   ``data``             parsed JSON payload (success only)
   ``model``            the model that actually answered
-  ``tokens``           ``{"prompt": int, "completion": int, "cached": int}``
+  ``tokens``           ``{"prompt": int, "completion": int}``, plus
+                       ``cached`` when the provider served part of the
+                       prompt from its cache
   ``elapsed_seconds``  float
   ``error``            redacted exception text (failures only)
   ``error_body``       redacted excerpt of the HTTP error body
@@ -70,6 +87,8 @@ plus per-provider extras: ``citations`` / ``search_results`` (Perplexity),
 """
 
 import logging
+import queue
+import threading
 import time
 
 import httpx
@@ -77,6 +96,7 @@ import litellm
 
 from .. import redact
 from .json_utils import extract_json_with_salvage
+from .tokens import normalize_tokens
 
 log = logging.getLogger(__name__)
 
@@ -94,11 +114,26 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 # and Azure; see the module docstring for what the other five do with it.
 DEFAULT_CONNECT_TIMEOUT = 30
 
-# Default inter-chunk read gap when a model config sets no ``stream_read_timeout``.
-# NOT the total generation budget. Grounded models search before emitting their
-# first token, so they default higher.
+# Default FIRST-BYTE allowance (seconds) when a model config sets no
+# ``stream_read_timeout``. This covers everything before generation starts:
+# queueing, a grounded model's web search, and any reasoning the provider does
+# without putting bytes on the wire. Grounded models override it upward because
+# their search runs before the first token.
 DEFAULT_READ_TIMEOUT = 120
 GROUNDED_READ_TIMEOUT = 160
+
+# Default inter-chunk GAP (seconds) — the liveness detector, and a different job
+# from the value above. Once a stream has produced its first chunk a healthy
+# provider keeps emitting: the worst gap ever observed here is ~8s, from
+# gpt-5.5's xhigh reasoning-summary deltas. Past a minute the connection is
+# dead, not slow.
+#
+# Deliberately NOT sized to survive slow generation. Sizing the stall detector
+# for slow-but-alive calls is what drove perplexity's first-byte value
+# 160 -> 280 -> 350 -> 500, and a 500s stall detector means an abandoned call
+# holds its socket for over eight minutes. Slow-but-alive is the wall-clock
+# backstop's job; this one only catches dead.
+DEFAULT_GAP_TIMEOUT = 60
 
 # HTTP statuses worth one retry. Everything else is reported as-is: retrying a
 # 400 or a 401 just spends the budget twice to learn the same thing.
@@ -131,6 +166,15 @@ _PROVIDERS = {
         "default_model": "gpt-5.4",
         "fallbacks": ["gpt-5.4-mini"],
         "read_timeout": DEFAULT_READ_TIMEOUT,
+        # Not the 60s default, and not a new number: before the stall detector
+        # existed, OpenAI's only liveness bound was its socket read timeout,
+        # which httpx applies per read — an effective 120s gap. Measured
+        # 2026-08-16, gpt-5.5 at xhigh exceeds 60s between reasoning-summary
+        # deltas when the pipeline runs six of them at once (a single call
+        # shows a 1.3s worst gap; concurrency is what stretches it). Tightening
+        # to 60s failed two OpenAI domains a run, so this restores exactly the
+        # bound the provider already had rather than inventing a looser one.
+        "gap_timeout": 120,
     },
     "gemini": {
         "prefix": "gemini/",
@@ -190,6 +234,119 @@ def _stream_timeout(cfg, default_read):
     return httpx.Timeout(
         connect=float(DEFAULT_CONNECT_TIMEOUT), read=read, write=read, pool=read
     )
+
+
+def _gap_timeout(cfg, provider=None):
+    """Inter-chunk stall allowance.
+
+    A per-model ``stream_gap_timeout`` wins; otherwise the provider's own
+    default, which is the shared 60s for everything except OpenAI (see the
+    provider table for why).
+    """
+    override = (cfg or {}).get("stream_gap_timeout")
+    if override:
+        return float(override)
+    spec = _PROVIDERS.get(provider) or {}
+    return float(spec.get("gap_timeout") or DEFAULT_GAP_TIMEOUT)
+
+
+class StreamStalled(Exception):
+    """A stream that started producing chunks went silent.
+
+    Carries 504 so it lands in the retryable set: a stall means the connection
+    died, and a new socket genuinely fixes that — the same reasoning that makes
+    a dropped keepalive worth one retry.
+    """
+
+    status_code = 504
+
+
+def _close_stream(stream):
+    """Best-effort release of the socket behind a litellm stream.
+
+    litellm's ``CustomStreamWrapper`` exposes no ``close()``, and neither does
+    the per-provider iterator inside it — but that iterator does hold both an
+    ``http_response`` and a ``streaming_response`` generator, and closing either
+    unblocks a reader parked in a socket read. Where none of them is present the
+    reader is simply abandoned: it is a daemon thread, so the worst case is one
+    idle thread until the (generous) first-byte socket timeout fires, which is
+    still strictly better than not detecting the stall at all.
+    """
+    inner = getattr(stream, "completion_stream", None)
+    for holder in (inner, stream):
+        if holder is None:
+            continue
+        for attr in ("http_response", "streaming_response"):
+            target = getattr(holder, attr, None)
+            close = getattr(target, "close", None)
+            if callable(close):
+                try:
+                    close()
+                    return True
+                except Exception:
+                    pass
+    return False
+
+
+def _iter_with_gap(stream, first_byte, gap, is_progress=None):
+    """Yield chunks, aborting if the stream goes quiet for too long.
+
+    Two separate allowances: ``first_byte`` until the stream produces real work,
+    and ``gap`` between every chunk after that.
+
+    Why a reader thread rather than a clock check in the loop: iterating the
+    stream blocks inside a socket read, so the consumer only regains control
+    when a chunk arrives or the socket's own timeout fires. The socket timeout
+    has to stay generous enough for a grounded model's search phase, so it
+    cannot double as a tight stall detector. Reading in a daemon thread and
+    consuming through a queue decouples the two — the consumer's ``Queue.get``
+    timeout enforces the gap regardless of what the socket will wait for.
+
+    ``is_progress`` decides which chunk ends the first-byte phase, and it is not
+    optional bookkeeping. The Responses API emits ``response.created``,
+    ``response.in_progress`` and ``response.output_item.added`` within the first
+    second — before the model has done any thinking — so treating "first chunk"
+    as "first progress" starts the tight gap clock against the reasoning phase.
+    Measured: an isolated xhigh call shows a 1.3s worst gap and passes, but the
+    pipeline's six concurrent xhigh calls on a real draft blew straight through
+    a 60s gap and every OpenAI domain failed. The thinking phase is what the
+    first-byte allowance is *for*; only real output ends it.
+    """
+    chunks = queue.Queue()  # unbounded: a bounded queue could block the reader
+    # in ``put`` after the consumer has given up and stopped draining.
+    done = object()
+
+    def _read():
+        try:
+            for chunk in stream:
+                chunks.put(chunk)
+        except BaseException as exc:  # noqa: BLE001 — relayed to the consumer
+            chunks.put(exc)
+        finally:
+            chunks.put(done)
+
+    reader = threading.Thread(target=_read, name="litellm-stream-reader", daemon=True)
+    reader.start()
+
+    budget = first_byte
+    started = False
+    while True:
+        try:
+            item = chunks.get(timeout=budget)
+        except queue.Empty:
+            _close_stream(stream)
+            phase = "mid-stream" if started else "before the first chunk"
+            raise StreamStalled(
+                f"stream stalled {phase}: nothing received for {budget}s"
+            )
+        if item is done:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        if not started and (is_progress is None or is_progress(item)):
+            started = True
+            budget = gap
+        yield item
 
 
 def _resolve_model(provider, model_arg, cfg):
@@ -298,7 +455,35 @@ def _text_of(delta):
     return piece or ""
 
 
-def _consume_completion_stream(stream):
+# Chunk types that mean the model has actually started producing. Anything
+# before one of these is still the first-byte phase, however chatty the
+# provider's stream framing is.
+_RESPONSES_PROGRESS_EVENTS = (
+    "response.output_text.delta",
+    "response.reasoning_summary_text.delta",
+)
+
+
+def _responses_is_progress(event):
+    return getattr(event, "type", None) in _RESPONSES_PROGRESS_EVENTS
+
+
+def _completion_is_progress(chunk):
+    """A chat-completions chunk carrying real output.
+
+    Providers open with keep-alive or role-only chunks whose delta has no
+    content; those are framing, not progress.
+    """
+    for choice in getattr(chunk, "choices", None) or []:
+        delta = getattr(choice, "delta", None)
+        if delta is not None and _text_of(delta):
+            return True
+        if getattr(choice, "finish_reason", None):
+            return True
+    return getattr(chunk, "usage", None) is not None
+
+
+def _consume_completion_stream(stream, first_byte, gap):
     """Drain a ``litellm.completion(stream=True)`` response.
 
     Returns the assembled text plus everything the pipeline reads off the
@@ -317,7 +502,7 @@ def _consume_completion_stream(stream):
     search_results = []
     grounding_meta = {}
 
-    for chunk in stream:
+    for chunk in _iter_with_gap(stream, first_byte, gap, _completion_is_progress):
         for choice in getattr(chunk, "choices", None) or []:
             delta = getattr(choice, "delta", None)
             if delta is not None:
@@ -351,7 +536,7 @@ def _consume_completion_stream(stream):
     }
 
 
-def _consume_responses_stream(stream):
+def _consume_responses_stream(stream, first_byte, gap):
     """Drain a ``litellm.responses(stream=True)`` response (OpenAI).
 
     The Responses API streams typed events. ``response.output_text.delta``
@@ -366,7 +551,7 @@ def _consume_responses_stream(stream):
     usage = None
     status = None
 
-    for event in stream:
+    for event in _iter_with_gap(stream, first_byte, gap, _responses_is_progress):
         etype = getattr(event, "type", None)
         if etype == "response.output_text.delta":
             parts.append(getattr(event, "delta", "") or "")
@@ -394,41 +579,72 @@ def _consume_responses_stream(stream):
     }
 
 
-def _read_tokens(usage):
-    """Normalise litellm's usage object to ``{prompt, completion, cached}``.
+def _usage_as_dict(usage):
+    """litellm's usage object as a plain dict, nested details included.
 
-    litellm already reconciles the providers' spelling disagreements
-    (``promptTokenCount`` / ``input_tokens`` / ``prompt_tokens``) and — verified
-    against a live Gemini call — already folds thinking tokens into
-    ``completion_tokens``, which the old table had to add by hand. So this is
-    only about reading the cached count off the details object and tolerating a
-    provider that sends no usage at all.
+    ``completion()`` returns a pydantic ``Usage``; ``responses()`` returns a
+    ``ResponseAPIUsage`` with entirely different field names. Both expose
+    ``model_dump()``; anything else falls back to attribute scraping so an
+    unexpected type degrades to zeros rather than raising mid-run.
+
+    The nesting matters as much as the top level. ``normalize_tokens`` reads the
+    cached count out of ``prompt_tokens_details`` / ``input_tokens_details`` and
+    tests those with ``isinstance(..., dict)``, so a details value left as an
+    object reads as absent — silently reporting zero cached tokens on a call
+    that hit the cache. That is the exact failure this whole area already had
+    once, so the conversion goes one level down rather than trusting the
+    top-level dump to have flattened it.
     """
     if usage is None:
-        return {"prompt": 0, "completion": 0, "cached": 0}
+        return {}
 
-    def _int(value):
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
+    def _as_dict(value):
+        for method in ("model_dump", "dict"):
+            fn = getattr(value, method, None)
+            if callable(fn):
+                try:
+                    dumped = fn()
+                    if isinstance(dumped, dict):
+                        return dumped
+                except Exception:
+                    pass
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "__dict__") and not isinstance(value, type):
+            scraped = {
+                key: getattr(value, key)
+                for key in dir(value)
+                if not key.startswith("_") and not callable(getattr(value, key, None))
+            }
+            if scraped:
+                return scraped
+        return None
 
-    prompt = _int(
-        getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None)
-    )
-    completion = _int(
-        getattr(usage, "completion_tokens", None)
-        or getattr(usage, "output_tokens", None)
-    )
+    top = _as_dict(usage) or {}
+    return {
+        key: (_as_dict(value) or value) if key.endswith("_details") else value
+        for key, value in top.items()
+    }
 
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached = _int(getattr(details, "cached_tokens", None)) if details else 0
-    if not cached:
-        # Anthropic reports cache hits on its own key rather than in the details
-        # object; litellm passes it through under the same name.
-        cached = _int(getattr(usage, "cache_read_input_tokens", None))
 
-    return {"prompt": prompt, "completion": completion, "cached": cached}
+def _read_tokens(usage):
+    """Token counts for one call, via the shared :func:`normalize_tokens`.
+
+    The migration originally reimplemented this inline, on the assumption that
+    litellm reconciles the providers' spelling disagreements for us. Measured
+    2026-08-16, it does not: a ``responses()`` call returns ``input_tokens`` and
+    ``input_tokens_details`` with ``prompt_tokens_details`` absent entirely, so
+    reading the Chat Completions name reported **zero cached tokens for every
+    OpenAI call** — the same blindness that nearly got prompt-cache layout
+    written off as ineffective, since the null result looked convincing.
+
+    Delegating to ``normalize_tokens`` rather than duplicating it also picks up
+    the two subtleties it already encodes: Anthropic reports only the *uncached*
+    remainder in ``input_tokens`` and carries the cache fields separately, so
+    they add rather than overlap; and Gemini bills thinking tokens at the output
+    rate, so they belong in ``completion``.
+    """
+    return normalize_tokens(_usage_as_dict(usage))
 
 
 def _grounding_chunks(metadata):
@@ -608,6 +824,11 @@ def _attempt(
     spec = _PROVIDERS[provider]
     params = _provider_params(provider, cfg) if with_reasoning else {}
     label = f"{provider} {model}"
+    # Two budgets, two jobs: the socket read timeout is the first-byte
+    # allowance, and the gap is the liveness detector applied after the stream
+    # has started. See DEFAULT_GAP_TIMEOUT for why one value cannot be both.
+    first_byte = timeout.read
+    gap = _gap_timeout(cfg, provider)
     t0 = time.monotonic()
 
     def _invoke():
@@ -627,8 +848,21 @@ def _attempt(
                 # wire; without it this surface goes as quiet as Chat Completions.
                 kwargs["reasoning"] = {"effort": effort, "summary": "auto"}
             else:
-                kwargs["temperature"] = 0.2
-            return _consume_responses_stream(litellm.responses(**kwargs))
+                # Only when there is no reasoning effort. gpt-5.x rejects
+                # temperature outright — "Unsupported parameter: 'temperature'
+                # is not supported with this model", HTTP 400 — which silently
+                # 400'd every web-search call until it was caught in a live run.
+                kwargs["temperature"] = _TEMPERATURE
+
+            # Live web search. The pipeline resolves this per domain before
+            # calling (only fact_check has any use for it, and it bills per
+            # search), so by the time it arrives it is a plain bool.
+            if (cfg or {}).get("web_search"):
+                kwargs["tools"] = [{"type": "web_search_preview"}]
+
+            return _consume_responses_stream(
+                litellm.responses(**kwargs), first_byte, gap
+            )
 
         if provider in _SENDS_TEMPERATURE:
             params.setdefault("temperature", _TEMPERATURE)
@@ -646,7 +880,9 @@ def _attempt(
                 num_retries=0,
                 api_key=api_key,
                 **params,
-            )
+            ),
+            first_byte,
+            gap,
         )
 
     try:
@@ -665,7 +901,7 @@ def _attempt(
             "error_body": body,
             "raw": None,
             "model": model,
-            "tokens": {"prompt": 0, "completion": 0, "cached": 0},
+            "tokens": {"prompt": 0, "completion": 0},
             "elapsed_seconds": elapsed,
             "grounding_available": False,
             # Internal: the fallback decision reads these rather than

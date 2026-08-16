@@ -127,8 +127,6 @@
         "total_usd": 0.0045
       }
     ],
-    "cache_savings_usd": 0.0,
-    "cached_tokens": 0,
     "pricing_known": false,
     "total_input_usd": 0.0125,
     "total_output_usd": 0.01,

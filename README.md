@@ -5,9 +5,10 @@ producing and reviewing written content. Code lives under `packages/`, one packa
 per capability (see [docs/NAMING.md](docs/NAMING.md) for the naming convention):
 
 - **ci-core** (`ci_core`) — the shared foundation both application packages build on.
-  It owns the LLM layer (`ci_core.llm`: the six streaming provider adapters, SSE
-  handling, robust JSON extraction, cost estimation, the sliding-scale timeout model,
-  and the model registry), outbound HTTP identity (`ci_core.http`), response-body
+  It owns the LLM layer (`ci_core.llm`: one streaming call path to all six
+  providers via litellm, robust JSON extraction, token and cost accounting, the
+  sliding-scale timeout model, and the model registry), outbound HTTP identity
+  (`ci_core.http`), response-body
   text extraction (`ci_core.extract`), secret redaction
   (`ci_core.redact`), and the shared config helpers (`ci_core.config_helpers`). The
   provider/model reference data those read — `pricing.yaml`, `timeouts.yaml`,
@@ -374,9 +375,12 @@ content-intelligence/
 │   │   │   ├── llm/
 │   │   │   │   ├── client.py          the litellm shim: five providers through
 │   │   │   │   │                      completion(), OpenAI through responses(),
-│   │   │   │   │                      all streaming under a read-gap timeout
+│   │   │   │   │                      all streaming under a first-byte allowance
+│   │   │   │   │                      plus an independent stall detector
 │   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,
 │   │   │   │   │                      truncation salvage)
+│   │   │   │   ├── tokens.py          normalizes each provider's usage shape to
+│   │   │   │   │                      {prompt, completion, cached}
 │   │   │   │   ├── cost.py            token-based cost estimation, incl. cache hits
 │   │   │   │   ├── timeout_model.py   sliding-scale timeout from size × model × effort
 │   │   │   │   └── model_registry.py  current/superseded model detection

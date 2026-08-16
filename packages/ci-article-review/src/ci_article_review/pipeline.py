@@ -205,13 +205,13 @@ def _drafting_model(handoff: dict, pipeline_cfg: dict) -> str | None:
         return None
 
     name = declared.lower()
-    if name not in _ADAPTER_MODULES:
+    if name not in _PROVIDERS:
         log.warning(
             "Declared drafting model %r is not one of %s — no review pass will "
             "be excluded. Check 'Drafted with:' in the handoff, or "
             "pipeline.drafting_model in user.yaml.",
             declared,
-            ", ".join(sorted(_ADAPTER_MODULES)),
+            ", ".join(sorted(_PROVIDERS)),
         )
         return None
     return name
