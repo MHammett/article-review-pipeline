@@ -363,6 +363,8 @@ content-intelligence/
 │   │   │   │   └── webpage.py         webpage fetch/extraction helpers
 │   │   │   │
 │   │   │   ├── prompts/               system prompts for each review domain
+│   │   │   ├── schemas.py             JSON schemas mirroring each prompt's RETURN
+│   │   │   │                          FORMAT, so providers enforce the shape
 │   │   │   ├── configs/               committed defaults: presets.yaml + *.example.yaml
 │   │   │   │                          (real user.yaml + publication.yaml are gitignored;
 │   │   │   │                          pricing/timeouts/model_registry live in ci-core)
@@ -377,6 +379,8 @@ content-intelligence/
 │   │   │   │   │                      completion(), OpenAI through responses(),
 │   │   │   │   │                      all streaming under a first-byte allowance
 │   │   │   │   │                      plus an independent stall detector
+│   │   │   │   ├── schema.py          puts a caller's JSON schema on the wire in each
+│   │   │   │   │                      provider's own spelling
 │   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,
 │   │   │   │   │                      truncation salvage)
 │   │   │   │   ├── tokens.py          normalizes each provider's usage shape to

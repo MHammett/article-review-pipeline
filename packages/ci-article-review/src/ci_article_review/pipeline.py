@@ -66,6 +66,7 @@ from . import consolidation
 from ci_core import redact
 from ci_core.config_helpers import normalize_model_configs
 from ci_core import llm
+from . import schemas
 from ci_core.concurrency import run_with_timeout
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
@@ -836,6 +837,10 @@ def _run_domain(
         retry=pipeline_cfg.get("retry_on_failure", True),
         retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
         provider_config=provider_config,
+        # Let the provider enforce the shape the prompt asks for. None for a
+        # custom domain, which has a prompt but no declared schema — and for
+        # gemini while grounded, which the LLM layer drops on its own.
+        response_schema=schemas.for_domain(domain),
     )
     result["_model"] = model_name
     result["_domain"] = domain
