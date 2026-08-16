@@ -477,6 +477,27 @@ around its output. 239 lines is not where the pain is.
   direct URL. The underlying ratio is still low — the reporting is honest about
   it now rather than inviting more confidence than earned.
 - Rerun nondeterminism: consensus flags vary between identical runs.
-- Grok's output volume is far below the other providers on identical domains
+- ~~Grok's output volume is far below the other providers on identical domains
   (602 tokens vs 9,377 and 22,414 on `voice_style`). An explicit `max_tokens`
-  now removes the provider default as a suspect; the cause is still unknown.
+  now removes the provider default as a suspect; the cause is still unknown.~~
+  **Does not reproduce after the litellm migration (2026-08-16).** Two
+  independent `maximum` runs put grok's `voice_style` output at **4,475** and
+  **4,669** tokens — above gemini (3,126 / 3,473) and claude (1,288 / 1,310) in
+  both, and its `red_team` at 9,288 was the highest single output in the run.
+
+  Being honest about what that does and does not establish: the observation
+  predates #103, which replaced grok's entire call path, so "fixed incidentally"
+  and "was environmental all along" both fit the data and this cannot tell them
+  apart. The original cause was never identified and now cannot be. Closing on
+  non-recurrence rather than on diagnosis, and worth reopening if a run ever
+  shows grok an order of magnitude below the others again.
+
+  One real thing did fall out of looking: **#103 dropped
+  `response_format: {"type": "json_object"}` for grok**, which the old adapter
+  sent unconditionally. That is a genuine unintended change, though not the
+  explanation here — tested live, adding it back does not make grok terser. It
+  belongs with the structured-output work, where it is a regression to repair
+  rather than a feature to add. The other providers lost nothing: OpenAI's
+  Responses API has no such parameter, Perplexity does not support it, Anthropic
+  has no equivalent, and mistral/gemini only sent it in the non-reasoning and
+  non-grounded paths that `maximum` does not use.
