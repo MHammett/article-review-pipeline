@@ -9,8 +9,9 @@ migration decision resolves. Anything above or beside that layer lands now.
 
 > **Status, 2026-08-16 (second update).** Sections 0a, 0c and all six PRs in
 > section 1 have landed, and **section 3's migration is merged** (#103), which
-> closes section 5's first decision entirely. **0b is the only "fix first" item
-> still open.** Per-item status is marked inline below in the same
+> closes section 5's first decision entirely. **Section 0 is now clear** — 0b's
+> root cause was found and its diagnostic gap closed, leaving only a config
+> judgement. Per-item status is marked inline below in the same
 > `~~struck~~ **Done (PR #n).**` style section 5 already used.
 >
 > Two bugs found while landing #103, both merged: `ci-review` could finish its
@@ -72,10 +73,27 @@ handle this before writing our own).
 
 ### 0b. Claude is configured everywhere and never runs
 
-> **Still open as of 2026-08-16 — the last unfixed item in section 0.** Work in
-> progress on `fix/assignment-skip-logging` (worktree `ci-wt-assignment-skips`):
-> uncommitted, no commits yet, never pushed. The root cause below is still not
-> pinned to a line.
+> **Resolved in code, 2026-08-16 — one config decision left, and it is Mike's.**
+> The root cause was found while building
+> [#102](https://github.com/MHammett/content-intelligence/pull/102): **`enabled:
+> false` on the claude entry in `user.yaml`** — working exactly as designed. The
+> two days it took to find that were the real defect, and #102 fixed *that*: a
+> model the preset asks for and the run does not call now says why, once per
+> model, naming the domains it did not run.
+>
+> Verified 2026-08-16 by enumerating every shape that can drop a model from the
+> whole ensemble — empty `api_key`, missing `api_keys` entry, absent `api_key`
+> field, explicit null, keyed as `anthropic` instead of `claude`, `enabled:
+> false`, and an empty `prompts:` override. All seven produce a skip line. The
+> preset asking for 30 calls and the run making 25 can no longer happen in
+> silence.
+>
+> **What is left is a judgement, not a bug:** whether claude comes off
+> `enabled: false`. The correlation caveat below is weaker than when it was
+> written — master now excludes the drafting model from `voice_style`
+> automatically (`_drafter_is_excluded`), which is precisely the case the
+> caveat was about. Turning claude on costs five more calls per `maximum` run
+> and buys a sixth opinion on the four reasoning domains.
 
 The `maximum` preset lists `claude` for all five domains — 6 models x 5 domains =
 **30 calls**. The 2026-08-12 run made **25**, and `claude` was never assigned.
@@ -85,9 +103,11 @@ and `.env` carries the key — which is valid: a direct Claude API call succeede
 during the prompt-caching test the same day. So the credential works and the
 preset asks for it, but `_build_assignments` drops it.
 
-Not yet pinned to a line. The two candidates are the `${...}` substitution not
+~~Not yet pinned to a line. The two candidates are the `${...}` substitution not
 resolving in `config_loader`, or the assignment filter's key-presence check.
-**Start by logging what `_build_assignments` sees for each model.**
+**Start by logging what `_build_assignments` sees for each model.**~~ Pinned:
+neither candidate. It was `enabled: false`, and the suggested next step — log
+what `_build_assignments` sees — is what #102 turned into a permanent feature.
 
 Impact: every `maximum` run has been paying maximum-preset prices for
 five-sixths of the configured ensemble, silently.
@@ -228,9 +248,15 @@ of this is deleted rather than landed.
 | OpenAI `web_search` repair | keep the finding; re-apply only if we keep our own adapter |
 | Gemini `grounding_chunks` capture | litellm exposes it as `vertex_ai_grounding_metadata` |
 
-**`resolve_grounding_urls` survives regardless** — litellm hands back Gemini's
-metadata, but the URIs are still `vertexaisearch...` redirect wrappers that
-expire in ~30 days, and resolving them is our problem either way.
+~~**`resolve_grounding_urls` survives regardless**~~ — **no longer true
+(2026-08-16).** The URIs are still expiring `vertexaisearch...` wrappers, but
+#74 removed the only thing that consumed the resolved URLs: a *response-level*
+grounded URL used as a per-claim fallback, which stamped one LBNL report onto 44
+unrelated claims and produced 47 false findings. Claims now trace to the draft's
+own citation markers. The resolver stays unported on
+`fix/grounding-coverage-and-run-quality` and only becomes interesting again if
+grounded URLs get a use that is *not* per-claim attachment — which is new
+design, not a port.
 
 > **The hold on `fix/credit-exhaustion-detection` is narrower than this table
 > says (2026-08-16).** The row above holds the *entire* branch on the grounds
