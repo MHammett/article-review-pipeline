@@ -8,10 +8,10 @@ today.** Anything that touches the provider adapter layer is held until the
 migration decision resolves. Anything above or beside that layer lands now.
 
 > **Status, 2026-08-16.** Sections 0a, 0c and all six PRs in section 1 have
-> landed. **0b is the only "fix first" item still open**, and section 5's two
-> decisions are the only things gating the rest. Per-item status is marked
-> inline below in the same `~~struck~~ **Done (PR #n).**` style section 5 already
-> used.
+> landed. **0b is the only "fix first" item still open.** Section 3's migration
+> has been *built* (unmerged, unpushed), which reframes section 5's first
+> decision from "adopt?" to "merge?". Per-item status is marked inline below in
+> the same `~~struck~~ **Done (PR #n).**` style section 5 already used.
 >
 > This file was written on a branch (`fix/grounding-coverage-and-run-quality`,
 > PR #81, closed) and lived only there for four days while six sessions worked
@@ -238,6 +238,13 @@ expire in ~30 days, and resolving them is our problem either way.
 
 ## 3. The litellm migration
 
+> **Phase 1 is built, 2026-08-14 — unmerged and unpushed.** See the note under
+> section 5 decision 1 for what it found and what still blocks merging it.
+> Two deliberate departures from the phase list below: `cost.py` was kept (it
+> reads `pricing.yaml`, which we were told not to replace) and
+> `model_registry.py` was kept (it tracks model supersession, litellm has no
+> equivalent, and `ci-discover` and `ci-style-profile` both consume it).
+
 Spiked against 1.96.2 on 2026-08-12. **Verdict: migrate.** Everything the
 pipeline depends on survives: Perplexity `citations`/`search_results`, Gemini
 grounding, truncation via `finish_reason`, cached tokens, structured output,
@@ -303,12 +310,27 @@ around its output. 239 lines is not where the pain is.
    replaces ~3,900 lines across six adapters plus `streaming.py`, `tokens.py`,
    `cost.py` and `model_registry.py`.
 
-   Nothing is blocked on re-running the spike. It is blocked on deciding to
-   spend the effort. Two facts for that decision:
+   **And the migration has since been built.** `refactor/litellm-migration`
+   (worktree `ci-wt-litellm`, commit `992ddcf`) is phase 1 complete: ~3,100
+   lines deleted across the six adapters, replaced by
+   `packages/ci-core/src/ci_core/llm/client.py`, suite 1046 → 1047. It found
+   five defects that every unit test passed and only a real run exposed —
+   `temperature` to Anthropic (hard 400, all five Claude domains dead),
+   litellm's allowlist blocking Mistral's `reasoning_effort` (fixed with
+   `allowed_openai_params`, deliberately **not** `drop_params`, which would
+   silently discard reasoning), a dead account arriving as 429, a network blip
+   synthesised into a 503 that walked the fallback chain, and a dropped
+   keepalive producing 500s on ~10% of calls at exactly this pipeline's 1–3s
+   spacing.
 
-   - `refactor/litellm-migration` (worktree `ci-wt-litellm`) is one commit on a
-     base of `f163764` — roughly 30 commits behind master and widening. It has
-     never been pushed, so it is invisible on GitHub.
+   So the open question is not "adopt?" but **"merge the finished migration?"**,
+   and the honest blockers on that are:
+
+   - It has **never been pushed** — invisible on GitHub, and its base is
+     `f163764`, now ~30 commits behind master and widening.
+   - The **OpenAI path is unverified**, because both orgs have been credit-dead
+     since 2026-08-14 and that path is the one hard constraint measured above
+     (`responses()`, not `completion()`).
    - Per the note in section 2, only the adapter-wiring half of
      `fix/credit-exhaustion-detection` actually depends on this answer.
 2. **Prompt-cache layout** — built, defaulted off. **Still open, blocked.** It
