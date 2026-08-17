@@ -118,14 +118,46 @@ class TestLayoutHelper:
     """_cache_friendly_layout in isolation."""
 
     def test_it_returns_the_constant_system(self):
-        system, _ = _cache_friendly_layout("domain instruction", "article")
+        system, _, _ = _cache_friendly_layout("domain instruction", "article")
         assert system == _CACHE_LAYOUT_SYSTEM
 
     def test_it_keeps_both_halves(self):
-        _, user = _cache_friendly_layout("domain instruction", "article")
+        _, user, _ = _cache_friendly_layout("domain instruction", "article")
         assert "article" in user
         assert "domain instruction" in user
 
     def test_the_original_system_moves_to_the_end(self):
-        _, user = _cache_friendly_layout("domain instruction", "article")
+        _, user, _ = _cache_friendly_layout("domain instruction", "article")
         assert user.index("article") < user.index("domain instruction")
+
+
+class TestTheCacheablePrefix:
+    """The layout hands back where the shared part ends, rather than leaving the
+    caller to find the boundary again by string surgery.
+
+    Two copies of that boundary would drift, and a breakpoint placed one
+    character off does not fail — it just caches the wrong span, or nothing, and
+    the only symptom is a bill that did not go down.
+    """
+
+    def test_the_prefix_is_a_real_prefix_of_the_user_message(self):
+        _, user, prefix = _cache_friendly_layout("domain instruction", "article")
+        assert user.startswith(prefix)
+
+    def test_the_prefix_holds_the_article_and_not_the_task(self):
+        _, _, prefix = _cache_friendly_layout("domain instruction", "the article")
+        assert "the article" in prefix
+        assert "domain instruction" not in prefix
+
+    def test_the_prefix_is_identical_across_domains(self):
+        """The whole point: five domains, one shared prefix to cache."""
+        prefixes = {
+            _cache_friendly_layout(f"instruction for {d}", "same article")[2]
+            for d in ("fact_check", "voice_style", "completeness")
+        }
+        assert len(prefixes) == 1
+
+    def test_a_different_article_gets_a_different_prefix(self):
+        a = _cache_friendly_layout("same instruction", "article one")[2]
+        b = _cache_friendly_layout("same instruction", "article two")[2]
+        assert a != b

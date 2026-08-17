@@ -208,3 +208,84 @@ class TestOpenAIReportsCachedTokensUnderTwoNames:
         # 966 uncached @ $5.00/M + 18,176 cached @ $0.50/M
         expected = (966 * 5.00 + 18176 * 0.50) / 1_000_000
         assert abs(in_usd - expected) < 1e-9
+
+
+class TestCachedTokensAreNotCountedTwice:
+    """litellm and Anthropic disagree about what `prompt_tokens` includes.
+
+    Anthropic's own API reports the *uncached remainder* and puts the rest in
+    separate cache fields, so those have to be added back. litellm normalises to
+    an *inclusive* `prompt_tokens` and leaves the cache fields in place, so
+    adding them there counts the same tokens twice.
+
+    This was invisible until prompt caching actually started working — every
+    cache field was zero, so the addition was a no-op. The bug and the feature
+    arrive together, which is why it is pinned here with real payloads rather
+    than left to the next person to rediscover from a doubled bill.
+
+    All four payloads below were captured from live calls on 2026-08-16.
+    """
+
+    def _n(self, usage):
+        from ci_core.llm.tokens import normalize_tokens
+
+        return normalize_tokens(usage)
+
+    def test_litellm_cache_write_is_not_doubled(self):
+        usage = {
+            "completion_tokens": 4,
+            "prompt_tokens": 5424,
+            "prompt_tokens_details": {"cache_write_tokens": 5416, "cached_tokens": 0},
+            "cache_creation_input_tokens": 5416,
+        }
+        assert self._n(usage)["prompt"] == 5424  # not 10840
+
+    def test_litellm_cache_read_is_not_doubled(self):
+        usage = {
+            "completion_tokens": 4,
+            "prompt_tokens": 5424,
+            "prompt_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 5416},
+            "cache_read_input_tokens": 5416,
+        }
+        out = self._n(usage)
+        assert out["prompt"] == 5424  # not 10840
+        assert out["cached"] == 5416  # not 10832 — two spellings of one number
+
+    def test_the_raw_anthropic_shape_still_adds_its_cache_fields(self):
+        """The case the addition exists for, and which must not regress.
+
+        Here `input_tokens` really is only the uncached remainder: a
+        4,800-token cached prompt arrives as 20.
+        """
+        usage = {
+            "input_tokens": 20,
+            "cache_read_input_tokens": 4800,
+            "output_tokens": 100,
+        }
+        out = self._n(usage)
+        assert out["prompt"] == 4820
+        assert out["cached"] == 4800
+
+    def test_openai_responses_shape_is_unaffected(self):
+        usage = {
+            "input_tokens": 19142,
+            "input_tokens_details": {"cached_tokens": 18176},
+            "output_tokens": 28,
+        }
+        out = self._n(usage)
+        assert out["prompt"] == 19142
+        assert out["cached"] == 18176
+
+    def test_a_doubled_prompt_would_double_the_bill(self):
+        """Why this matters beyond tidiness: cost is computed from these."""
+        from ci_core.llm import cost
+
+        honest = {
+            "model": "claude-opus-4-8",
+            "tokens": {"prompt": 5424, "cached": 5416},
+        }
+        doubled = {
+            "model": "claude-opus-4-8",
+            "tokens": {"prompt": 10840, "cached": 10832},
+        }
+        assert cost._entry_cost(doubled)[0] > cost._entry_cost(honest)[0] * 1.9

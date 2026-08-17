@@ -75,13 +75,27 @@ def normalize_tokens(usage):
         completion += _first_int(usage, ("thoughtsTokenCount",))
 
     prompt = _first_int(usage, _PROMPT_KEYS)
-    # Cached input is still input. Anthropic reports it in separate fields and
-    # drops ``input_tokens`` to only the uncached remainder, so reading that key
-    # alone under-reports a cached call enormously — a 4,800-token system prompt
-    # showed up as 20. Both cache fields are disjoint from ``input_tokens`` and
-    # from each other, so they add. Guarded on the normalized key so
-    # re-normalizing does not double-count.
-    if "prompt" not in usage:
+    # Cached input is still input, and whether it is already counted depends on
+    # which spelling of the total arrived.
+    #
+    # Anthropic's own API reports ``input_tokens`` as the *uncached remainder*
+    # and puts the rest in separate cache fields, so reading that key alone
+    # under-reports a cached call enormously — a 4,800-token system prompt
+    # showed up as 20. There the cache fields must be added.
+    #
+    # litellm does not pass that shape through. It normalises to
+    # ``prompt_tokens``, which is the **inclusive** total, and *also* leaves the
+    # cache fields in place. Adding them there double-counts: measured
+    # 2026-08-16, a 5,424-token cached call reported 10,840. That was invisible
+    # until caching actually started working, because every cache field was
+    # zero — the bug and the feature arrive together.
+    #
+    # So: trust an inclusive total when one is present, and only reconstruct it
+    # from the parts when all we have is the remainder.
+    has_inclusive_total = any(
+        key in usage for key in ("prompt", "prompt_tokens", "promptTokenCount")
+    )
+    if not has_inclusive_total:
         prompt += _first_int(usage, ("cache_creation_input_tokens",))
         prompt += _first_int(usage, ("cache_read_input_tokens",))
     # How much of `prompt` came from the provider's cache. Kept as a separate
@@ -97,12 +111,22 @@ def normalize_tokens(usage):
         # reading only the Chat Completions name reported 0 cached tokens for
         # every OpenAI call in every run while the cache was in fact serving
         # ~95% of the prompt. Measured against the live API 2026-08-15.
+        #
+        # These are alternative spellings of one number, not parts of a sum.
+        # litellm reports Anthropic's cache reads in BOTH
+        # ``prompt_tokens_details.cached_tokens`` and
+        # ``cache_read_input_tokens``; adding them reported 10,832 cached tokens
+        # for a call that read 5,416. First one wins.
         for key in ("prompt_tokens_details", "input_tokens_details"):
             details = usage.get(key)
             if isinstance(details, dict):
-                cached += _first_int(details, ("cached_tokens",))
-        cached += _first_int(usage, ("cache_read_input_tokens",))
-        cached += _first_int(usage, ("cachedContentTokenCount",))
+                cached = _first_int(details, ("cached_tokens",))
+                if cached:
+                    break
+        if not cached:
+            cached = _first_int(usage, ("cache_read_input_tokens",))
+        if not cached:
+            cached = _first_int(usage, ("cachedContentTokenCount",))
 
     out = {"prompt": prompt, "completion": completion}
     if cached:

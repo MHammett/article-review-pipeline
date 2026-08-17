@@ -402,15 +402,25 @@ class TestTokens:
 
     def test_anthropic_cache_key_is_read(self):
         """Anthropic reports cache hits on its own key rather than in the
-        details object; litellm passes the name straight through."""
+        details object; litellm passes the name straight through.
+
+        The prompt total has to exceed the cached count, because under litellm
+        `prompt_tokens` is the *inclusive* figure — a fixture claiming 640
+        cached tokens inside a 100-token prompt describes a call that cannot
+        happen, and only passed while the cached value was being added on top
+        of the total rather than read out of it.
+        """
         with patch.object(
             client.litellm,
             "completion",
-            return_value=_completion_stream(usage=_usage(anthropic_cached=640)),
+            return_value=_completion_stream(
+                usage=_usage(prompt=1000, anthropic_cached=640)
+            ),
         ):
             result = _call("claude")
 
         assert result["tokens"]["cached"] == 640
+        assert result["tokens"]["prompt"] == 1000
 
     def test_a_cold_call_omits_the_cached_key(self):
         """Matches normalize_tokens: absent means no cache hit, and cost.py
@@ -1424,3 +1434,94 @@ class TestSearchMetadataReachesTheCaller:
             result = _call("grok", provider_config={"web_search": True})
 
         assert result.get("grounding_available") is not True
+
+
+class TestCacheBreakpoint:
+    """Anthropic caches nothing unless told where the cacheable part ends.
+
+    Measured 2026-08-16 on claude-opus-4-8, the same 5,426-token prefix twice:
+    with a cache_control marker, call 1 wrote 5,412 tokens and call 2 read them
+    back; without one, both calls cached zero. Everyone else caches implicitly
+    and gets a plain string, because complicating a request that already works
+    buys nothing.
+    """
+
+    def _sent(self, provider, prefix, remainder="TASK"):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call(provider, user_prompt=prefix + remainder, cache_prefix=prefix)
+        return seen["messages"][-1]["content"]
+
+    def test_claude_gets_a_marked_breakpoint(self):
+        content = self._sent("claude", "ARTICLE")
+        assert isinstance(content, list)
+        assert content[0]["text"] == "ARTICLE"
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+        assert content[1]["text"] == "TASK"
+        assert "cache_control" not in content[1]
+
+    @pytest.mark.parametrize("provider", ["grok", "mistral", "perplexity", "gemini"])
+    def test_implicit_cachers_get_a_plain_string(self, provider):
+        assert self._sent(provider, "ARTICLE") == "ARTICLETASK"
+
+    def test_no_prefix_means_no_restructuring(self):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call("claude", user_prompt="whole thing")
+
+        assert seen["messages"][-1]["content"] == "whole thing"
+
+    def test_a_prefix_that_does_not_match_is_ignored_rather_than_guessed(self):
+        """A caller that hands over a prefix the prompt does not start with has
+        a bug; splitting anyway would cache a span nobody chose."""
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call("claude", user_prompt="actual prompt", cache_prefix="something else")
+
+        assert seen["messages"][-1]["content"] == "actual prompt"
+
+    def test_openai_gets_a_routing_key_derived_from_the_prefix(self):
+        """Not enablement — OpenAI caches anyway. The key steers concurrent
+        calls at the same warm prefix instead of each missing on a cold one."""
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _responses_stream()
+
+        with patch.object(client.litellm, "responses", side_effect=_capture):
+            _call("openai", user_prompt="ARTICLETASK", cache_prefix="ARTICLE")
+
+        assert seen["prompt_cache_key"].startswith("ci-review-")
+
+    def test_the_routing_key_is_stable_per_article_and_differs_across_them(self):
+        from ci_core.llm import cache as cache_mod
+
+        one = cache_mod.as_request_params("openai", "article one")
+        one_again = cache_mod.as_request_params("openai", "article one")
+        two = cache_mod.as_request_params("openai", "article two")
+        assert one == one_again
+        assert one != two
+
+    def test_the_routing_key_does_not_carry_the_article(self):
+        from ci_core.llm import cache as cache_mod
+
+        key = cache_mod.as_request_params("openai", "secret article text")[
+            "prompt_cache_key"
+        ]
+        assert "secret" not in key

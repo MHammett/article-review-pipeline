@@ -24,7 +24,7 @@ verdict — should use :func:`call_text`.
 
 import logging
 
-from . import client, cost, json_utils, model_registry, schema, timeout_model
+from . import cache, client, cost, json_utils, model_registry, schema, timeout_model
 from .client import PROVIDERS
 
 log = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ __all__ = [
     "PROVIDERS",
     "call_provider",
     "call_text",
+    "cache",
     "client",
     "cost",
     "json_utils",
@@ -52,6 +53,7 @@ def call_provider(
     model=None,
     provider_config=None,
     response_schema=None,
+    cache_prefix=None,
 ):
     """Call provider ``name`` and return its result dict unchanged."""
     return client.call(
@@ -64,6 +66,7 @@ def call_provider(
         model=model,
         provider_config=provider_config,
         response_schema=response_schema,
+        cache_prefix=cache_prefix,
     )
 
 
@@ -77,6 +80,7 @@ def call_text(
     model=None,
     provider_config=None,
     response_schema=None,
+    cache_prefix=None,
 ):
     """Call provider ``name`` and return the assembled text, not parsed JSON.
 
@@ -104,6 +108,7 @@ def call_text(
         model=model,
         provider_config=provider_config,
         response_schema=response_schema,
+        cache_prefix=cache_prefix,
     )
 
     failed = bool(result.get("failed"))
