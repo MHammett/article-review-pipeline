@@ -13,6 +13,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ci_core.console import force_utf8_stdio
+
+force_utf8_stdio()
 
 _EXAMPLE_DIR = Path(__file__).parent / "configs"
 

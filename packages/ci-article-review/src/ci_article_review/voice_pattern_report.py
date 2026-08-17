@@ -29,7 +29,12 @@ from pathlib import Path
 
 import yaml
 
+from ci_core.console import force_utf8_stdio
+
 from .history_analytics import HISTORY_ROOT, load_reports
+
+# Every flagged passage this prints is article prose, quoted as it was written.
+force_utf8_stdio()
 
 log = logging.getLogger(__name__)
 

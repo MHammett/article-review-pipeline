@@ -13,6 +13,12 @@ Usage:
 
 import sys
 
+# Provider and WordPress failures are reported verbatim, and their text is not
+# ours to keep inside cp1252.
+from ci_core.console import force_utf8_stdio
+
+force_utf8_stdio()
+
 if sys.version_info < (3, 10):
     print(f"ERROR: Python 3.10+ required. You are running {sys.version}.")
     sys.exit(1)
