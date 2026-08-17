@@ -92,17 +92,31 @@ def _days_ago(d):
     return f"{days / 365:.1f}yr ago"
 
 
+def is_newer_than_configured(model_id, date, configured_id, configured_date):
+    """True when the provider offers ``model_id`` and it postdates what you run.
+
+    Public and shared deliberately: ``ci-discover`` prints this judgement and
+    the run report states it, and the two disagreeing would be worse than
+    either being wrong on its own.
+
+    Both dates must be known. A missing date is not an old date — the provider
+    simply did not say — and guessing in either direction produces the failure
+    this comparison exists to prevent (see ``_iso``).
+    """
+    return (
+        date is not None
+        and configured_date is not None
+        and date > configured_date
+        and model_id != configured_id
+    )
+
+
 def _print_model_row(model_id, date, configured_id, configured_date, prefix=""):
     marker_raw = INFO
     note = ""
 
     is_configured = model_id == configured_id
-    is_newer = (
-        date is not None
-        and configured_date is not None
-        and date > configured_date
-        and not is_configured
-    )
+    is_newer = is_newer_than_configured(model_id, date, configured_id, configured_date)
     in_superseded = model_id in SUPERSEDED
     in_newer_available = model_id in NEWER_AVAILABLE
 
@@ -265,6 +279,129 @@ _PROVIDERS = {
 
 
 # ---------------------------------------------------------------------------
+# Non-CLI entry point
+#
+# `main()` below renders the CLI report from `collect_available_models`, and so
+# does the pipeline's run report (via live_model_check). Sharing the sweep is
+# the point: two copies of "what does this provider offer" would eventually
+# give two different answers, and the whole value of the answer is that it is
+# the provider's, not ours.
+# ---------------------------------------------------------------------------
+
+
+def collect_available_models(model_configs, api_keys, providers=None):
+    """Query each provider's models API. Returns ``{provider_key: entry}``.
+
+    ``model_configs`` is the normalized, post-preset models dict — the same
+    shape ``check_model_currency`` takes. ``providers`` restricts the sweep;
+    the default is every provider this module knows.
+
+    Each entry is::
+
+        {"label", "configured", "configured_date", "enabled",
+         "status": "ok" | "skipped" | "error",
+         "reason":  machine-readable code, "" when status is "ok",
+         "detail":  extra context for the reason (project/location, HTTP body),
+         "static":  True when the list is documented rather than fetched,
+         "models":  [(model_id, date_or_None), ...]}
+
+    Never raises. Every failure mode a provider can present — no key, disabled,
+    an auth error, a listing endpoint that does not exist — comes back as an
+    entry saying so, because both callers treat "OpenAI could not be checked"
+    as something to report, not something to stop for.
+    """
+    keys = providers or list(_PROVIDERS)
+    results = {}
+
+    for provider_key in keys:
+        entry = _PROVIDERS.get(provider_key)
+        if entry is None:
+            continue
+        fn, label = entry
+
+        cfg = model_configs.get(provider_key, {})
+        if not isinstance(cfg, dict):
+            cfg = {"model": str(cfg)}
+        configured_id = cfg.get("model", "") or ""
+        enabled = cfg.get("enabled", True)
+        api_key = (api_keys.get(provider_key, {}) or {}).get("api_key", "") or ""
+
+        record = {
+            "label": label,
+            "configured": configured_id,
+            "configured_date": None,
+            "enabled": enabled,
+            "status": "skipped",
+            "reason": "",
+            "detail": "",
+            "static": provider_key == "perplexity",
+            "models": [],
+        }
+        results[provider_key] = record
+
+        # Vertex AI issues no AI Studio key and its listing endpoint needs the
+        # gcloud SDK, so there is nothing to query even when Gemini is fully
+        # configured and running.
+        if provider_key == "gemini" and cfg.get("provider") == "vertex_ai":
+            record["reason"] = "vertex_ai"
+            record["detail"] = (
+                f"project={cfg.get('project', '?')} location={cfg.get('location', '?')}"
+            )
+            continue
+
+        if not api_key:
+            record["reason"] = "no_api_key"
+            continue
+
+        if not enabled:
+            record["reason"] = "disabled"
+            continue
+
+        try:
+            models = fn(api_key, configured_id) or []
+        except requests.exceptions.HTTPError as e:
+            record["status"] = "error"
+            record["reason"] = f"HTTP {e.response.status_code}"
+            record["detail"] = redact_url_keys(e.response.text[:200])
+            continue
+        except Exception as e:  # noqa: BLE001 — advisory; no failure mode fails a run
+            record["status"] = "error"
+            record["reason"] = "request_failed"
+            record["detail"] = str(redact_url_keys(e))
+            continue
+
+        record["status"] = "ok"
+        record["models"] = list(models)
+        record["configured_date"] = next(
+            (d for mid, d in record["models"] if mid == configured_id), None
+        )
+
+    return results
+
+
+def newer_than_configured(entry):
+    """Models in ``entry`` that postdate its configured model, newest first.
+
+    Empty whenever the comparison cannot be made — the provider errored, the
+    configured model is not in the returned list, or neither carries a date.
+    Empty means "nothing to say", never "you are up to date"; the callers are
+    responsible for keeping that distinction visible, which is why the entry's
+    ``status`` travels alongside this list rather than being folded into it.
+    """
+    if entry.get("status") != "ok":
+        return []
+    configured_id = entry.get("configured", "")
+    configured_date = entry.get("configured_date")
+    newer = [
+        {"model": mid, "released": date}
+        for mid, date in entry.get("models", [])
+        if is_newer_than_configured(mid, date, configured_id, configured_date)
+    ]
+    newer.sort(key=lambda m: m["released"], reverse=True)
+    return newer
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -322,67 +459,66 @@ def main():
     )
     print("=" * 70)
 
-    for provider_key in providers_to_check:
-        fn, label = _PROVIDERS[provider_key]
+    collected = collect_available_models(
+        model_configs, api_keys, providers=providers_to_check
+    )
 
-        cfg = model_configs.get(provider_key, {})
-        prov_type = cfg.get("provider", "")
-        configured_id = cfg.get("model", "")
-        enabled = cfg.get("enabled", True)
-        creds = api_keys.get(provider_key, {})
-        api_key = creds.get("api_key", "") or ""
+    for provider_key in providers_to_check:
+        record = collected.get(provider_key)
+        if record is None:
+            continue
+        configured_id = record["configured"]
 
         print(
-            f"\n{label}  (configured: {configured_id or '—'}{'' if enabled else ', disabled'})"
+            f"\n{record['label']}  (configured: {configured_id or '—'}"
+            f"{'' if record['enabled'] else ', disabled'})"
         )
 
-        # --- Vertex AI: no AI Studio key, listing requires separate auth ---
-        if provider_key == "gemini" and prov_type == "vertex_ai":
-            project = cfg.get("project", "?")
-            location = cfg.get("location", "?")
-            print(
-                f"  {SKIP}  Gemini is configured via Vertex AI (project={project} "
-                f"location={location}).\n"
-                "       Model listing against Vertex AI requires the gcloud SDK and is "
-                "not supported here.\n"
-                "       Check https://ai.google.dev/models for available Gemini models.\n"
-                f"       Configured model: {configured_id!r}"
-            )
+        reason = record["reason"]
+        if record["status"] == "skipped":
+            # --- Vertex AI: no AI Studio key, listing requires separate auth ---
+            if reason == "vertex_ai":
+                print(
+                    f"  {SKIP}  Gemini is configured via Vertex AI ({record['detail']}).\n"
+                    "       Model listing against Vertex AI requires the gcloud SDK and is "
+                    "not supported here.\n"
+                    "       Check https://ai.google.dev/models for available Gemini models.\n"
+                    f"       Configured model: {configured_id!r}"
+                )
+            elif reason == "no_api_key":
+                print(f"  {SKIP}  No API key configured — skipping")
+            elif reason == "disabled":
+                print(f"  {SKIP}  Provider disabled (enabled: false)")
             continue
 
-        if not api_key:
-            print(f"  {SKIP}  No API key configured — skipping")
+        if record["status"] == "error":
+            if reason == "request_failed":
+                print(f"  {ERR}  {record['detail']}")
+            else:
+                print(f"  {ERR}  {reason}: {record['detail']}")
             continue
 
-        if not enabled:
-            print(f"  {SKIP}  Provider disabled (enabled: false)")
-            continue
-
-        # --- Call the provider API ---
-        is_static = provider_key == "perplexity"
-        if is_static:
+        if record["static"]:
             print("  (No models endpoint — showing documented set from June 2026)")
 
-        try:
-            models = fn(api_key, configured_id)
-        except requests.exceptions.HTTPError as e:
-            print(
-                f"  {ERR}  HTTP {e.response.status_code}: {redact_url_keys(e.response.text[:200])}"
-            )
-            continue
-        except Exception as e:
-            print(f"  {ERR}  {redact_url_keys(e)}")
-            continue
-
-        if not models:
+        if not record["models"]:
             print("  (No models returned)")
             continue
 
-        # Find configured model's date for "newer than" comparison
-        configured_date = next((d for mid, d in models if mid == configured_id), None)
+        for model_id, date in record["models"]:
+            _print_model_row(model_id, date, configured_id, record["configured_date"])
 
-        for model_id, date in models:
-            _print_model_row(model_id, date, configured_id, configured_date)
+    # Hand the sweep to the run report. Imported here rather than at module
+    # scope because live_model_check imports this module for the provider code —
+    # the cycle is real, and the CLI is the only side that needs the other.
+    from .live_model_check import save_cache
+
+    cache_path = save_cache(collected, providers=providers_to_check)
+    if cache_path:
+        print(
+            f"\nSaved to {cache_path} — the next pipeline run will report any "
+            "newer model from this sweep without querying the providers again."
+        )
 
     print("\n" + "=" * 70)
     print(

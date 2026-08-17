@@ -202,6 +202,8 @@ class TestMainExitBehaviour:
             "openai": (_spy("openai"), "OpenAI"),
             "mistral": (_spy("mistral"), "Mistral"),
         }
+        # main() also saves the sweep for the pipeline to read; conftest.py's
+        # autouse fixture keeps that out of the working tree.
         with (
             patch("sys.argv", ["ci-discover", "--provider", "openai"]),
             patch.object(discover, "load_user_config", return_value=cfg),
