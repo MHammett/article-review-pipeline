@@ -1338,3 +1338,89 @@ class TestStructuredOutput:
         assert result["failed"] is False
         assert result["truncated"] is True
         assert result["data"] == {"flags": [{"passage": "one"}]}
+
+
+class TestOptInWebSearch:
+    """Live search for grok and claude, where it is an opt-in parameter.
+
+    Distinct from TestWebSearch above, which covers OpenAI's Responses API
+    tool. Same capability, three different spellings across three providers.
+
+    Proven real on 2026-08-16 rather than assumed: asked for the newest litellm
+    release on PyPI, both grok and claude answered "I do not know" without the
+    parameter and returned a cited, correct version with it. An earlier check
+    looked inconclusive only because it asked something both models knew from
+    training, and because claude's citations arrive somewhere the shim was not
+    reading.
+    """
+
+    def _sent(self, provider, cfg):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call(provider, provider_config=cfg)
+        return seen
+
+    @pytest.mark.parametrize("provider", ["grok", "claude"])
+    def test_search_is_requested_when_enabled(self, provider):
+        sent = self._sent(provider, {"web_search": True})
+        assert sent["web_search_options"] == {"search_context_size": "medium"}
+
+    @pytest.mark.parametrize("provider", ["grok", "claude"])
+    def test_no_search_parameter_when_disabled(self, provider):
+        assert "web_search_options" not in self._sent(provider, {})
+        assert "web_search_options" not in self._sent(provider, {"web_search": False})
+
+    def test_context_size_is_overridable(self):
+        sent = self._sent("grok", {"web_search": True, "search_context_size": "high"})
+        assert sent["web_search_options"]["search_context_size"] == "high"
+
+    @pytest.mark.parametrize("provider", ["perplexity", "gemini"])
+    def test_always_searching_providers_are_not_sent_the_parameter(self, provider):
+        """sonar always searches, and gemini's search is a tool set elsewhere.
+
+        Sending it would be either a no-op or a conflict, and it would imply the
+        capability is off when the flag is absent — which for these two is
+        exactly backwards.
+        """
+        assert "web_search_options" not in self._sent(provider, {"web_search": True})
+
+
+class TestSearchMetadataReachesTheCaller:
+    def test_citations_from_provider_specific_fields_are_read(self):
+        """Anthropic tucks citations into provider_specific_fields rather than
+        exposing them as a chunk attribute. Reading only the top-level name
+        reported zero citations for a search that had in fact run — which is
+        how claude's search first looked like it did nothing."""
+        chunks = _completion_stream()
+        chunks.append(
+            _chunk(provider_specific_fields={"citations": ["https://epa.gov/a"]})
+        )
+        with patch.object(client.litellm, "completion", return_value=chunks):
+            result = _call("claude", provider_config={"web_search": True})
+
+        assert result["citations"] == ["https://epa.gov/a"]
+        assert result["grounding_available"] is True
+
+    def test_grounding_is_keyed_off_the_payload_not_the_provider_name(self):
+        """A newly-grounded provider should surface without another branch."""
+        chunks = _completion_stream()
+        chunks.append(_chunk(citations=["https://nasa.gov/x"]))
+        with patch.object(client.litellm, "completion", return_value=chunks):
+            result = _call("grok", provider_config={"web_search": True})
+
+        assert result["grounding_available"] is True
+
+    def test_a_model_that_searched_and_found_nothing_says_so(self):
+        """grounding_available must reflect what came back, not what was asked
+        for — an empty search is not the same as a grounded answer."""
+        with patch.object(
+            client.litellm, "completion", return_value=_completion_stream()
+        ):
+            result = _call("grok", provider_config={"web_search": True})
+
+        assert result.get("grounding_available") is not True

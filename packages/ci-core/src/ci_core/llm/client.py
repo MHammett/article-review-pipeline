@@ -162,6 +162,21 @@ _TEMPERATURE = 0.2
 # and Anthropic has no equivalent.
 _JSON_OBJECT_PROVIDERS = frozenset({"grok", "mistral"})
 
+# Providers whose live web search is an opt-in parameter rather than a property
+# of the model. Proven on 2026-08-16 with a question training cannot answer —
+# the newest litellm release on PyPI. Both said "I do not know" without it and
+# answered with a cited, correct version with it.
+#
+# Perplexity and Gemini are deliberately absent: sonar always searches, and
+# gemini's search is a tool set elsewhere in this function. Adding them here
+# would send a parameter that either does nothing or conflicts.
+#
+# Why this matters more than a parameter usually does: fact_check runs six
+# models, and before this only two of them could look anything up. The other
+# four were checking claims against training recall, which is exactly the
+# weakness the citation tiers exist to expose.
+_WEB_SEARCH_PROVIDERS = frozenset({"grok", "claude"})
+
 # ...except that Mistral's adapter treated response_format as incompatible with
 # reasoning mode and sent one or the other, never both. A live check on
 # 2026-08-16 found the combination now succeeds, so that may no longer hold —
@@ -458,6 +473,18 @@ def _provider_params(provider, cfg, response_schema=None):
         if provider == "perplexity" and cfg.get(key) is not None:
             params[key] = cfg[key]
 
+    # Live web search, for the providers that offer it as an option. Perplexity
+    # and Gemini are absent because search is not optional for them — sonar
+    # always searches, and gemini's googleSearch tool is set above regardless.
+    #
+    # The pipeline resolves `web_search` per domain before calling, so by the
+    # time it arrives it is a plain bool. Only fact_check has any use for it,
+    # and every search bills.
+    if provider in _WEB_SEARCH_PROVIDERS and (cfg or {}).get("web_search"):
+        params["web_search_options"] = {
+            "search_context_size": cfg.get("search_context_size", "medium")
+        }
+
     # A schema, where the provider enforces one. Gemini is excluded while
     # grounded — the provider 400s on that combination, and its search matters
     # more here than the shape guarantee does.
@@ -529,6 +556,43 @@ def _completion_is_progress(chunk):
     return getattr(chunk, "usage", None) is not None
 
 
+def _provider_field(chunk, *names):
+    """A provider-specific extra from a streamed chunk, under any of ``names``.
+
+    litellm puts anything without a home in the OpenAI schema into
+    ``provider_specific_fields``, and where it hangs that dict depends on the
+    provider *and* on whether the response is streamed. Anthropic, measured
+    2026-08-16:
+
+      non-streamed  message.provider_specific_fields["citations"]
+      streamed      choices[].delta.provider_specific_fields["citation"]
+
+    Different level, and singular rather than plural. Reading only the obvious
+    place is why claude's search first looked like it returned nothing: the
+    search had run, the results were on the wire, and the shim was looking one
+    level up and one letter off.
+    """
+    holders = [chunk]
+    for choice in getattr(chunk, "choices", None) or []:
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            holders.append(delta)
+
+    for holder in holders:
+        fields = getattr(holder, "provider_specific_fields", None)
+        if not fields:
+            continue
+        for name in names:
+            value = (
+                fields.get(name)
+                if isinstance(fields, dict)
+                else getattr(fields, name, None)
+            )
+            if value:
+                return value
+    return None
+
+
 def _consume_completion_stream(stream, first_byte, gap):
     """Drain a ``litellm.completion(stream=True)`` response.
 
@@ -559,10 +623,17 @@ def _consume_completion_stream(stream, first_byte, gap):
         if getattr(chunk, "usage", None) is not None:
             usage = chunk.usage
 
-        cites = getattr(chunk, "citations", None)
+        # Perplexity puts these on the chunk itself; Anthropic tucks them into
+        # provider_specific_fields, which is why a first look at claude's search
+        # results reported zero citations and read as "search did not run". It
+        # had run. Both spellings are read here so the two look alike to the
+        # pipeline, which only wants to know what the model actually consulted.
+        cites = getattr(chunk, "citations", None) or _provider_field(chunk, "citations")
         if cites:
             citations = list(cites)
-        results = getattr(chunk, "search_results", None)
+        results = getattr(chunk, "search_results", None) or _provider_field(
+            chunk, "web_search_results"
+        )
         if results:
             search_results = list(results)
 
@@ -976,13 +1047,18 @@ def _attempt(
     citations = assembled["citations"]
 
     extras = {}
-    if provider == "perplexity":
-        extras["citations"] = citations
-        extras["search_results"] = assembled["search_results"]
-        extras["grounding_available"] = bool(citations)
-    elif provider == "gemini":
+    if provider == "gemini":
         extras["grounding_chunks"] = grounding
         extras["grounding_available"] = bool(grounding)
+    elif provider == "perplexity" or citations or assembled["search_results"]:
+        # Perplexity always reports these; grok and claude do too once their
+        # search is switched on. Keyed off the payload rather than the provider
+        # name so a newly-grounded provider surfaces without another branch —
+        # the pipeline collects response-level sources by shape, not by who
+        # sent them.
+        extras["citations"] = citations
+        extras["search_results"] = assembled["search_results"]
+        extras["grounding_available"] = bool(citations or assembled["search_results"])
 
     parsed, truncated = extract_json_with_salvage(content)
     if parsed is None:
