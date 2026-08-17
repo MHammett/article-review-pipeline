@@ -33,7 +33,9 @@ resolved differently — say which) · `dropped` (with the reason).
 
 ## 1. litellm — credit exhaustion is classified as a rate limit
 
-**Status:** contributed — added to an existing open issue rather than filed anew.
+**Status:** contributed — twice, and **deliberately not turned into a PR.** No
+maintainer has responded to any of it as of 2026-08-16; see "Why no PR" below,
+which is the part worth reading before anyone picks this up again.
 [BerriAI/litellm#32785](https://github.com/BerriAI/litellm/issues/32785) already
 reported this on 2026-07-10 (and traced it further than we had, to the OpenAI
 branch of `exception_type()` testing `is_error_str_rate_limit()` before ever
@@ -41,10 +43,11 @@ consulting the body's `insufficient_quota` code). Our evidence went there as
 [a comment](https://github.com/BerriAI/litellm/issues/32785#issuecomment-5299586013)
 on 2026-08-14: the cross-provider table below (which #32785 offered to enumerate
 and did not), confirmation that it still reproduces on v1.96.2 (they tested
-1.91.1 and HEAD at 2026-07-10), and the in-band SSE case — which their proposed
-fix would miss, since patching `exception_type()` alone leaves the HTTP-200
-streaming path silent. `ci_core/llm/quota.py` is offered there as the PR,
-pending a maintainer steer on which of their three shapes they want.
+1.91.1 and HEAD at 2026-07-10), and the in-band SSE case. The classifier was
+offered there as the PR, pending a maintainer steer that never came.
+Second contribution 2026-08-16: review input on
+[PR #32798](https://github.com/BerriAI/litellm/pull/32798#issuecomment-5310640191),
+the pick of three competing PRs already open for this.
 **Repo:** BerriAI/litellm (tested against 1.96.2)
 
 An account with no credits raises `litellm.exceptions.RateLimitError` with
@@ -77,10 +80,61 @@ kind of normalisation litellm exists to do:
 | xAI | "insufficient credits", HTTP 403 |
 | several | HTTP 402 Payment Required |
 
-**We have a working classifier** in `ci_core/llm/quota.py` (phrase-matching led,
-provider codes second, deliberately returning `None` rather than guessing) plus
-its test suite, including the verbatim SSE event from the production failure.
-Offer it as the PR.
+**Where each signal actually lands**, read off litellm `main` on 2026-08-16 —
+`insufficient_quota` and `credit_balance` appear nowhere in
+`exception_mapping_utils.py` (2,568 lines), so nothing has moved since #32785
+was filed:
+
+| provider | HTTP | class litellm raises today |
+|---|---|---|
+| OpenAI | 429 | `RateLimitError` — the bug |
+| Anthropic | 400 | `BadRequestError`, via the `400 or 413` branch of `_map_anthropic_exception` |
+| xAI | 403 | generic `APIError` — `_map_openai_exception` has no 403 branch, so it falls to the trailing `else` |
+| nlp_cloud | 402 | `RateLimitError` — the only place litellm maps 402 at all |
+
+Four ways to be out of money, three different exception classes, and 402 lands
+back in `RateLimitError`. **The sharp edge for #32798:** `xai` is in
+`litellm.openai_compatible_providers`, so it dispatches into
+`_map_openai_exception` — the very function that PR patches — but its
+`custom_llm_provider == "openai"` gate excludes it. Anyone upgrading and
+branching on the new subtype gets correct behaviour on OpenAI and silently wrong
+behaviour on xAI out of one code path. That argues for a per-provider table
+rather than a single equality check, which is what we offered to write on top of
+whatever shape merges.
+
+**Why no PR.** The condition for opening one was that maintainers be receptive.
+Measured 2026-08-16, they are not — and the reason is backlog, not disagreement:
+
+- **Three PRs already implement this**, all opened 2026-07-10 and all still open:
+  [#32798](https://github.com/BerriAI/litellm/pull/32798) (human author, CLA
+  signed), [#32789](https://github.com/BerriAI/litellm/pull/32789) and
+  [#32850](https://github.com/BerriAI/litellm/pull/32850) (both the Devin bot,
+  CLAs unsigned). All three add `InsufficientQuotaError(RateLimitError)`. All
+  three are `CONFLICTING`/`REVIEW_REQUIRED` with **zero maintainer comments** in
+  five weeks.
+- **3,280 open PRs, 1,877 of them older than 30 days.** Of the last 100 merged,
+  **94 are Berri staff or their own Devin bot**; 6 are outside contributors.
+- The thread is not short of analysis — the community already did the three-way
+  comparison between the PRs. It is short of maintainer attention.
+
+A fourth PR joins a pile of three unreviewed ones, so the contribution went where
+it was additive instead: review input on the one that could plausibly land.
+Revisit if a maintainer engages; the follow-up offer is on the record there.
+
+**Correction to the 2026-08-14 comment.** It flagged the in-band SSE path as
+something a fix to `exception_type()` alone would miss.
+[#32835](https://github.com/BerriAI/litellm/pull/32835) landed 2026-07-11 and
+does raise on in-stream error events, so that path is no longer silent — but it
+raises `APIError`, so the terminal-vs-transient distinction is still lost there.
+Corrected upstream in the #32798 comment rather than left standing.
+
+**What we carry locally.** Not `ci_core/llm/quota.py` — that went with the
+adapters. What survives is `_is_terminal_quota_error` in
+`ci_core/llm/client.py`: a deliberately narrow phrase list, applied to every
+retryable status (a dead account arrives as a 429 directly and as a synthesised
+503 mid-stream), existing only to stop our own single retry. The full
+cross-provider classifier stays unbuilt here on purpose — it belongs upstream,
+where each provider's wording is better known than we know it.
 
 ---
 
