@@ -196,6 +196,14 @@ pipeline:
   # A `Drafted with:` line in the handoff overrides this for a single article.
   # drafting_model: claude
 
+  # Move the per-domain instruction after the article so all of a provider's
+  # calls in a run share a byte-identical prefix and calls 2+ hit the prompt
+  # cache. Measured 76% of input cached on calls 2+, worth roughly $0.56-1.01
+  # per run. Off by default: it changes prompt structure, and the golden test
+  # cannot verify it (that test stubs _run_domain, which is where this applies),
+  # so it needs a live A/B against a prior run before you trust it.
+  # prompt_cache_layout: false
+
 
   retry_on_failure: true
   retry_delay_seconds: 10
