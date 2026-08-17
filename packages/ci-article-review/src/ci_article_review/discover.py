@@ -24,6 +24,12 @@ Usage:
 
 import sys
 
+# Before the guard below prints anything: this report is full of characters a
+# default Windows console (cp1252) cannot encode.
+from ci_core.console import force_utf8_stdio
+
+force_utf8_stdio()
+
 if sys.version_info < (3, 10):
     print(f"ERROR: Python 3.10+ required. You are running {sys.version}.")
     sys.exit(1)

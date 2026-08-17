@@ -34,6 +34,11 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ci_core.console import force_utf8_stdio
+
+# Article titles out of the history files reach stdout verbatim.
+force_utf8_stdio()
+
 log = logging.getLogger(__name__)
 
 HISTORY_ROOT = "pipeline_history"

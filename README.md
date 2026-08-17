@@ -410,6 +410,8 @@ content-intelligence/
 │   │   │   ├── concurrency.py    run_with_timeout — the wall-clock backstop both
 │   │   │   │                     applications run their provider calls under
 │   │   │   ├── redact.py         scrubs API keys from error output before logging
+│   │   │   ├── console.py        force_utf8_stdio — every CLI calls it first, so a
+│   │   │   │                     cp1252 Windows console cannot kill a report mid-print
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
 │   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml
 │   │   │   ├── config.py         pydantic settings (no production consumer yet)

@@ -37,6 +37,11 @@ from pathlib import Path
 import yaml as _yaml
 from dotenv import load_dotenv
 
+from ci_core.console import force_utf8_stdio
+
+# The corpus stats and bias warnings quote collected documents.
+force_utf8_stdio()
+
 # sources.yaml and user.yaml resolve ${ENV_VAR} placeholders via
 # ci_core.config_helpers, which reads os.environ — so the .env file has to be
 # loaded before either is read. This used to happen implicitly: the config

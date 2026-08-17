@@ -10,9 +10,9 @@ Usage:
 import sys
 
 # Reconfigure stdout/stderr to UTF-8 on Windows (default cp1252 breaks on non-ASCII report content)
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr,attr-defined]
-    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[union-attr,attr-defined]
+from ci_core.console import force_utf8_stdio
+
+force_utf8_stdio()
 
 # Version guard — must run before any other imports
 if sys.version_info < (3, 10):

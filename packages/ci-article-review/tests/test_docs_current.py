@@ -14,6 +14,7 @@ that needs updating — the point is that whoever trips one can fix it in a minu
 import ast
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -665,3 +666,97 @@ def test_printed_commands_do_not_use_bash_line_continuations():
         "the command on Windows cmd.exe. Keep the command on one line:\n  "
         + "\n  ".join(sorted(offenders))
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. Printed output survives a default Windows console
+# ---------------------------------------------------------------------------
+#
+# Same premise as section 6, one layer down: not what the printed command says,
+# but whether the print reaches the terminal at all. A default Windows console
+# encodes cp1252, and `ci-discover` spent its whole life dying on its first
+# provider row — `✓`, `←`, `→` and `⚠` have no cp1252 encoding, so printing a
+# model row raised UnicodeEncodeError partway through the report. `ci-review`
+# had been immune since it reconfigured stdout at import; nothing propagated
+# that to the other six entry points, and nothing noticed.
+#
+# The guard is deliberately structural rather than a scan for offending
+# characters. Half the exposure is data — article titles, flagged passages,
+# provider error bodies — which no scan of our own literals can see.
+
+_UTF8_GUARD_CALL = re.compile(r"^force_utf8_stdio\(\)\s*$", re.M)
+
+
+def _module_source_path(dotted):
+    """Resolve "ci_article_review.discover" to its file under packages/*/src/."""
+    parts = dotted.split(".")
+    for src_root in sorted(REPO_ROOT.glob("packages/*/src")):
+        candidate = src_root.joinpath(*parts).with_suffix(".py")
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def test_every_cli_entry_point_forces_utf8_stdio():
+    """Each console script calls force_utf8_stdio() before it prints anything.
+
+    Adding a CLI is the moment this gets forgotten, so the list of entry points
+    comes from [project.scripts] rather than being enumerated here — a new
+    script is covered the day it is declared.
+    """
+    declared = _declared_console_scripts()
+    assert declared, (
+        "No [project.scripts] entries found under packages/*/pyproject.toml — "
+        "the parser in this test is probably out of date."
+    )
+
+    missing = []
+    unresolved = []
+    for script, target in sorted(declared.items()):
+        dotted = target.split(":")[0]
+        path = _module_source_path(dotted)
+        if path is None:
+            unresolved.append(f"{script} -> {target}")
+            continue
+        if not _UTF8_GUARD_CALL.search(path.read_text(encoding="utf-8")):
+            missing.append(f"{script} ({path.relative_to(REPO_ROOT).as_posix()})")
+
+    assert not unresolved, (
+        "Console script targets that resolve to no source file — the entry "
+        "point or the resolver is wrong:\n  " + "\n  ".join(unresolved)
+    )
+    assert not missing, (
+        "CLI entry points that can crash with UnicodeEncodeError on a stock "
+        "Windows console (cp1252). Add `from ci_core.console import "
+        "force_utf8_stdio` and call it above the first print:\n  "
+        + "\n  ".join(missing)
+    )
+
+
+def test_force_utf8_stdio_survives_a_cp1252_stream():
+    """The helper must actually make an unencodable character printable.
+
+    Asserting the call is present only helps if the call works. This pins the
+    behaviour the entry points are relying on, including the lone surrogate
+    that UTF-8 itself cannot encode.
+    """
+    import io
+
+    from ci_core.console import force_utf8_stdio as force
+
+    original = sys.stdout
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="")
+    try:
+        sys.stdout = stream
+        # Guard against a no-op test: strict cp1252 must reject this first.
+        with pytest.raises(UnicodeEncodeError):
+            stream.write("✓")
+            stream.flush()
+
+        force()
+        assert sys.stdout.encoding.lower().replace("-", "") == "utf8"
+
+        print("✓ ← → ⚠ ≤ \ud800")
+        sys.stdout.flush()
+    finally:
+        sys.stdout = original
