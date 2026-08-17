@@ -449,6 +449,15 @@ around its output. 239 lines is not where the pain is.
    What has *not* changed is who decides. This alters prompt structure on a
    pipeline whose output is the product, so it still wants a golden-report diff
    and Mike's judgment rather than an agent's.
+
+   **Code landed 2026-08-17, still off by default.** [#111](https://github.com/MHammett/content-intelligence/pull/111)
+   ported the layout to `pipeline.py`; [#112](https://github.com/MHammett/content-intelligence/pull/112)
+   added the Anthropic cache-breakpoint half, since Anthropic caches nothing
+   implicitly — a matching prefix alone bought zero cached tokens until the
+   breakpoint landed. The `docs/CONFIGURATION.md` section and `user.example.yaml`
+   comment drafted for PR #84 and pulled back out are now landed alongside it.
+   The one remaining call — whether to flip `prompt_cache_layout: true` by
+   default — is unchanged and still Mike's.
 3. ~~**Delete the junk history directories?**~~ **Done, 2026-08-14.** `t/` and
    `title/` are gone. The Jun 8 report was refiled into the article's own
    directory as `run_1_20260608_075204_report.json`. It turned out to be the

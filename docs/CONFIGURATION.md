@@ -419,6 +419,7 @@ pipeline:
   wayback_snapshot_stale_days: 180  # snapshots older than this are flagged [STALE]
 
   drafting_model: claude        # excluded from voice_style — see below
+  prompt_cache_layout: false    # see "Prompt cache layout"
 ```
 
 **`wayback_snapshot_stale_days`** controls when a Wayback Machine snapshot is considered stale. At 180 days (default), a snapshot from more than six months ago triggers a `[STALE]` flag and a manual re-archive recommendation. Lower this for publications with high source-freshness standards (e.g., 90 days for breaking-news adjacent pieces). It applies to both draft link validation and resolved citation URLs.
@@ -452,6 +453,20 @@ Watch for one edge case: at `standard` thoroughness `voice_style` is a single mo
 
 ---
 
+### Prompt cache layout
+
+```yaml
+pipeline:
+  prompt_cache_layout: true
+```
+
+Providers cache on an exact *leading* prefix. The per-domain instruction normally sits ahead of the article, and it differs for every domain, so a provider's five calls in one run share a long article and not one cacheable byte — measured 0 cached tokens on every call. This setting moves the domain instruction to the end of the user message, leaving a constant stub plus the article as a shared prefix, so calls 2+ hit the cache. Measured 1792/2368 tokens cached (76%), worth roughly $0.56/run at a 50% cached-token discount and ~$1.01 at 90%.
+
+Off by default, and worth verifying before you turn it on. The model receives the whole instruction either way — only its position changes — but position affects how instructions are weighted, and this pipeline's output is the product.
+
+**The golden report cannot verify this.** `test_pipeline_end_to_end.py` stubs `_run_domain`, and that is exactly where this setting is applied, so flipping the flag produces an empty golden diff by construction. An empty diff there is evidence the code never ran, not evidence the findings held. Verifying it means a live run compared against a prior live run of the same article.
+
+---
 
 ### Cost presets
 
