@@ -11,6 +11,7 @@ Each failure message names the specific flag/module/adapter/link and the file
 that needs updating — the point is that whoever trips one can fix it in a minute.
 """
 
+import ast
 import re
 import subprocess
 from pathlib import Path
@@ -498,9 +499,21 @@ def test_docs_do_not_use_the_bare_script_invocation_form():
 # mistakes are mechanically detectable; a string in a print() is exactly as
 # detectable as one in a markdown file.
 
-_USER_FACING_MODULES = ("setup.py", "check.py", "discover.py", "pipeline.py")
+_USER_FACING_MODULES = (
+    "setup.py",
+    "check.py",
+    "discover.py",
+    "pipeline.py",
+    "history_analytics.py",
+    "voice_pattern_report.py",
+)
 
-_PRINT_LITERAL = re.compile(r"print\(\s*(?:f?)(['\"])(.*?)\1", re.S)
+# argparse prints these two verbatim on --help, so they are subject to the same
+# guards as a print(). Matched on the ArgumentParser call rather than on the
+# kwarg name alone: `description=` is ordinary enough that pipeline.py's
+# publication_description= and ci-style-profile's description=v.get(...) would
+# otherwise be swept in.
+_HELP_TEXT_KWARGS = ("epilog", "description")
 
 
 def _user_facing_sources():
@@ -511,10 +524,61 @@ def _user_facing_sources():
             yield path
 
 
+def _terminal_bound_expressions(tree):
+    """Argument expressions whose strings reach the user's terminal verbatim.
+
+    Two call shapes qualify: `print(...)`, and the help text handed to
+    `argparse.ArgumentParser(...)`. The second is why pipeline.py's epilog kept
+    four `python pipeline.py` examples through every sweep meant to retire that
+    form — it is printed on `--help` like any other output, but it arrives as a
+    keyword argument, so a guard that only reads print() never saw it.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "print":
+            yield from node.args
+            continue
+        # argparse.ArgumentParser(...) or a bare ArgumentParser(...) import.
+        called = (
+            func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        )
+        if called == "ArgumentParser":
+            for keyword in node.keywords:
+                if keyword.arg in _HELP_TEXT_KWARGS:
+                    yield keyword.value
+
+
 def _printed_strings(path):
-    """Every string literal passed directly to print() in `path`."""
-    text = path.read_text(encoding="utf-8")
-    return [m.group(2) for m in _PRINT_LITERAL.finditer(text)]
+    """Every string literal in `path` that the code prints to the terminal.
+
+    An ast walk, not a regex. The regex this replaced captured only the *first*
+    string literal of a print(...) — and this codebase writes its multi-line
+    printed blocks as implicitly concatenated literals, so every line after the
+    first was invisible to the guards below. discover.py's closing legend is
+    exactly that shape, and the `python check.py` buried in it survived both of
+    the sweeps (PR #51, PR #53) that were supposed to retire that form. Across
+    the user-facing modules the walk sees roughly twice the literals the regex
+    did, plus the argparse help text the regex could not reach at all.
+
+    Two node types have to be collected. Python folds a run of adjacent plain
+    literals into a single ast.Constant, but one f-string anywhere in the run
+    makes the whole run an ast.JoinedStr whose parts stay separate — and the
+    legend block interleaves both. Walking each expression covers that, and
+    explicit `"a" + "b"` concatenation, without enumerating shapes.
+
+    Values are decoded strings, not the source text between the quotes: an
+    escaped backslash is one character here where the regex reported the two
+    source characters. The line-continuation guard below depends on that.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    literals = []
+    for expression in _terminal_bound_expressions(tree):
+        for part in ast.walk(expression):
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                literals.append(part.value)
+    return literals
 
 
 def test_printed_commands_do_not_use_the_module_invocation_form():
@@ -538,21 +602,63 @@ def test_printed_commands_do_not_use_the_module_invocation_form():
     )
 
 
+def test_printed_commands_do_not_use_the_bare_script_invocation_form():
+    """Printed commands use `uv run ci-foo`, not `python foo.py`.
+
+    Section 5 applies _BARE_SCRIPT_REF to markdown only, which left the older
+    of the two mistakes unguarded on the side that reaches users at runtime:
+    discover.py's legend closed every model sweep by telling the reader to run
+    `python check.py`, a command that has not worked from the repo root since
+    the src/ layout landed.
+
+    Keyed on module basenames that have console scripts, like its markdown
+    counterpart, so a printed `python setup.py` in unrelated prose about some
+    other project's file would not trip it.
+    """
+    runnable = {}
+    for name, target in _declared_console_scripts().items():
+        module_stem = target.split(":")[0].rsplit(".", 1)[-1]
+        runnable[module_stem] = name
+
+    offenders = []
+    for path in _user_facing_sources():
+        for literal in _printed_strings(path):
+            for stem in set(_BARE_SCRIPT_REF.findall(literal)):
+                script = runnable.get(stem)
+                if script:
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT).as_posix()}: "
+                        f"python {stem}.py → use `uv run {script}`"
+                    )
+
+    assert not offenders, (
+        "Code prints the bare script form, which has not been runnable from "
+        "the repo root since the src/ layout landed:\n  "
+        + "\n  ".join(sorted(set(offenders)))
+    )
+
+
 def test_printed_commands_do_not_use_bash_line_continuations():
     """A trailing backslash splits the command on Windows cmd.exe.
 
     The README warns about this explicitly. Windows is the documented primary
     platform, so a printed command that only works in bash is a broken
     instruction, not a cosmetic issue.
+
+    Checked line by line rather than at the end of the literal. Now that
+    _printed_strings() returns whole concatenated blocks instead of their first
+    line, a continuation sits mid-literal — which is exactly where one appears,
+    since a continuation by definition has a following line to continue onto.
     """
     offenders = []
     for path in _user_facing_sources():
         for literal in _printed_strings(path):
-            # A literal ending in an escaped backslash is a shell continuation.
-            if literal.rstrip().endswith("\\\\"):
-                offenders.append(
-                    f"{path.relative_to(REPO_ROOT).as_posix()}: {literal.strip()!r}"
-                )
+            for line in literal.splitlines():
+                # One real backslash: these are decoded values, not source text.
+                if line.rstrip().endswith("\\"):
+                    offenders.append(
+                        f"{path.relative_to(REPO_ROOT).as_posix()}: {line.strip()!r}"
+                    )
 
     assert not offenders, (
         "Printed commands use a bash line-continuation backslash, which splits "
