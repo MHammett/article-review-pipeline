@@ -450,14 +450,47 @@ around its output. 239 lines is not where the pain is.
    pipeline whose output is the product, so it still wants a golden-report diff
    and Mike's judgment rather than an agent's.
 
-   **Code landed 2026-08-17, still off by default.** [#111](https://github.com/MHammett/content-intelligence/pull/111)
-   ported the layout to `pipeline.py`; [#112](https://github.com/MHammett/content-intelligence/pull/112)
-   added the Anthropic cache-breakpoint half, since Anthropic caches nothing
-   implicitly — a matching prefix alone bought zero cached tokens until the
-   breakpoint landed. The `docs/CONFIGURATION.md` section and `user.example.yaml`
-   comment drafted for PR #84 and pulled back out are now landed alongside it.
-   The one remaining call — whether to flip `prompt_cache_layout: true` by
-   default — is unchanged and still Mike's.
+   **Actually settled 2026-08-16, in a session this file didn't capture at the
+   time.** A different session ran the live A/B this section calls for — four
+   full runs of the same unedited article, two per condition (arms A/C off, B/E
+   on), ~$32 in API spend. Result: **no detectable quality effect.** Voice
+   findings were 31, 34 (off) vs. 23, 39 (on) — conditions differ by 1.5 findings
+   on average, while a *single* condition varies by 16 on its own. Every other
+   section showed the same pattern. Two mid-session alarms ("voice drops 26%",
+   "only 3 of 11 consensus flags shared") were both retracted once a second
+   same-condition run reproduced the same spread with nothing changed.
+
+   That same test surfaced something bigger than the caching question: **only
+   18 of 259 distinct findings reproduced across 3+ of the 4 runs** — a single
+   run here is roughly 75% non-reproducible, independent of this setting. On
+   that basis the PR carrying this work (#97, the original) was **deliberately
+   closed**, not for a quality reason but a cost one: $0.55 on a ~$8 run (~7%)
+   optimizes the cost of a measurement this pipeline doesn't yet make trustworthy
+   in one copy, and the setting is a second prompt-assembly path to maintain for
+   that return.
+
+   **That closure never made it into persistent memory, so it didn't survive.**
+   A later session (2026-08-17) found the code sitting on a stale branch, saw
+   "tested, documented, off by default," and re-ported it as
+   [#111](https://github.com/MHammett/content-intelligence/pull/111) /
+   [#112](https://github.com/MHammett/content-intelligence/pull/112) — the
+   Anthropic cache-breakpoint half, since Anthropic caches nothing implicitly and
+   a matching prefix alone bought zero cached tokens until it landed — with no
+   reference to the earlier A/B or the closure reasoning. Docs followed in #122,
+   also without that context. Both merges are sound (suite green, code reviewed,
+   matches the measured cache behaviour) — the gap was historical, not technical.
+
+   **Final call, 2026-08-17: leave it merged, off by default, documented with
+   this history.** The quality question is genuinely closed — verified harmless,
+   not merely unproven. The reason to leave it off is specific to this project's
+   current use (single-run reviews, where reproducibility dominates the $0.55
+   saving), not a property of the feature. Someone running at higher volume, or
+   already aggregating multiple runs per article — which is where the
+   reproducibility finding above actually points — would see the saving scale
+   with run count instead of being swamped by per-run noise, and should feel free
+   to turn it on. `docs/CONFIGURATION.md`'s "Prompt cache layout" section and the
+   `user.example.yaml` comment carry this reasoning so it travels with the
+   setting instead of living only here.
 3. ~~**Delete the junk history directories?**~~ **Done, 2026-08-14.** `t/` and
    `title/` are gone. The Jun 8 report was refiled into the article's own
    directory as `run_1_20260608_075204_report.json`. It turned out to be the
