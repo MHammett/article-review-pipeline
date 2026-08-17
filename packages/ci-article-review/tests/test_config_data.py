@@ -181,3 +181,70 @@ class TestPartialPipelineBlockKeepsDefaults:
             merged["task_timeout_seconds"],
         )["openai"]
         assert budget > 0
+
+
+class TestCostPresetSetsThoroughness:
+    """A preset picks models AND ensemble size; both have to arrive.
+
+    These two features interact badly and the failure is silent. #105 changed
+    the pipeline defaults from a whole-block fallback to a per-key merge, which
+    made `thoroughness` always present in the merged config — so
+    `_apply_cost_preset`'s "only if the user did not set it" guard never fired
+    again. Every preset kept picking its models correctly and then ran a
+    `standard`-sized ensemble: `maximum` made 7 calls where it should make 30,
+    at maximum-model prices, saying nothing.
+
+    That is the same shape as the 0b bug the project spent two days on, so it
+    gets a test rather than a comment.
+    """
+
+    def _pipeline(self, pipe):
+        from ci_article_review.config_loader import merge_configs
+
+        models = {
+            p: {}
+            for p in ("openai", "gemini", "mistral", "perplexity", "grok", "claude")
+        }
+        return merge_configs({"pipeline": pipe, "models": models}, {})["pipeline"]
+
+    @pytest.mark.parametrize(
+        "preset,expected",
+        [
+            ("economy", "standard"),
+            ("standard", "standard"),
+            ("balanced", "thorough"),
+            ("thorough", "thorough"),
+            ("maximum", "maximum"),
+        ],
+    )
+    def test_each_preset_brings_its_own_thoroughness(self, preset, expected):
+        assert self._pipeline({"cost_preset": preset})["thoroughness"] == expected
+
+    def test_an_explicit_thoroughness_still_wins(self):
+        """The guard's real purpose, which must survive the fix."""
+        merged = self._pipeline({"cost_preset": "maximum", "thoroughness": "standard"})
+        assert merged["thoroughness"] == "standard"
+
+    def test_no_preset_falls_back_to_the_default(self):
+        assert self._pipeline({})["thoroughness"] == "standard"
+
+    def test_the_maximum_preset_actually_schedules_the_full_ensemble(self):
+        """The symptom, asserted end to end rather than via the config alone."""
+        from ci_article_review.config_loader import merge_configs
+        from ci_article_review.pipeline import _build_assignments
+
+        models = {
+            p: {}
+            for p in ("openai", "gemini", "mistral", "perplexity", "grok", "claude")
+        }
+        merged = merge_configs(
+            {"pipeline": {"cost_preset": "maximum"}, "models": models}, {}
+        )
+        keys = {p: {"api_key": "k"} for p in models}
+        assignments = _build_assignments(
+            merged["pipeline"]["thoroughness"], merged["models"], keys
+        )
+        assert len(assignments) == 30, (
+            f"maximum scheduled {len(assignments)} calls, not 30 — the preset's "
+            f"thoroughness is not reaching the assignment builder"
+        )
