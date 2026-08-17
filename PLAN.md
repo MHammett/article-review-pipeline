@@ -267,14 +267,18 @@ design, not a port.
 > retries a dead account.
 >
 > So adoption fixes the malformed-JSON symptom and leaves the misclassification.
-> The terminal-vs-transient classifier this table already carves out as "goes
-> upstream" is needed locally until litellm ships a fix — **adopted or not**.
-> Only the adapter wiring genuinely depends on the migration decision. Splitting
-> the branch on that line would unblock the useful half now.
+> The terminal-vs-transient check is needed locally until litellm ships a fix —
+> **adopted or not** — and it is *not* going upstream: entry 1 is contributed
+> rather than opened as a PR, three competing PRs being open there already. Only
+> the adapter wiring genuinely depended on the migration decision.
 >
-> The finding itself is banked upstream either way
-> ([BerriAI/litellm#32785](https://github.com/BerriAI/litellm/issues/32785)),
-> so there is no urgency on our account.
+> **Both halves have since resolved.** The adapters no longer exist, so the
+> branch needs a disposition rather than a hold (see section 5), and the useful
+> half already ships as `_is_terminal_quota_error` in `llm/client.py`. The
+> finding is banked upstream either way
+> ([#32785](https://github.com/BerriAI/litellm/issues/32785), plus review input
+> on [#32798](https://github.com/BerriAI/litellm/pull/32798)), so there is no
+> urgency on our account.
 
 ---
 
