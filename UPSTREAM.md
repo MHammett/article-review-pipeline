@@ -359,3 +359,79 @@ here.
 
 Anthropic's equivalent works and is enabled, which is what makes this look like
 a litellm transformation bug rather than an xAI limitation.
+
+---
+
+## 6. litellm — `responses()` accepts `response_format` and silently ignores it
+
+**Status:** filed as
+[BerriAI/litellm#37125](https://github.com/BerriAI/litellm/issues/37125) with
+[PR #37126](https://github.com/BerriAI/litellm/pull/37126), both 2026-08-16.
+**Repo:** BerriAI/litellm (tested against 1.96.2)
+
+`response_format` is the spelling every other litellm surface uses. On the
+Responses API it is accepted and does nothing. The call succeeds, the caller
+believes a schema is enforced, and it is not. Measured 2026-08-16 against
+`gpt-5.4-mini`, same prompt, asking for a strict schema with a top-level `flags`
+array:
+
+| request | outcome |
+|---|---|
+| no format specified | model invents its own shape: `{"ai_speak": ..., "suggestion": ...}` |
+| `text={"format": {"type": "json_schema", "name": ..., "strict": True, "schema": ...}}` | **exact requested schema** |
+| `response_format={"type": "json_schema", "json_schema": {...}}` | call succeeds, schema **ignored** — own shape again |
+
+**Root cause**, confirmed by reading their source rather than inferred from the
+symptom: `responses()` has no `response_format` parameter, so it lands in
+`**kwargs`, and `get_requested_response_api_optional_param` then narrows to the
+keys declared on `ResponsesAPIOptionalRequestParams`
+(`base_pre_process_non_default_params` keeps a key only `if k in
+default_param_values`). `response_format` is not declared there, so it is
+removed *before* `_check_valid_arg` runs — which is what makes it silent rather
+than loud. Their guard is fine; hand it the parameter directly and it raises
+exactly the `UnsupportedParamsError` a caller should have seen. Two consequences
+worth recording: `drop_params=False` does not mean what it says on this path,
+and the same silent drop applies to **any** undeclared key, not just this one.
+
+**Proposed change (and the PR):** map `response_format` onto `text.format`.
+This is not new machinery — `convert_text_format_to_text_param` already performs
+that exact conversion for litellm's own `text_format=` parameter, and
+`type_to_response_format_param` returns a `response_format`-shaped dict
+unchanged when handed one. The parameter simply never got routed into it.
+Precedence is `text` > `text_format` > `response_format`, so both existing
+spellings behave as before. The PR also covers two `KeyError`s reachable in that
+helper today via `text_format`: the schema-less forms (`{"type":
+"json_object"}`, `{"type": "text"}`) and a `json_schema` block with no `strict`.
+
+**Scoping correction, found while building the fix.** The first draft of this
+entry assumed the drop was provider-independent, because the filter runs before
+any provider mapping. It is not. Only providers with a native responses config
+take that path:
+
+| provider | responses config | `response_format` |
+|---|---|---|
+| openai / azure / xai | `OpenAIResponsesAPIConfig` etc. | **silently dropped** |
+| anthropic / gemini / mistral | `None` | works |
+
+Where the config is `None`, `responses()` falls through to the chat-completions
+bridge and `response_format` reaches `completion()`, which supports it — so it
+works there by accident. This makes the symptom worse than first reported: the
+same call honours the schema on `anthropic/claude-sonnet-5` and ignores it on
+`openai/gpt-5.4-mini`, which reads as a model capability difference. Caught only
+because the live before/after was run on Anthropic first and *both* sides
+returned the schema; re-running on `xai/grok-4.3` (native path) reproduced it
+cleanly and proved the fix. The correction is
+[a comment on the issue](https://github.com/BerriAI/litellm/issues/37125#issuecomment-5310724905).
+
+**Why it matters here.** The old adapter carried a comment saying "the Responses
+API has no `response_format`", and that was repeated into a merged PR as fact.
+The parameter exists, is accepted, and does nothing — so probing the capability
+the obvious way *confirms* the wrong conclusion. Structured output was available
+the whole time under a different name. This is the same failure mode as entry 1
+and the waybackpy half of entry 3: a condition reported as the wrong kind of
+thing, sending the reader somewhere there is nothing to find.
+
+The test note is the reusable part. A test asserting the call succeeds passes
+against the broken version, which is presumably how this survived; the PR's
+tests assert on the params bound for the provider, and 5 of 8 fail without the
+fix.
