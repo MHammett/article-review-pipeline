@@ -254,3 +254,54 @@ Recording these so nobody re-investigates them.
 - **litellm raises on an in-band streaming error.** The HTTP-200-then-error case
   that this pipeline used to report as "Malformed JSON response" surfaces as a
   proper exception.
+
+---
+
+## 5. litellm — `web_search_options` + a system prompt breaks XAI
+
+**Status:** ready — minimal reproduction below, not yet filed.
+
+With `web_search_options` set, litellm turns the request's system message into an
+`instructions` field and then rejects that field as unsupported for XAI. The
+system message is fine without search, and search is fine without a system
+message; only the combination fails.
+
+```python
+import litellm, os
+
+msgs = [
+    {"role": "system", "content": "Answer briefly."},
+    {"role": "user", "content": "Newest litellm version on PyPI?"},
+]
+litellm.completion(
+    model="xai/grok-4.3",
+    messages=msgs,
+    web_search_options={"search_context_size": "medium"},
+    api_key=os.environ["GROK_API_KEY"],
+)
+# litellm.UnsupportedParamsError: LlmProviders.XAI does not support
+# parameters: {'instructions': 'Answer briefly.'}
+```
+
+Measured 2026-08-16 against litellm 1.96.2, grok-4.3:
+
+| messages | `web_search_options` | result |
+|---|---|---|
+| user only | no | OK |
+| user only | yes | OK |
+| system + user | no | OK |
+| system + user | **yes** | **UnsupportedParamsError** |
+
+`drop_params` is not a workaround: it would drop `instructions`, which is the
+system prompt, so the call would succeed having silently discarded the
+instructions the whole review depends on.
+
+**Why it matters here:** xAI Live Search genuinely works — asked for the newest
+litellm release on PyPI, grok answered "I do not know" without it and returned a
+correct, cited version with it. Every prompt this pipeline sends is a system
+prompt, so the capability is unreachable through litellm until this is fixed.
+`configs/presets.yaml` carries the enabling line commented out with a pointer
+here.
+
+Anthropic's equivalent works and is enabled, which is what makes this look like
+a litellm transformation bug rather than an xAI limitation.

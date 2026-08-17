@@ -188,6 +188,18 @@ maximum:
       stream_read_timeout: 500   # see the thorough tier's note above
     grok:
       model: grok-4.20-0309-reasoning
+      # xAI Live Search is real and works — asked for the newest litellm release
+      # on PyPI, grok said "I do not know" without it and answered with a cited
+      # version with it. NOT enabled here because litellm cannot currently send
+      # it alongside a system prompt: with web_search_options set, it converts
+      # the system message into an `instructions` field and then rejects that as
+      # unsupported for XAI. Every review prompt is a system prompt, so the
+      # combination is unusable until that is fixed. Filed upstream; see
+      # UPSTREAM.md. Flip this on once litellm ships the fix.
     claude:
       model: claude-opus-4-8
       effort: high
+      web_search: [fact_check]   # Same check, same result. fact_check had two
+                                  # grounded models out of six; this makes four.
+                                  # Scoped to fact_check because every search
+                                  # bills and no other domain benefits.
