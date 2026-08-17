@@ -379,6 +379,8 @@ content-intelligence/
 │   │   │   │   │                      completion(), OpenAI through responses(),
 │   │   │   │   │                      all streaming under a first-byte allowance
 │   │   │   │   │                      plus an independent stall detector
+│   │   │   │   ├── cache.py           marks the cacheable prefix in each provider's
+│   │   │   │   │                      own terms (Anthropic caches nothing without it)
 │   │   │   │   ├── schema.py          puts a caller's JSON schema on the wire in each
 │   │   │   │   │                      provider's own spelling
 │   │   │   │   ├── json_utils.py      robust JSON extraction (fences, think-preambles,

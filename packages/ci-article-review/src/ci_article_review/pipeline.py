@@ -503,10 +503,11 @@ _CACHE_LAYOUT_SYSTEM = (
 )
 
 
-def _cache_friendly_layout(system: str, user: str) -> tuple[str, str]:
+def _cache_friendly_layout(system: str, user: str) -> tuple[str, str, str]:
     """Move the domain instruction after the draft so the prefix is shareable.
 
-    Returns ``(system, user)`` with the per-domain text relocated to the end of
+    Returns ``(system, user, cacheable_prefix)`` with the per-domain text
+    relocated to the end of
     ``user``. The model still receives the entire domain prompt — only its
     position changes — and putting the task after a long document is a normal
     long-context arrangement rather than an exotic one.
@@ -514,10 +515,12 @@ def _cache_friendly_layout(system: str, user: str) -> tuple[str, str]:
     The shared prefix is ``_CACHE_LAYOUT_SYSTEM`` plus the article, which is
     byte-identical across all five domains of a run.
     """
-    return (
-        _CACHE_LAYOUT_SYSTEM,
-        f"{user}\n\n{'=' * 60}\nYOUR REVIEW TASK\n{'=' * 60}\n{system}",
-    )
+    # The prefix is returned rather than left to be re-derived: whoever
+    # marks the cache breakpoint has to split at exactly this point, and
+    # two copies of that boundary would drift apart.
+    separator = "=" * 60
+    prefix = f"{user}\n\n{separator}\nYOUR REVIEW TASK\n{separator}\n"
+    return _CACHE_LAYOUT_SYSTEM, prefix + system, prefix
 
 
 def _web_search_enabled(setting, domain: str) -> bool:
@@ -840,8 +843,9 @@ def _run_domain(
     # Off by default: it relocates the domain instruction from before the
     # article to after it, and this pipeline's output is the product. Turn it
     # on, diff a run against a prior live run, and keep it if the findings hold.
+    cache_prefix = None
     if pipeline_cfg.get("prompt_cache_layout", False):
-        system, user = _cache_friendly_layout(system, user)
+        system, user, cache_prefix = _cache_friendly_layout(system, user)
 
     api_key = api_keys.get(model_name, {}).get("api_key", "")
 
@@ -872,6 +876,10 @@ def _run_domain(
         # custom domain, which has a prompt but no declared schema — and for
         # gemini while grounded, which the LLM layer drops on its own.
         response_schema=schemas.for_domain(domain),
+        # Where the shared article ends and this domain's task begins.
+        # None unless the cache layout is on — without it there is no
+        # shared prefix to point at.
+        cache_prefix=cache_prefix,
     )
     result["_model"] = model_name
     result["_domain"] = domain

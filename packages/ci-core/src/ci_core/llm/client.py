@@ -95,6 +95,7 @@ import httpx
 import litellm
 
 from .. import redact
+from . import cache as cache_mod
 from . import schema as schema_mod
 from .json_utils import extract_json_with_salvage
 from .tokens import normalize_tokens
@@ -937,6 +938,7 @@ def _attempt(
     retry_delay,
     with_reasoning=True,
     response_schema=None,
+    cache_prefix=None,
 ):
     """One model call, start to finish, as a result dict. Never raises."""
     spec = _PROVIDERS[provider]
@@ -978,6 +980,10 @@ def _attempt(
             if (cfg or {}).get("web_search"):
                 kwargs["tools"] = [{"type": "web_search_preview"}]
 
+            # Routing, not enablement: OpenAI caches anyway, but a shared key
+            # steers concurrent calls at the same warm prefix.
+            kwargs.update(cache_mod.as_request_params("openai", cache_prefix))
+
             # The schema goes on as `text.format` here rather than through
             # params, because this surface takes none of the completion() shape.
             if with_reasoning and response_schema:
@@ -996,12 +1002,22 @@ def _attempt(
         if provider in _SENDS_TEMPERATURE:
             params.setdefault("temperature", _TEMPERATURE)
 
+        # A cacheable prefix, where the provider needs telling where it ends.
+        # Anthropic caches nothing without this; the rest either cache
+        # implicitly or not at all, and get a plain string.
+        if cache_prefix and user_prompt.startswith(cache_prefix):
+            content = cache_mod.as_message_content(
+                provider, cache_prefix, user_prompt[len(cache_prefix) :]
+            )
+        else:
+            content = user_prompt
+
         return _consume_completion_stream(
             litellm.completion(
                 model=_qualified(provider, model),
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": content},
                 ],
                 stream=True,
                 stream_options={"include_usage": True},
@@ -1129,6 +1145,7 @@ def call(
     model=None,
     provider_config=None,
     response_schema=None,
+    cache_prefix=None,
 ):
     """Call ``provider`` and return the shared result dict.
 
@@ -1161,6 +1178,7 @@ def call(
             retry,
             retry_delay,
             response_schema=response_schema,
+            cache_prefix=cache_prefix,
         )
 
         # A model that rejects the reasoning parameter is a misconfiguration, not
@@ -1192,6 +1210,7 @@ def call(
                 retry_delay,
                 with_reasoning=False,
                 response_schema=response_schema,
+                cache_prefix=cache_prefix,
             )
             result["misconfiguration_warning"] = msg
 
