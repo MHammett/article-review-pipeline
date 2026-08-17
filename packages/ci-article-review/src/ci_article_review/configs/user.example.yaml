@@ -199,9 +199,12 @@ pipeline:
   # Move the per-domain instruction after the article so all of a provider's
   # calls in a run share a byte-identical prefix and calls 2+ hit the prompt
   # cache. Measured 76% of input cached on calls 2+, worth roughly $0.56-1.01
-  # per run. Off by default: it changes prompt structure, and the golden test
-  # cannot verify it (that test stubs _run_domain, which is where this applies),
-  # so it needs a live A/B against a prior run before you trust it.
+  # per run. A four-run live A/B (two off, two on) found no detectable effect
+  # on review quality -- see docs/CONFIGURATION.md. Left off here because the
+  # same test found a single run only ~25% reproducible regardless of this
+  # setting, which makes the saving not worth the config surface for this
+  # project; may be worth enabling if you run at higher volume or already
+  # aggregate multiple runs per article.
   # prompt_cache_layout: false
 
 
