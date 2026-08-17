@@ -1138,6 +1138,221 @@ class TestEmptyReport:
         assert "SECTION 9" in md
 
 
+def _currency(live=None, **overrides):
+    block = {
+        "warnings": [],
+        "notices": [],
+        "registry_date": "2026-06-22",
+        "registry_age_days": 55,
+        "registry_stale": False,
+        "registry_warning": False,
+    }
+    block.update(overrides)
+    if live is not None:
+        block["live"] = live
+    return block
+
+
+class TestModelCurrencySection:
+    """How old the models behind this report are.
+
+    The report carried `model_currency` in its JSON from the start and rendered
+    none of it — the readable review, which is the artifact a human actually
+    opens and pastes into a revision session, said nothing about model age at
+    all. And the registry it came from can only name a replacement somebody
+    already wrote into model_registry.yaml, so "you ran gpt-5.5 and gpt-5.6
+    shipped last week" was unsayable by construction.
+    """
+
+    def test_a_report_without_the_block_renders_exactly_as_before(self):
+        """Reports written before this section must be unaffected."""
+        md = render_report_markdown(_base_report())
+        assert "Model Currency" not in md
+
+    def test_a_newer_model_is_named_against_the_model_that_ran(self):
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    live={
+                        "newer": [
+                            {
+                                "provider": "openai",
+                                "model": "gpt-5.5",
+                                "newer": [
+                                    {
+                                        "model": "gpt-5.6",
+                                        "released": "2026-08-10",
+                                        "price_known": True,
+                                    }
+                                ],
+                                "undated_models": 0,
+                            }
+                        ],
+                        "current": [],
+                        "unchecked": [],
+                    }
+                )
+            )
+        )
+        assert "## Model Currency" in md
+        assert "gpt-5.5" in md and "gpt-5.6" in md
+        assert "2026-08-10" in md
+
+    def test_an_unpriced_new_model_says_so_rather_than_quoting_a_guess(self):
+        """pricing.yaml is hand-maintained; a week-old model is what it misses.
+
+        Reporting the unknown-model fallback as though it were the rate would
+        present a placeholder as a price.
+        """
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    live={
+                        "newer": [
+                            {
+                                "provider": "openai",
+                                "model": "gpt-5.5",
+                                "newer": [
+                                    {
+                                        "model": "gpt-5.6",
+                                        "released": "2026-08-10",
+                                        "price_known": False,
+                                    }
+                                ],
+                                "undated_models": 0,
+                            }
+                        ],
+                        "current": [],
+                        "unchecked": [],
+                    }
+                )
+            )
+        )
+        assert "pricing.yaml" in md
+        assert "fallback" in md
+
+    def test_the_section_does_not_recommend_switching(self):
+        """House style: advisory only. See analysis/seo_suggest.py."""
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    live={
+                        "newer": [
+                            {
+                                "provider": "openai",
+                                "model": "gpt-5.5",
+                                "newer": [
+                                    {
+                                        "model": "gpt-5.6",
+                                        "released": "2026-08-10",
+                                        "price_known": True,
+                                    }
+                                ],
+                                "undated_models": 0,
+                            }
+                        ],
+                        "current": [],
+                        "unchecked": [],
+                    }
+                )
+            )
+        )
+        normalized = " ".join(md.split())
+        assert "not automatically a better or a cheaper one" in normalized
+        assert "not what you should switch to" in normalized
+
+    def test_an_unchecked_provider_is_not_reported_as_up_to_date(self):
+        """The conflation the section exists to prevent."""
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    live={
+                        "newer": [],
+                        "current": [{"provider": "grok", "model": "grok-4.3"}],
+                        "unchecked": [
+                            {
+                                "provider": "openai",
+                                "model": "gpt-5.5",
+                                "reason": "the models API returned HTTP 401",
+                            }
+                        ],
+                    }
+                )
+            )
+        )
+        assert "Not checked" in md
+        assert "HTTP 401" in md
+        # grok was checked and is current; openai must not be swept into that.
+        current_line = next(
+            line for line in md.splitlines() if "nothing newer offered" in line
+        )
+        assert "grok" in current_line and "openai" not in current_line
+
+    def test_no_discovery_data_at_all_is_one_line_not_a_roll_call(self):
+        """The default path prints on every run — it has to stay short."""
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    live={
+                        "newer": [],
+                        "current": [],
+                        "unchecked": [
+                            {
+                                "provider": p,
+                                "model": f"{p}-model",
+                                "reason": "never checked",
+                            }
+                            for p in ("openai", "gemini", "mistral", "grok", "claude")
+                        ],
+                    }
+                )
+            )
+        )
+        assert "ci-discover" in md
+        # Not one bullet per provider.
+        assert md.count("never checked") == 0
+
+    def test_registry_findings_render_without_any_live_data(self):
+        """The registry half stands alone — live discovery is opt-in."""
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    warnings=[
+                        {
+                            "provider": "openai",
+                            "model": "gpt-4o",
+                            "replacement": "gpt-5.4",
+                            "note": "GPT-5 family available",
+                        }
+                    ]
+                )
+            )
+        )
+        assert "## Model Currency" in md
+        assert "gpt-4o" in md and "gpt-5.4" in md
+
+    def test_a_stale_registry_says_so(self):
+        md = render_report_markdown(
+            _base_report(
+                model_currency=_currency(
+                    registry_age_days=200,
+                    registry_stale=True,
+                    registry_warning=True,
+                    notices=[
+                        {
+                            "provider": "claude",
+                            "model": "claude-sonnet-4-6",
+                            "newer": "claude-opus-4-8",
+                            "note": "",
+                        }
+                    ],
+                )
+            )
+        )
+        assert "overdue for review" in md
+        assert "200 days ago" in md
+
+
 class TestCitationsPairLiveAndArchiveLinks:
     """Every citation should carry both links, so it survives its source.
 

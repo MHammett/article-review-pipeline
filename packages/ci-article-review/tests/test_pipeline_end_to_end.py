@@ -39,6 +39,7 @@ result re-keying, the API call log, consolidation, citations, cost and the save.
 import json
 import os
 
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -286,9 +287,15 @@ def _normalise(obj):
     return obj
 
 
-@pytest.fixture
-def run_report(tmp_path):
-    """Execute the full draft pipeline against stubs and return its report."""
+@contextmanager
+def _stubbed_run(tmp_path, extra_patches=(), **run_kwargs):
+    """Execute the full draft pipeline against stubs.
+
+    ``extra_patches`` are entered last, so a test can override any stub set up
+    here — used to inject failures into optional passes, and to swap the config,
+    while asserting the run still completes. ``run_kwargs`` go to
+    ``run_draft_pipeline`` (``offline=True``, say).
+    """
     from contextlib import ExitStack
 
     with ExitStack() as stack:
@@ -322,10 +329,21 @@ def run_report(tmp_path):
                 return_value=({"status": "skipped", "reason": "test"}, None),
             )
         )
+        for ctx in extra_patches:
+            stack.enter_context(ctx)
         # No timestamp injection needed: the only clock-derived values that
         # reach the report are normalised out below, and the run timestamp
         # otherwise only shapes the history filename, which is not compared.
-        yield pipeline.run_draft_pipeline(None, "testpub", handoff=dict(_HANDOFF))
+        yield pipeline.run_draft_pipeline(
+            None, "testpub", handoff=dict(_HANDOFF), **run_kwargs
+        )
+
+
+@pytest.fixture
+def run_report(tmp_path):
+    """Execute the full draft pipeline against stubs and return its report."""
+    with _stubbed_run(tmp_path) as report:
+        yield report
 
 
 class TestGoldenReport:
@@ -363,6 +381,66 @@ class TestGoldenReport:
             "  CI_REGENERATE_GOLDEN=1 uv run pytest "
             "packages/ci-article-review/tests/test_pipeline_end_to_end.py\n"
         )
+
+
+class TestLiveModelCheckIsAdvisoryOnly:
+    """Nothing about the newer-model check may cost a run its report.
+
+    It is the last thing a run does, after thirty model calls have already been
+    paid for, and it exists only to tell you a model shipped. Losing a report to
+    it — or to a provider outage on the other side of it — would be a strictly
+    worse trade than never having built it.
+    """
+
+    def test_a_check_that_raises_does_not_fail_the_run(self, tmp_path):
+        boom = patch(
+            "ci_article_review.pipeline.live_model_check.check",
+            side_effect=RuntimeError("provider on fire"),
+        )
+        with _stubbed_run(tmp_path, extra_patches=[boom]) as report:
+            assert report["section_1_consensus"] is not None
+            live = report["model_currency"]["live"]
+            assert live["status"] == "unavailable"
+            assert live["newer"] == []
+
+    def test_the_check_is_not_live_by_default(self, tmp_path):
+        """Default config must not add a network call to a run."""
+        with patch(
+            "ci_article_review.pipeline.live_model_check.discover"
+            ".collect_available_models"
+        ) as sweep:
+            with _stubbed_run(tmp_path) as report:
+                assert report["model_currency"]["live"]["refreshed"] is False
+        sweep.assert_not_called()
+
+    def test_offline_never_queries_even_when_enabled(self, tmp_path):
+        config = dict(_CONFIG)
+        config["pipeline"] = {**_CONFIG["pipeline"], "live_model_check": True}
+        # Entered after the fixture's own merge_configs stub, so this wins.
+        enabled = patch("ci_article_review.pipeline.merge_configs", return_value=config)
+        with patch(
+            "ci_article_review.pipeline.live_model_check.discover"
+            ".collect_available_models"
+        ) as sweep:
+            with _stubbed_run(
+                tmp_path, extra_patches=[enabled], offline=True
+            ) as report:
+                assert report["model_currency"]["live"]["refreshed"] is False
+        sweep.assert_not_called()
+
+    def test_enabling_it_does_query_when_online(self, tmp_path):
+        """The opt-in has to actually opt in, or the flag is decoration."""
+        config = dict(_CONFIG)
+        config["pipeline"] = {**_CONFIG["pipeline"], "live_model_check": True}
+        enabled = patch("ci_article_review.pipeline.merge_configs", return_value=config)
+        with patch(
+            "ci_article_review.pipeline.live_model_check.discover"
+            ".collect_available_models",
+            return_value={},
+        ) as sweep:
+            with _stubbed_run(tmp_path, extra_patches=[enabled]):
+                pass
+        sweep.assert_called_once()
 
 
 class TestReportSchemaContract:

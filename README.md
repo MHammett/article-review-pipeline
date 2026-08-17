@@ -106,6 +106,19 @@ uv run ci-discover
 
 Queries each provider's live models API and reports what's available — so you always know when a newer model exists without reading every provider's changelog. Compares against your configured models and flags anything newer.
 
+Each sweep is cached to `.cache/model_discovery.json`, and **the run report reads
+that cache**: after running `ci-discover` once, every review for the next 24
+hours carries a *Model Currency* section naming any model newer than the one the
+run actually used, with no extra network calls. To refresh the cache during the
+run instead of relying on a manual sweep, set `live_model_check: true` under
+`pipeline:` in `configs/user.yaml`.
+
+Both paths are advisory and neither can fail a run: a provider that cannot be
+reached is reported as unchecked rather than as "you're up to date", and
+`--offline` never queries at all. Newer is not necessarily better or cheaper —
+the report says what shipped and whether `pricing.yaml` knows its rate, and
+leaves the choice to you.
+
 **5. Run the pipeline:**
 
 ```powershell
@@ -339,6 +352,8 @@ content-intelligence/
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs
+│   │   │   ├── live_model_check.py    caches that discovery and reports, in the run
+│   │   │   │                          report, when a model newer than the one used shipped
 │   │   │   ├── probe.py               lightweight provider reachability probe
 │   │   │   │                          (the provider adapters, timeout model, model
 │   │   │   │                          registry, cost, and redaction live in ci-core)

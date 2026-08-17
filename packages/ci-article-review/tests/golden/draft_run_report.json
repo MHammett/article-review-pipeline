@@ -150,6 +150,31 @@
   "lt_skipped": true,
   "lt_skipped_reason": "disabled",
   "model_currency": {
+    "live": {
+      "current": [],
+      "newer": [],
+      "oldest_check_age_hours": null,
+      "refreshed": false,
+      "source": "cache",
+      "status": "unavailable",
+      "unchecked": [
+        {
+          "model": "gemini-test-model",
+          "provider": "gemini",
+          "reason": "never checked"
+        },
+        {
+          "model": "mistral-test-model",
+          "provider": "mistral",
+          "reason": "never checked"
+        },
+        {
+          "model": "openai-test-model",
+          "provider": "openai",
+          "reason": "never checked"
+        }
+      ]
+    },
     "notices": [],
     "registry_age_days": "<volatile>",
     "registry_date": "<volatile>",

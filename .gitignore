@@ -9,6 +9,9 @@ configs/*.yaml
 !configs/timeouts.yaml
 pipeline_history/
 pipeline_out.txt
+# Cached provider model listings (live_model_check / ci-discover). Derived data
+# with a TTL — regenerated on demand, never worth committing.
+.cache/
 handoff_templates/dc-environment*.md
 .env
 __pycache__/

@@ -70,6 +70,7 @@ from . import schemas
 from ci_core.concurrency import run_with_timeout
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
+from . import live_model_check
 from .analysis import readability as readability_analysis
 from .analysis import seo as seo_analysis
 from .analysis import seo_content
@@ -1794,6 +1795,35 @@ def run_draft_pipeline(
     if report_baseline_warning:
         report["baseline_warning"] = report_baseline_warning
 
+    # Model currency, part two — what the providers themselves say.
+    #
+    # The registry check at the top of the run knows only what a human last
+    # wrote into model_registry.yaml, so by construction it cannot mention a
+    # model released after the last audit: "you ran gpt-5.5 and gpt-5.6 shipped
+    # last week" is exactly what it is unable to say. This reads the discovery
+    # cache — written by `ci-discover`, and refreshed here when
+    # live_model_check is on — and reports against the models that actually
+    # ran, which is why it happens here rather than beside the registry check.
+    #
+    # Advisory in every direction: --offline never queries, a check that fails
+    # is reported as a check that failed, and nothing about it can fail the run.
+    try:
+        currency["live"] = live_model_check.check(
+            live_model_check.models_that_ran(api_call_log),
+            api_keys,
+            refresh=pipeline_cfg.get("live_model_check", False) and not offline,
+            max_age_hours=pipeline_cfg.get("live_model_check_max_age_hours", 24),
+        )
+    except Exception as exc:  # noqa: BLE001 — advisory information, never fatal
+        log.debug("Live model check failed: %s", exc)
+        currency["live"] = {
+            "status": "unavailable",
+            "newer": [],
+            "current": [],
+            "unchecked": [],
+            "error": str(exc),
+        }
+
     # Attach currency check results so they appear in the saved report JSON
     # and can be rendered by _print_draft_summary.
     report["model_currency"] = currency
@@ -1966,6 +1996,68 @@ def _print_seo_suggestions(suggestions):
             )
 
 
+def _print_live_model_check(live):
+    """The providers' own answer about newer models, for the terminal summary.
+
+    Prints nothing when there is nothing to say — a run with no discovery data
+    at all should not grow a block explaining that. The one thing it will not
+    do is let an empty result read as reassurance: providers that could not be
+    checked are named, because "nothing newer found" is only true of the
+    providers actually asked.
+    """
+    if not live:
+        return
+
+    newer = live.get("newer") or []
+    current = live.get("current") or []
+    unchecked = live.get("unchecked") or []
+    if not (newer or current or unchecked):
+        return
+
+    for finding in newer:
+        heads = ", ".join(
+            f"{m['model']}"
+            + (f" ({m['released']})" if m.get("released") else "")
+            + ("" if m.get("price_known") else " [not in pricing.yaml]")
+            for m in finding["newer"][:3]
+        )
+        extra = len(finding["newer"]) - 3
+        if extra > 0:
+            heads += f", +{extra} more"
+        print(
+            f"\n{finding['provider']}: ran {finding['model']!r}; "
+            f"{finding['provider']} now also offers {heads}"
+        )
+
+    if newer:
+        # Deliberately not a recommendation. See live_model_check's docstring:
+        # newer is not better, and a model pricing.yaml has not caught up with
+        # would be costed at the unknown-model fallback rather than its rate.
+        print(
+            "  Newer is not necessarily better or cheaper — this is what the "
+            "provider lists, not advice to switch."
+        )
+
+    if unchecked and not (newer or current):
+        # The default path: live_model_check is off and nobody has run
+        # ci-discover, so there is no provider data at all. One line saying the
+        # check did not happen, not a roll-call of every provider — this prints
+        # on every single run, and the registry line above already covers what
+        # is known about model age.
+        print(
+            "\nNewer-model check: not run — the built-in registry above is the "
+            "only source. `uv run ci-discover` asks your providers directly."
+        )
+    elif unchecked:
+        names = ", ".join(f"{u['provider']} ({u['reason']})" for u in unchecked)
+        print(f"\nNot checked for newer models: {names}")
+
+    age = live.get("oldest_check_age_hours")
+    if (newer or current) and age is not None:
+        source = "refreshed this run" if live.get("refreshed") else "from cache"
+        print(f"  (model availability data {source}; oldest entry {age}h old)")
+
+
 def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=None):
     print("\n" + "=" * 60)
     print(f"REVIEW COMPLETE: {report['article_title']}")
@@ -2057,6 +2149,8 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
             print(
                 f"\nModel registry: current (last updated {reg_date}, {age} days ago)"
             )
+
+        _print_live_model_check(currency.get("live") or {})
 
     if report.get("lt_skipped"):
         # Both skip paths set lt_skipped, and this printed the credentials

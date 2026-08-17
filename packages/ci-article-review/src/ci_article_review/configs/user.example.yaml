@@ -203,6 +203,21 @@ pipeline:
   task_timeout_seconds: 1100   # absolute ceiling for the sliding-scale timeout model
                                 # (configs/timeouts.yaml); per-model timeouts clamp to this − 15
 
+  # Newer-model check.  The run report always reads the model-discovery cache
+  # that `uv run ci-discover` writes, so running that command occasionally is
+  # enough to have the report name any model newer than the one a run used.
+  #
+  # Setting this true additionally lets the run itself refresh that cache when
+  # it is older than live_model_check_max_age_hours — one models-list request
+  # per provider, at most once per window.  Off by default because it is the
+  # only part that adds latency and a network dependency to a run.
+  #
+  # Advisory either way: a provider that cannot be reached is reported as
+  # unchecked rather than as "up to date", and nothing here can fail a run.
+  # --offline never queries regardless of this setting.
+  # live_model_check: true
+  # live_model_check_max_age_hours: 24
+
   # Link / archive checks
   link_validation: true             # check HTTP status of every URL in the draft
   wayback_link_check: true          # also query the Wayback Machine for each URL

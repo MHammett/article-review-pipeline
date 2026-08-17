@@ -59,18 +59,32 @@ def _load_pricing():
 _PRICING, _UNKNOWN_PRICE = _load_pricing()
 
 
-def _price_for_model(model_id):
+def known_price(model_id):
+    """Return this model's pricing row, or ``None`` if the table has no entry.
+
+    ``_price_for_model`` cannot answer this: it substitutes ``unknown_price``
+    for anything unrecognized, so a caller gets numbers either way and has no
+    way to tell a real rate from the conservative placeholder. That distinction
+    matters as soon as something reports on a model the pipeline has not run —
+    a newly released model is exactly the case pricing.yaml is most likely not
+    to know yet, and quoting it the fallback rate would present a guess as a
+    price.
+
+    Public because it crosses a package boundary (see docs/NAMING.md).
+    """
     if not model_id:
-        return _UNKNOWN_PRICE
-    # Exact match first
+        return None
     if model_id in _PRICING:
         return _PRICING[model_id]
-    # Prefix match (handles versioned IDs like "gemini-2.5-flash-0520").
-    # Sort longest key first so "gpt-5.4-mini" is tested before "gpt-5.4".
     for key in sorted(_PRICING, key=len, reverse=True):
         if model_id.startswith(key):
             return _PRICING[key]
-    return _UNKNOWN_PRICE
+    return None
+
+
+def _price_for_model(model_id):
+    price = known_price(model_id)
+    return _UNKNOWN_PRICE if price is None else price
 
 
 def _entry_cost(entry):

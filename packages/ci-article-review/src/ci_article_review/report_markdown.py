@@ -720,6 +720,149 @@ def _render_section_9(citations):
     return lines
 
 
+def _render_model_currency(report):
+    """What is known about the age of the models this run used.
+
+    Two sources, deliberately labelled apart. ``ci_core.llm.model_registry``
+    reads a hand-maintained table, so it can only name a replacement somebody
+    already wrote down — it will never mention a model released after the last
+    audit. The live check asks the providers, so it can, but only for the
+    providers it actually reached.
+
+    Everything here is advisory, and the section says so. Newer is not better
+    and often is not cheaper, and a model too new for ``pricing.yaml`` would be
+    costed at the unknown-model fallback rather than its real rate — so the
+    listing flags what the price table does not know instead of implying a
+    recommendation the data cannot support.
+
+    Returns [] when the report carries no currency block, so reports written
+    before this section render exactly as they did before.
+    """
+    currency = report.get("model_currency")
+    if not currency:
+        return []
+
+    live = currency.get("live") or {}
+    warnings = currency.get("warnings") or []
+    notices = currency.get("notices") or []
+    newer = live.get("newer") or []
+    current = live.get("current") or []
+    unchecked = live.get("unchecked") or []
+
+    if not (warnings or notices or newer or current or unchecked):
+        return []
+
+    lines = ["## Model Currency", ""]
+    lines.append(
+        "_Advisory. Nothing here has been changed for you, and a newer model is "
+        "not automatically a better or a cheaper one._"
+    )
+    lines.append("")
+
+    # "configured", not "ran": the registry half is checked against the config
+    # before the run, so on a run where a pass fell back to another model the
+    # two halves of this section legitimately name different models. Saying
+    # "ran" in both places would make that look like a contradiction.
+    if warnings:
+        lines.append("### Superseded models configured")
+        lines.append("")
+        for w in warnings:
+            note = f" — {w['note']}" if w.get("note") else ""
+            lines.append(
+                f"- **{w['provider']}** is configured for `{w['model']}`, which "
+                f"the registry lists as superseded by `{w['replacement']}`{note}"
+            )
+        lines.append("")
+
+    if notices:
+        lines.append("### Soft upgrades noted in the registry")
+        lines.append("")
+        for n in notices:
+            note = f" — {n['note']}" if n.get("note") else ""
+            lines.append(
+                f"- **{n['provider']}** is configured for `{n['model']}`; "
+                f"`{n['newer']}` exists{note}"
+            )
+        lines.append("")
+
+    if newer:
+        lines.append("### Newer models the providers are offering")
+        lines.append("")
+        lines.append(
+            "_Read from the provider's own model list — what exists, not what "
+            "you should switch to._"
+        )
+        lines.append("")
+        for finding in newer:
+            lines.append(
+                f"- **{finding['provider']}** ran `{finding['model']}`. "
+                f"{finding['provider']} also lists:"
+            )
+            for m in finding["newer"]:
+                released = f" — released {m['released']}" if m.get("released") else ""
+                priced = (
+                    ""
+                    if m.get("price_known")
+                    else " (no entry in `pricing.yaml`; a run on it would be "
+                    "costed at the unknown-model fallback rate)"
+                )
+                lines.append(f"  - `{m['model']}`{released}{priced}")
+            if finding.get("undated_models"):
+                lines.append(
+                    f"  - _{finding['undated_models']} further model(s) carry no "
+                    "release date and could not be compared._"
+                )
+        lines.append("")
+
+    if current:
+        names = ", ".join(f"**{c['provider']}** (`{c['model']}`)" for c in current)
+        lines.append(f"Checked and nothing newer offered: {names}.")
+        lines.append("")
+
+    if unchecked and not (newer or current):
+        # No provider was reached at all — the default, since the live check is
+        # opt-in. One line rather than a roll-call: with nothing to contrast it
+        # against, naming each provider separately adds length, not meaning.
+        lines.append(
+            "_No provider was asked for its live model list this run, so the "
+            "registry below is the only source here — and it can only name "
+            "models a human already recorded. `uv run ci-discover` asks the "
+            "providers directly; `live_model_check: true` in the pipeline "
+            "config does it as part of the run._"
+        )
+        lines.append("")
+    elif unchecked:
+        # The distinction this section exists to protect: an empty "newer" list
+        # is evidence only for the providers that were actually asked.
+        lines.append("Not checked against the provider's live model list:")
+        lines.append("")
+        for u in unchecked:
+            lines.append(f"- **{u['provider']}** (`{u['model']}`) — {u['reason']}")
+        lines.append("")
+        lines.append(
+            "_No conclusion either way for these — run `uv run ci-discover` to "
+            "ask the providers directly._"
+        )
+        lines.append("")
+
+    reg_date = currency.get("registry_date")
+    if reg_date:
+        age = currency.get("registry_age_days", 0)
+        staleness = ""
+        if currency.get("registry_warning"):
+            staleness = " — overdue for review"
+        elif currency.get("registry_stale"):
+            staleness = " — worth re-checking"
+        lines.append(
+            f"_Built-in model registry last updated {reg_date} ({age} days ago)"
+            f"{staleness}. It can only name replacements a human recorded, which "
+            "is why the live check above exists._"
+        )
+        lines.append("")
+
+    return lines
+
+
 def _render_seo_suggestions(pre_analysis):
     """Render the SEO suggestion block, if the pass produced one.
 
@@ -933,6 +1076,11 @@ def render_report_markdown(report):
         if delta.get("structure_changed"):
             lines.append("- Heading structure: CHANGED since prior run")
         lines.append("")
+
+    # Run metadata, like the failed-passes block above it — how old the models
+    # behind this report are is context for reading it, not a finding about the
+    # article, so it sits in the header rather than among the sections.
+    lines.extend(_render_model_currency(report))
 
     lines.append("---")
     lines.append("")
