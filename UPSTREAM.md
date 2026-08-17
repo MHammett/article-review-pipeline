@@ -313,7 +313,10 @@ Recording these so nobody re-investigates them.
 
 ## 5. litellm — `web_search_options` + a system prompt breaks XAI
 
-**Status:** ready — minimal reproduction below, not yet filed.
+**Status:** filed as
+[BerriAI/litellm#37127](https://github.com/BerriAI/litellm/issues/37127) with
+[PR #37128](https://github.com/BerriAI/litellm/pull/37128), both 2026-08-16.
+See the root-cause note at the end — the fix is a deletion, not a remapping.
 
 With `web_search_options` set, litellm turns the request's system message into an
 `instructions` field and then rejects that field as unsupported for XAI. The
@@ -359,6 +362,35 @@ here.
 
 Anthropic's equivalent works and is enabled, which is what makes this look like
 a litellm transformation bug rather than an xAI limitation.
+
+**Root cause, 2026-08-16 — this entry guessed the mechanism right and the cause
+wrong.** The routing guess was correct: `main.py`'s `responses_api_bridge_check()`
+forces xAI + `web_search_options` onto the Responses API, and the bridge hoists a
+string system message into `instructions`. But the fix is not to stop that hoist.
+`XAIResponsesAPIConfig` declares `instructions` unsupported, and **that claim is
+simply false** — xAI's API reference lists it, and three direct calls to
+`api.x.ai/v1/responses` confirmed it: `instructions` alone returns HTTP 200 and is
+obeyed (asked to answer only "BANANA", grok answered `BANANA`) and echoed back,
+and it works alongside a server-side `web_search` tool. So the fix is deleting the
+exclusion, not special-casing the shared bridge. Reproduced on 1.96.2 *and* on
+master `973329e98`, so it is not stale.
+
+Worth recording as the same shape as entries 2 and 3: the entry's *diagnosis*
+("reusing a Responses-API-shaped mapping") described real code and still pointed
+at the wrong repair. Reading the provider's source and then asking the provider's
+API is what separated the two.
+
+Two details the PR turns on. `map_openai_params` *also* popped `instructions`,
+with a debug log — dead code, because `_check_valid_arg` raises first; whoever
+wrote the config expected a silent drop and got a hard failure instead. And the
+harm from `drop_params` is now measured rather than predicted: with it set, the
+call succeeds and grok returns a cited paragraph plus `pip install` instructions
+in place of the bare version number the system prompt demanded. Silent, and
+exactly what this entry warned about.
+
+The exclusion (`6fb0a8fc`, Nov 2025) predates the web-search routing
+(`dbc80061`, Jan 2026) that made it reachable from `completion()` — neither
+change was wrong on its own, which is why nobody caught it.
 
 ---
 
