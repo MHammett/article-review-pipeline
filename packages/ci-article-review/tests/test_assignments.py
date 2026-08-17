@@ -1,4 +1,9 @@
-"""Tests for pipeline._build_assignments — what it schedules, and what it drops.
+"""Tests for the assignment builders — what they schedule, and what they drop.
+
+``_build_assignments`` covers the built-in domains a thoroughness preset asks
+for; ``_build_custom_assignments`` covers the ones a publication defines in
+``custom_domains``. Both had the same two defects, and both are tested here so
+the pair cannot drift.
 
 Why this file exists
 --------------------
@@ -14,6 +19,12 @@ directly with the simple config form that user.example.yaml documents
 (``openai: gpt-5.5``), the function used to raise ``AttributeError: 'str' object
 has no attribute 'get'``. The real pipeline normalises via config_loader first,
 so production never hit it — the contract just did not say so.
+
+``_build_custom_assignments`` carried both defects unchanged: it warned about
+unknown model names and unresolvable prompts but dropped disabled and
+uncredentialled models in silence, and it read every ``model_configs`` value as
+a dict. A custom domain configured for three models could come back with one and
+say nothing about the other two.
 """
 
 import logging
@@ -25,7 +36,7 @@ from unittest.mock import patch
 import pytest
 
 import ci_article_review.pipeline as pipeline
-from ci_article_review.pipeline import _build_assignments
+from ci_article_review.pipeline import _build_assignments, _build_custom_assignments
 
 
 _ALL_MODELS = ["gemini", "openai", "mistral", "grok", "claude", "perplexity"]
@@ -51,6 +62,16 @@ def _skip_for(skips, model_name):
         f"Expected exactly one skip line for {model_name!r}, got {matches!r}"
     )
     return matches[0]
+
+
+def _pub(**domains):
+    """A publication config carrying nothing but the custom domains given."""
+    return {"custom_domains": domains}
+
+
+def _domain(*models, prompt="Check it against the house style."):
+    """One custom_domains entry in its simplest complete form."""
+    return {"prompt": prompt, "models": list(models)}
 
 
 class TestSkipReporting:
@@ -316,23 +337,26 @@ class TestConfigFormNormalisation:
         assert "prompts" in _skip_for(skips, "claude")
 
 
+#: Enough of a currency report and a handoff to get run_draft_pipeline as far
+#: as the assignment block, which is all the wiring tests below need.
+_CURRENCY = {
+    "warnings": [],
+    "notices": [],
+    "registry_warning": False,
+    "registry_stale": False,
+    "registry_date": "",
+    "registry_age_days": 0,
+}
+_HANDOFF = {
+    "title": "A Title That Is Comfortably Long Enough",
+    "draft": "# A Title That Is Comfortably Long Enough\n\n## Section\n\nBody.",
+    "primary_claim": "The claim.",
+    "run_number": 1,
+}
+
+
 class TestSkipsReachTheRunOutput:
     """The reasons are only useful if the run actually prints them."""
-
-    _CURRENCY = {
-        "warnings": [],
-        "notices": [],
-        "registry_warning": False,
-        "registry_stale": False,
-        "registry_date": "",
-        "registry_age_days": 0,
-    }
-    _HANDOFF = {
-        "title": "A Title That Is Comfortably Long Enough",
-        "draft": "# A Title That Is Comfortably Long Enough\n\n## Section\n\nBody.",
-        "primary_claim": "The claim.",
-        "run_number": 1,
-    }
 
     def test_empty_ensemble_logs_why_before_it_exits(self, caplog):
         """The run that produces nothing is the one that most needs the reasons.
@@ -357,7 +381,7 @@ class TestSkipsReachTheRunOutput:
                 ("load_user_config", {"return_value": {"pipeline": {}}}),
                 ("load_publication_config", {"return_value": {}}),
                 ("merge_configs", {"return_value": config}),
-                ("check_model_currency", {"return_value": self._CURRENCY}),
+                ("check_model_currency", {"return_value": _CURRENCY}),
                 ("_build_custom_assignments", {"return_value": ([], {})}),
             ):
                 stack.enter_context(
@@ -376,7 +400,7 @@ class TestSkipsReachTheRunOutput:
                 )
             )
             with pytest.raises(SystemExit):
-                pipeline.run_draft_pipeline(None, "myblog", handoff=dict(self._HANDOFF))
+                pipeline.run_draft_pipeline(None, "myblog", handoff=dict(_HANDOFF))
 
         skip_lines = [
             r.getMessage() for r in caplog.records if "Skipped:" in r.getMessage()
@@ -392,3 +416,295 @@ class TestSkipsReachTheRunOutput:
         mistral_line = next(s for s in skip_lines if "mistral" in s)
         assert "disabled" in mistral_line
         assert "no credentials" in next(s for s in skip_lines if "claude" in s)
+
+
+class TestCustomDomainSkipReporting:
+    """A publication's custom domain accounts for the models it did not get."""
+
+    def test_three_models_configured_one_runs_and_the_other_two_say_why(self):
+        """The defect stated plainly: 3 models in, 1 out, and silence."""
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+        keys = {m: v for m, v in _ALL_KEYS.items() if m != "grok"}
+
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("openai", "claude", "grok")), configs, keys, skips
+        )
+
+        assert assignments == [("openai", "house_style")]
+        assert len(skips) == 2
+        assert "disabled" in _skip_for(skips, "claude")
+        assert "no credentials" in _skip_for(skips, "grok")
+
+    def test_a_disabled_model_is_reported_with_its_reason(self):
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+
+        skips = []
+        assignments, prompts = _build_custom_assignments(
+            _pub(house_style=_domain("gemini", "claude")), configs, _ALL_KEYS, skips
+        )
+
+        assert assignments == [("gemini", "house_style")]
+        assert prompts == {"house_style": "Check it against the house style."}
+
+        line = _skip_for(skips, "claude")
+        assert "disabled" in line
+        assert "enabled: false" in line
+        assert "house_style" in line
+
+    def test_missing_credentials_are_reported_as_such(self):
+        keys = {m: v for m, v in _ALL_KEYS.items() if m != "grok"}
+
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(seo_angle=_domain("grok", "openai")), _SIMPLE_CONFIGS, keys, skips
+        )
+
+        assert assignments == [("openai", "seo_angle")]
+        line = _skip_for(skips, "grok")
+        assert "no credentials" in line
+        assert "disabled" not in line
+
+    def test_a_disabled_model_without_credentials_reports_one_reason(self):
+        """Both gates fail; the report stays one line and names the first."""
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+        keys = {m: v for m, v in _ALL_KEYS.items() if m != "claude"}
+
+        skips = []
+        _build_custom_assignments(
+            _pub(house_style=_domain("claude")), configs, keys, skips
+        )
+
+        line = _skip_for(skips, "claude")
+        assert "disabled" in line
+        assert "no credentials" not in line
+
+    def test_one_line_per_model_not_per_domain(self):
+        """A model dropped from three custom domains gets one line, not three."""
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+
+        skips = []
+        _build_custom_assignments(
+            _pub(
+                house_style=_domain("gemini", "claude"),
+                seo_angle=_domain("claude"),
+                legal_risk=_domain("claude", "openai"),
+            ),
+            configs,
+            _ALL_KEYS,
+            skips,
+        )
+
+        line = _skip_for(skips, "claude")
+        assert "3 custom domain(s) not run" in line
+        for domain in ("house_style", "seo_angle", "legal_risk"):
+            assert domain in line, f"{domain!r} missing from skip line: {line}"
+
+    def test_a_domain_that_loses_every_model_still_explains_itself(self):
+        """No assignment means no 'Custom:' line to hang the reason off."""
+        skips = []
+        assignments, prompts = _build_custom_assignments(
+            _pub(house_style=_domain("openai", "claude")), _SIMPLE_CONFIGS, {}, skips
+        )
+
+        assert assignments == []
+        # The prompt still resolved — it is the models that went missing.
+        assert "house_style" in prompts
+        assert {s.split(" ", 1)[0] for s in skips} == {"openai", "claude"}
+
+    def test_nothing_is_reported_when_every_named_model_runs(self):
+        """No false alarms: a fully staffed custom domain reports no skips."""
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("gemini", "openai", "claude")),
+            _SIMPLE_CONFIGS,
+            _ALL_KEYS,
+            skips,
+        )
+
+        assert len(assignments) == 3
+        assert skips == []
+
+    def test_a_model_named_twice_in_one_domain_counts_once(self):
+        """The assignment list dedupes; the skip report has to agree."""
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+
+        skips = []
+        _build_custom_assignments(
+            _pub(house_style=_domain("claude", "claude")), configs, _ALL_KEYS, skips
+        )
+
+        assert "1 custom domain(s) not run: house_style" in _skip_for(skips, "claude")
+
+    def test_unknown_model_names_warn_rather_than_appearing_as_skips(self, caplog):
+        """That gate already had a log line; it must not now report twice."""
+        caplog.set_level(logging.WARNING, logger="pipeline")
+
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("gpt9000", "openai")),
+            _SIMPLE_CONFIGS,
+            _ALL_KEYS,
+            skips,
+        )
+
+        assert assignments == [("openai", "house_style")]
+        assert skips == []
+        assert any("unknown model" in r.getMessage() for r in caplog.records)
+
+    def test_a_domain_with_no_prompt_reports_no_model_skips(self, caplog):
+        """The domain never ran at all; its warning is the whole story."""
+        caplog.set_level(logging.WARNING, logger="pipeline")
+
+        skips = []
+        assignments, prompts = _build_custom_assignments(
+            {"custom_domains": {"house_style": {"models": ["openai", "claude"]}}},
+            _SIMPLE_CONFIGS,
+            {},
+            skips,
+        )
+
+        assert (assignments, prompts) == ([], {})
+        assert skips == []
+        assert any("no prompt" in r.getMessage() for r in caplog.records)
+
+    def test_skips_argument_is_optional(self):
+        """Existing three-argument callers keep working unchanged."""
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("gemini", "claude")), configs, _ALL_KEYS
+        )
+        assert assignments == [("gemini", "house_style")]
+
+    def test_reporting_does_not_change_what_is_assigned(self):
+        configs = dict(_SIMPLE_CONFIGS)
+        configs["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+        keys = {m: v for m, v in _ALL_KEYS.items() if m != "grok"}
+        pub = _pub(house_style=_domain("gemini", "claude", "grok", "openai"))
+
+        assert _build_custom_assignments(pub, configs, keys, []) == (
+            _build_custom_assignments(pub, configs, keys)
+        )
+
+
+class TestCustomDomainConfigForms:
+    """Both config forms user.example.yaml documents reach here intact."""
+
+    def test_simple_string_form_does_not_raise(self):
+        """Was: AttributeError: 'str' object has no attribute 'get'."""
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("openai", "gemini")), _SIMPLE_CONFIGS, _ALL_KEYS
+        )
+        assert assignments == [("openai", "house_style"), ("gemini", "house_style")]
+
+    def test_both_forms_agree(self):
+        extended = {name: {"model": model} for name, model in _SIMPLE_CONFIGS.items()}
+        pub = _pub(house_style=_domain("openai", "claude", "mistral"))
+        keys = {m: v for m, v in _ALL_KEYS.items() if m != "mistral"}
+
+        simple_skips, extended_skips = [], []
+        assert _build_custom_assignments(
+            pub, _SIMPLE_CONFIGS, keys, simple_skips
+        ) == _build_custom_assignments(pub, extended, keys, extended_skips)
+        assert simple_skips == extended_skips
+
+    def test_forms_can_be_mixed(self):
+        """user.example.yaml: 'Simple-form entries are unaffected — you can mix.'"""
+        mixed = dict(_SIMPLE_CONFIGS)
+        mixed["claude"] = {"enabled": False, "model": "claude-opus-4-8"}
+
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("openai", "claude")), mixed, _ALL_KEYS, skips
+        )
+
+        assert assignments == [("openai", "house_style")]
+        assert {s.split(" ", 1)[0] for s in skips} == {"claude"}
+
+    def test_string_form_still_honours_a_missing_key(self):
+        """Normalisation must not invent credentials."""
+        keys = {m: v for m, v in _ALL_KEYS.items() if m != "mistral"}
+
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("mistral")), _SIMPLE_CONFIGS, keys, skips
+        )
+
+        assert assignments == []
+        assert "no credentials" in _skip_for(skips, "mistral")
+
+    def test_string_form_gemini_is_not_mistaken_for_vertex(self):
+        """Normalisation fills in provider; the api-key path must still apply.
+
+        _model_has_credentials treats provider: vertex_ai as needing a project
+        rather than a key, so the default provider filled in here matters.
+        """
+        skips = []
+        assignments, _ = _build_custom_assignments(
+            _pub(house_style=_domain("gemini")),
+            {"gemini": "gemini-2.5-flash"},
+            {"gemini": {"api_key": "k"}},
+            skips,
+        )
+
+        assert assignments == [("gemini", "house_style")]
+        assert skips == []
+
+
+class TestCustomSkipsReachTheRunOutput:
+    """Same wiring check as the built-in domains, for the custom ones."""
+
+    def test_custom_domain_skips_are_logged(self, caplog):
+        """_build_custom_assignments is left unpatched: config to log line."""
+        caplog.set_level(logging.INFO, logger="pipeline")
+
+        config = {
+            "api_keys": {"mistral": {"api_key": "k"}},
+            "pipeline": {"link_validation": False, "grammar_pass": False},
+            # The custom domain asks for two models; neither can run.
+            "publication": {
+                "custom_domains": {
+                    "house_style": {"prompt": "p", "models": ["mistral", "claude"]}
+                }
+            },
+            "delta": {},
+            "ensemble": {},
+            "models": {"mistral": {"enabled": False, "model": "mistral-large-latest"}},
+        }
+
+        with ExitStack() as stack:
+            for target, kwargs in (
+                ("load_user_config", {"return_value": {"pipeline": {}}}),
+                ("load_publication_config", {"return_value": {}}),
+                ("merge_configs", {"return_value": config}),
+                ("check_model_currency", {"return_value": _CURRENCY}),
+            ):
+                stack.enter_context(
+                    patch(f"ci_article_review.pipeline.{target}", **kwargs)
+                )
+            for target in ("seo_suggest.generate", "seo_content.review"):
+                stack.enter_context(
+                    patch(
+                        f"ci_article_review.pipeline.{target}",
+                        return_value=({"status": "skipped", "reason": "test"}, None),
+                    )
+                )
+            with pytest.raises(SystemExit):
+                pipeline.run_draft_pipeline(None, "myblog", handoff=dict(_HANDOFF))
+
+        custom_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "Custom skipped:" in r.getMessage() and r.levelno == logging.INFO
+        ]
+        assert len(custom_lines) == 2
+        assert "disabled" in next(s for s in custom_lines if "mistral" in s)
+        assert "no credentials" in next(s for s in custom_lines if "claude" in s)
+        assert all("house_style" in s for s in custom_lines)

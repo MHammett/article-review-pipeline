@@ -410,7 +410,12 @@ def _build_assignments(
     return assignments
 
 
-def _build_custom_assignments(pub_config, model_configs, api_keys):
+def _build_custom_assignments(
+    pub_config,
+    model_configs,
+    api_keys,
+    skips: list[str] | None = None,
+):
     """Return (assignments, prompts_by_domain) for publication-defined custom domains.
 
     Each entry in pub_config.custom_domains has:
@@ -419,13 +424,32 @@ def _build_custom_assignments(pub_config, model_configs, api_keys):
       models:      list of model names to run for this domain
       weight:      ensemble weight (optional, default 1.0)
 
+    ``model_configs`` accepts either form documented in user.example.yaml —
+    simple (``openai: gpt-5.5``) or extended (a dict). The pipeline hands over
+    configs already normalised by config_loader; normalising again here is what
+    lets a direct call with a hand-written config behave the same way.
+
+    Pass a list as ``skips`` to find out which of the models a custom domain
+    named it did not get: every model held back by ``enabled: false`` or by
+    missing credentials appends one line naming it, the reason, and the custom
+    domains it did not run. Unknown model names and unresolvable prompts already
+    warn for themselves; those two gates were the silent ones, so a domain
+    configured for three models could come back with one and say nothing.
+
     Returns:
       assignments       — list of (model_name, domain_name) tuples
       prompts_by_domain — dict[domain_name, prompt_str]
     """
     custom_domains = pub_config.get("custom_domains") or {}
+    model_configs = normalize_model_configs(model_configs)
     assignments = []
     prompts_by_domain = {}
+    # model -> (reason, custom domains it was asked for but cannot run). The
+    # reason is resolved where the drop happens, so the assignment loop and the
+    # skip report below cannot drift apart, and domains accumulate across the
+    # whole config so a model named by three of them is one line — the same
+    # one-line-per-model shape _build_assignments reports.
+    blocked: dict[str, tuple[str, list[str]]] = {}
 
     for domain_name, cfg in custom_domains.items():
         if not isinstance(cfg, dict):
@@ -462,13 +486,22 @@ def _build_custom_assignments(pub_config, model_configs, api_keys):
                 )
                 continue
             model_cfg = model_configs.get(model_name, {})
-            if not model_cfg.get("enabled", True):
-                continue
-            if not _model_has_credentials(model_name, api_keys, model_cfg):
+            reason = _model_blocked_reason(model_name, model_cfg, api_keys)
+            if reason:
+                dropped = blocked.setdefault(model_name, (reason, []))[1]
+                if domain_name not in dropped:
+                    dropped.append(domain_name)
                 continue
             pair = (model_name, domain_name)
             if pair not in assignments:
                 assignments.append(pair)
+
+    if skips is not None:
+        for model_name, (reason, dropped) in blocked.items():
+            skips.append(
+                f"{model_name} — {reason}; {len(dropped)} custom domain(s) "
+                "not run: " + ", ".join(dropped)
+            )
 
     return assignments, prompts_by_domain
 
@@ -1291,13 +1324,19 @@ def run_draft_pipeline(
     )
 
     # Custom publication-defined domains
+    custom_skips: list[str] = []
     custom_assignments, custom_prompts = _build_custom_assignments(
-        pub_config, model_configs, api_keys
+        pub_config, model_configs, api_keys, custom_skips
     )
     if custom_assignments:
         log.info("Custom domains: %d assignment(s)", len(custom_assignments))
         for model_name, domain in custom_assignments:
             log.info("  Custom: %s → %s", model_name, domain)
+    # Outside the block above on purpose: a custom domain whose every model was
+    # dropped contributes no assignment, so that header never prints — and that
+    # is the run whose silence is hardest to account for.
+    for skip_line in custom_skips:
+        log.info("  Custom skipped: %s", skip_line)
 
     if not assignments:
         # The reasons matter most here — this is the run that produced nothing.
