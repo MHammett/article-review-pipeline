@@ -207,7 +207,7 @@ def _load_presets_from_yaml(config_dir=None):
         ) from exc
 
 
-def _apply_cost_preset(pipeline_cfg, models_raw):
+def _apply_cost_preset(pipeline_cfg, models_raw, user_set=None):
     """Apply a cost_preset to pipeline and models config.
 
     Called in merge_configs() before model normalization.  Returns updated
@@ -224,8 +224,17 @@ def _apply_cost_preset(pipeline_cfg, models_raw):
         raise ValueError(f"Unknown cost_preset {preset_name!r}. Valid values: {valid}")
 
     new_pipeline = dict(pipeline_cfg)
-    # Set thoroughness from preset only if user has not already set it explicitly.
-    if "thoroughness" not in pipeline_cfg:
+    # Set thoroughness from the preset unless the user asked for one by name.
+    #
+    # "Did the user set it" cannot be answered from ``pipeline_cfg``, because by
+    # the time this runs the defaults have been merged in and `thoroughness` is
+    # always present. Checking the merged dict is what broke `cost_preset`
+    # between #105 and here: every preset picked its models correctly and then
+    # ran a `standard`-sized ensemble, so `maximum` made 7 calls where it should
+    # make 30 — maximum-model prices for a fraction of the ensemble, silently.
+    # ``user_set`` is the raw pipeline block, before defaults.
+    asked_for = pipeline_cfg if user_set is None else user_set
+    if "thoroughness" not in asked_for:
         new_pipeline["thoroughness"] = preset["thoroughness"]
 
     merged_models = dict(models_raw or {})
@@ -333,12 +342,15 @@ PIPELINE_DEFAULTS = {
 
 def merge_configs(user_config, pub_config):
     # Per-key, so a partial block keeps the defaults it did not mention.
-    pipeline = {**PIPELINE_DEFAULTS, **(user_config.get("pipeline") or {})}
+    user_pipeline = user_config.get("pipeline") or {}
+    pipeline = {**PIPELINE_DEFAULTS, **user_pipeline}
     models_raw = user_config.get("models", {})
 
     # Apply cost_preset when present — overrides model variants, reasoning flags,
     # and thoroughness while preserving user's provider infrastructure settings.
-    pipeline, models_raw = _apply_cost_preset(pipeline, models_raw)
+    pipeline, models_raw = _apply_cost_preset(
+        pipeline, models_raw, user_set=user_pipeline
+    )
 
     # Apply selective preset_overrides on top — lets users adjust individual
     # fields of a preset without specifying the full config.
