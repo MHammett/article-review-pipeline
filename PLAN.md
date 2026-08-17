@@ -241,7 +241,7 @@ of this is deleted rather than landed.
 | work | why it is held |
 |---|---|
 | `fix/credit-exhaustion-detection` **entire branch** | litellm raises a proper exception on the in-band streaming error this branch exists to catch |
-| `quota.py` | superseded except the terminal-vs-transient classifier, which goes upstream |
+| ~~`quota.py`~~ — **gone with the adapters** | superseded. The narrow terminal-vs-transient check survives as `_is_terminal_quota_error` in `llm/client.py`; it is *not* going upstream (UPSTREAM.md entry 1) |
 | `schema_format.py` + adapter wiring | `instructor`, or litellm's own `response_format` passthrough |
 | `streaming.py` stream-error capture (4 accumulators) | litellm raises instead |
 | `tokens.py` cached-token handling | litellm models cached tokens already |
@@ -338,16 +338,17 @@ around its output. 239 lines is not where the pain is.
 ## 4. Upstream — see UPSTREAM.md
 
 > **UPSTREAM.md is the live copy and landed on master in PR #100.** The table
-> below is the 2026-08-12 snapshot; read it there, not here. Entry 1 is filed
-> ([litellm#32785](https://github.com/BerriAI/litellm/issues/32785)), entry 2 is
-> contributed, and entry 3 taught the lesson now written into UPSTREAM.md's
-> header: it was dropped on non-adoption, and when the source was finally read
-> it contained a genuine bug in one library and a claim that was simply wrong
-> about the other. "We don't depend on it" is not a verification.
+> below is a snapshot; read it there, not here. Entry 1 is contributed and
+> deliberately not a PR — litellm already has three competing PRs open for it,
+> unreviewed (reasoning in UPSTREAM.md entry 1, updated 2026-08-16 in PR #114).
+> Entry 2 is contributed, and entry 3 taught the lesson now written into
+> UPSTREAM.md's header: it was dropped on non-adoption, and when the source was
+> finally read it contained a genuine bug in one library and a claim that was
+> simply wrong about the other. "We don't depend on it" is not a verification.
 
 | # | item | status |
 |---|---|---|
-| 1 | litellm classifies credit exhaustion as `RateLimitError`, so retry logic retries a dead account. Offer `quota.py`'s classifier + tests as the PR. | ready |
+| 1 | litellm classifies credit exhaustion as `RateLimitError`, so retry logic retries a dead account. | contributed — twice ([#32785](https://github.com/BerriAI/litellm/issues/32785#issuecomment-5299586013), [#32798](https://github.com/BerriAI/litellm/pull/32798#issuecomment-5310640191)); deliberately **not** a PR |
 | 4 | litellm `completion()` silently drops reasoning-summary streaming for OpenAI reasoning models. | ready |
 | 2 | Link checkers have no TLS-impersonation tier. | verify — file against whichever checker we adopt |
 | 3 | Wayback clients: 429 backoff and authenticated SPN2. | verify — check current releases first |
