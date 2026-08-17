@@ -496,6 +496,30 @@ def _render_prompt(template: str, **kwargs) -> str:
     return template
 
 
+_CACHE_LAYOUT_SYSTEM = (
+    "You are a meticulous editorial reviewer. The article and its context come "
+    "first; your specific review task is stated at the end of this message. "
+    "Follow that task exactly and return only the JSON it specifies."
+)
+
+
+def _cache_friendly_layout(system: str, user: str) -> tuple[str, str]:
+    """Move the domain instruction after the draft so the prefix is shareable.
+
+    Returns ``(system, user)`` with the per-domain text relocated to the end of
+    ``user``. The model still receives the entire domain prompt — only its
+    position changes — and putting the task after a long document is a normal
+    long-context arrangement rather than an exotic one.
+
+    The shared prefix is ``_CACHE_LAYOUT_SYSTEM`` plus the article, which is
+    byte-identical across all five domains of a run.
+    """
+    return (
+        _CACHE_LAYOUT_SYSTEM,
+        f"{user}\n\n{'=' * 60}\nYOUR REVIEW TASK\n{'=' * 60}\n{system}",
+    )
+
+
 def _web_search_enabled(setting, domain: str) -> bool:
     """Resolve a model's ``web_search`` setting for one domain.
 
@@ -812,6 +836,13 @@ def _run_domain(
         pre_draft_analysis=handoff.get("pre_draft_analysis", ""),
     )
     user = _build_user_prompt(draft, handoff)
+
+    # Off by default: it relocates the domain instruction from before the
+    # article to after it, and this pipeline's output is the product. Turn it
+    # on, diff a run against a prior live run, and keep it if the findings hold.
+    if pipeline_cfg.get("prompt_cache_layout", False):
+        system, user = _cache_friendly_layout(system, user)
+
     api_key = api_keys.get(model_name, {}).get("api_key", "")
 
     # Live web search is a per-model flag, but only one domain has any use for
