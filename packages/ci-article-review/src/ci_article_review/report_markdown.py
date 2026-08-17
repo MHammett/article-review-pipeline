@@ -360,16 +360,33 @@ def _citation_pair(citation):
 def _render_archive_pair(citation, indent="  "):
     """Lines pairing a citation's live URL with its archive copy.
 
-    Says which of the four states applies rather than silently omitting the
-    archive line, because "no snapshot yet" and "never submitted" need different
-    follow-up from the author.
+    Says which state applies rather than silently omitting the archive line,
+    because "no snapshot yet" and "never submitted" need different follow-up
+    from the author.
 
-    The fourth state is the one worth being careful about. ``archived: None``
-    means the lookup never completed — the circuit breaker above tripped, or the
-    request failed — and it is NOT the same as "there is no snapshot". Reporting
-    it as "none" would assert something this run never established, and the
-    breaker makes that the common case rather than a rare one: once it trips,
-    every remaining citation carries a null.
+    The two negative states are the ones worth being careful about, and they are
+    three, not two:
+
+    * ``archived: None`` — a lookup was made and did not complete (the circuit
+      breaker tripped, or the request failed). NOT the same as "there is no
+      snapshot"; reporting it as "none" would assert something this run never
+      established, and the breaker makes it the common case rather than a rare
+      one. Re-running can still answer it.
+    * no ``wayback`` key at all — archive.org was never asked, because the fetch
+      failed in a way the archive fallback deliberately does not cover (404,
+      5xx) or must not be used for (a non-public address). Rendering that as
+      "NOT CHECKED" would imply a lookup that could succeed next time; none was
+      attempted and none will be.
+    * ``archived: False`` — archive.org answered and has no snapshot.
+
+    The missing-key branch has to come before the null one: ``{}.get("archived")
+    is None`` is True, so an absent dict would otherwise fall into "NOT CHECKED".
+
+    Reading "never asked" out of an absent key is only sound because the
+    resolver now always records the answer when a lookup ran, and because
+    ``history.save_run`` renders a report as it is built rather than re-rendering
+    old JSON — citations written before that change dropped the answer on the
+    failure path, and would land here claiming nobody looked.
     """
     live, archive = _citation_pair(citation)
     if not live:
@@ -389,16 +406,38 @@ def _render_archive_pair(citation, indent="  "):
             f"{indent}- Archive: submitted to the Wayback Machine this run; the "
             f"snapshot URL appears on the next run once archive.org has captured it."
         )
+    elif not wayback:
+        out.append(
+            f"{indent}- Archive: NOT LOOKED UP — archive.org was never asked "
+            f"about this URL, because the fetch failed in a way an archived copy "
+            f"does not stand in for (a 404 or 5xx), or the address was not one we "
+            f"would hand to a third party. Re-running will not ask either. This "
+            f"says nothing about whether the page is archived — check by hand."
+        )
     elif wayback.get("archived") is None:
         out.append(
             f"{indent}- Archive: NOT CHECKED — the archive.org lookup did not "
             f"complete this run. This says nothing about whether the page is "
             f"archived; re-run to find out."
         )
-    else:
+    elif citation.get("resolved"):
         out.append(
             f"{indent}- Archive: none. This citation is only as durable as the "
             f"live URL — re-run once archiving succeeds, or archive it by hand."
+        )
+    else:
+        # Unresolved: the live URL did not yield readable content this run, and
+        # archive.org confirmed it has no snapshot either. Neither half of the
+        # resolved wording holds — there is no fetched copy for the live URL to
+        # be "as durable as", and archiving is never submitted for an unresolved
+        # citation (see resolver._submit_missing_archives, which requires
+        # `resolved`), so "re-run once archiving succeeds" would be a promise
+        # nothing in the pipeline is going to keep.
+        out.append(
+            f"{indent}- Archive: none — archive.org answered and has no snapshot "
+            f"of this URL, and the live fetch did not succeed either, so no "
+            f"readable copy was obtained from anywhere. Unresolved citations are "
+            f"not submitted for archiving; archive it by hand if you keep it."
         )
     return out
 

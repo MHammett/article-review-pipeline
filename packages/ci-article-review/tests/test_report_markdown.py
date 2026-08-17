@@ -1448,6 +1448,125 @@ class TestCitationsPairLiveAndArchiveLinks:
         assert report_markdown._render_archive_pair(citation) == []
 
 
+class TestUnresolvedCitationsRenderTheirArchiveState:
+    """A failed fetch now carries archive.org's answer, or deliberately no key.
+
+    The resolver used to drop the availability result on the failure path, so an
+    unresolved citation recorded no archive state at all. ``_render_archive_pair``
+    then read ``citation.get("wayback") or {}`` — and ``{}.get("archived")`` is
+    None — so every unresolved citation claimed "the archive.org lookup did not
+    complete this run", including the 404s where nothing was ever looked up.
+
+    Three states, three answers: archive.org said no, archive.org never
+    answered, and archive.org was never asked. The third is the one an absent
+    key means, and it is not a re-runnable failure — nothing will ask next time
+    either.
+    """
+
+    LIVE = "https://example.org/page"
+
+    def _cit(self, **overrides):
+        """An unresolved citation carrying a URL — the `fetch_failed` bucket."""
+        citation = {
+            "claim": "A claim",
+            "url": self.LIVE,
+            "resolved": False,
+            "note": "Known source URL could not be fetched: timed out",
+        }
+        citation.update(overrides)
+        return citation
+
+    def _section(self, *citations):
+        return "\n".join(report_markdown._render_section_9(list(citations)))
+
+    def test_a_known_absent_snapshot_says_archive_org_answered(self):
+        out = self._section(self._cit(wayback={"archived": False}))
+        assert "archive.org answered and has no snapshot" in out
+        assert "NOT CHECKED" not in out
+        assert "NOT LOOKED UP" not in out
+
+    def test_an_unresolved_citation_is_not_promised_archiving_it_will_not_get(self):
+        """`_submit_missing_archives` requires `resolved`, so "re-run once
+        archiving succeeds" is a promise nothing in the pipeline keeps here. Nor
+        is there a fetched copy for the live URL to be "as durable as"."""
+        out = self._section(self._cit(wayback={"archived": False}))
+        assert "re-run once archiving succeeds" not in out
+        assert "only as durable as the live URL" not in out
+        assert "not submitted for archiving" in out
+
+    def test_a_resolved_citation_keeps_the_durability_wording(self):
+        """The unresolved rewording must not leak into the case it is not for."""
+        out = self._section(
+            self._cit(
+                resolved=True, verification="checksum", wayback={"archived": False}
+            )
+        )
+        assert "only as durable as the live URL" in out
+        assert "archive.org answered and has no snapshot" not in out
+
+    def test_a_lookup_that_never_completed_still_says_not_checked(self):
+        out = self._section(
+            self._cit(wayback={"archived": None, "error": "rate limit tripped"})
+        )
+        assert "NOT CHECKED" in out
+        assert "archive.org answered" not in out
+        # And it reaches the aggregate callout, which is the point of carrying
+        # `wb` out at all: a throttled run's unresolved citations were invisible
+        # to this count before.
+        assert "Archive status is unknown for 1 of these citations" in out
+
+    def test_a_fetch_nobody_looked_up_is_not_reported_as_not_checked(self):
+        """No `wayback` key: a 404/5xx, or an address the SSRF guard refused.
+
+        "NOT CHECKED" would imply a lookup that could succeed on a re-run. None
+        was attempted, and none will be.
+        """
+        out = self._section(self._cit())
+        assert "NOT LOOKED UP" in out
+        assert "NOT CHECKED" not in out
+        assert "Archive status is unknown" not in out
+
+    def test_an_unreadable_snapshot_is_still_offered_to_the_reader(self):
+        """archive.org has a copy; the pipeline just could not fetch it. That
+        copy may be the only readable version of a refused URL, so it is the
+        most useful thing the run learned — and the old contract dropped it."""
+        snapshot = "https://web.archive.org/web/20240101000000/https://example.org/page"
+        out = self._section(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": snapshot,
+                    "snapshot_age_days": 245,
+                    "snapshot_stale": True,
+                }
+            )
+        )
+        assert f"Archive: {snapshot}" in out
+        assert "STALE" in out
+        assert f"Cite both: {self.LIVE} (archived: {snapshot})" in out
+
+    def test_the_wayback_line_reads_for_a_human_not_a_debugger(self):
+        """The new key flows through `_kv_lines` too, which must not dump it raw."""
+        out = self._section(self._cit(wayback={"archived": False}))
+        assert "Wayback: Not archived in Wayback Machine" in out
+        assert "{'archived'" not in out
+
+    def test_never_asked_is_not_counted_in_the_unknown_aggregate(self):
+        """End to end through the real renderer, mixing the two failure routes:
+        only the citation that was actually looked up is unknown."""
+        md = render_report_markdown(
+            _base_report(
+                section_9_citations=[
+                    self._cit(claim="looked up", wayback={"archived": None}),
+                    self._cit(claim="never asked"),
+                ]
+            )
+        )
+        assert "Archive status is unknown for 1 of these citations" in md
+        assert "NOT LOOKED UP" in md
+        assert "NOT CHECKED" in md
+
+
 class TestWaybackIsRenderedForAReaderNotADebugger:
     """`_kv_lines` dumped the raw wayback dict into the report.
 

@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from ci_core import extract
+from ci_core.http import UnsafeURLError
 
 from ci_article_review.adapters.citation import resolver, wayback
 
@@ -1060,6 +1061,121 @@ class TestKnownUrlWaybackFallback:
 
         assert results[0]["resolved"] is True
         assert results[0]["origin_failure"] == "rate_limited"
+
+
+class TestUnresolvedCitationsRecordWhatArchiveOrgSaid:
+    """A failed fetch used to record no archive state at all.
+
+    ``_wayback_fallback_content`` asked archive.org, got an answer that did not
+    yield readable content, and dropped it on the way out. The caller's
+    ``resolved: False`` citation therefore said neither "archive.org has no
+    snapshot" nor "the lookup never completed" — and the rate limiter's circuit
+    breaker makes the second the common case in a throttled run rather than a
+    rare one, so a reader had no way to tell which had happened.
+
+    The absence of the key is itself meaningful and has to stay that way: a
+    failure that never qualified for the fallback never asked anyone.
+    """
+
+    URL = "https://example.com/page"
+
+    def _resolve(self, origin, wayback_result=None, snapshot=None):
+        """Resolve one known_url claim whose direct fetch fails.
+
+        ``origin`` is what the first ``safe_get`` does — an exception instance
+        to raise, or a response whose ``raise_for_status`` raises. ``snapshot``
+        is what the *second* call does, for the case where a snapshot exists but
+        cannot be read; omit it when no snapshot fetch is expected.
+        """
+        fetches = [origin] if snapshot is None else [origin, snapshot]
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=fetches,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value=wayback_result,
+            ) as mock_wb,
+        ):
+            result = resolver._resolve_known_url("a claim", self.URL)
+        return result, mock_wb
+
+    def test_no_snapshot_is_recorded_as_no_snapshot(self):
+        """archive.org answered "nothing archived". That is a fact worth keeping."""
+        result, mock_wb = self._resolve(
+            requests.exceptions.Timeout("timed out"),
+            {"url": self.URL, "archived": False},
+        )
+        assert result["resolved"] is False
+        assert result["wayback"]["archived"] is False
+        assert mock_wb.call_count == 1
+
+    def test_a_lookup_that_never_completed_is_recorded_as_such(self):
+        """The breaker's null must not read as "no snapshot" — it is "we never
+        found out", which is what a throttled run is full of."""
+        result, _ = self._resolve(
+            _http_error_response(403),
+            {
+                "url": self.URL,
+                "archived": None,
+                "error": (
+                    "skipped: archive.org rate limit tripped earlier this run "
+                    "(no snapshot lookup attempted)"
+                ),
+            },
+        )
+        assert result["resolved"] is False
+        assert result["wayback"]["archived"] is None
+        assert "rate limit" in result["wayback"]["error"]
+
+    def test_a_stale_snapshot_survives_a_failed_snapshot_fetch(self):
+        """archive.org has a snapshot; we just could not read it this run.
+
+        The snapshot URL and its staleness are the most useful thing the run
+        learned about this citation — the author can open the copy by hand — and
+        they were exactly what the old contract threw away.
+        """
+        snapshot_url = (
+            "https://web.archive.org/web/20240101000000/https://example.com/page"
+        )
+        result, _ = self._resolve(
+            requests.exceptions.Timeout("timed out"),
+            {
+                "url": self.URL,
+                "archived": True,
+                "snapshot_url": snapshot_url,
+                "snapshot_age_days": 245,
+                "snapshot_stale": True,
+            },
+            snapshot=requests.exceptions.ConnectionError("snapshot unreachable"),
+        )
+        assert result["resolved"] is False
+        assert result["wayback"]["snapshot_url"] == snapshot_url
+        assert result["wayback"]["snapshot_stale"] is True
+        assert result["wayback"]["snapshot_age_days"] == 245
+        # Read from the archive is what `verified_via` claims; nothing was read.
+        assert "verified_via" not in result
+
+    def test_a_404_carries_no_wayback_key_because_nobody_was_asked(self):
+        """No lookup happened, so there is no answer to record. An empty dict or
+        a null here would both say a lookup ran, which is the confusion this
+        whole change exists to remove."""
+        result, mock_wb = self._resolve(_http_error_response(404))
+
+        assert result["resolved"] is False
+        mock_wb.assert_not_called()
+        assert "wayback" not in result
+
+    def test_a_refused_private_address_carries_no_wayback_key(self):
+        """The other route to "never asked": the SSRF guard refuses before any
+        fetch, and asking archive.org would hand the internal URL to a third
+        party. See _resolve_known_url's UnsafeURLError branch."""
+        result, mock_wb = self._resolve(UnsafeURLError("blocked"))
+
+        assert result["resolved"] is False
+        mock_wb.assert_not_called()
+        assert "wayback" not in result
 
 
 class TestArchiveSubmission:
