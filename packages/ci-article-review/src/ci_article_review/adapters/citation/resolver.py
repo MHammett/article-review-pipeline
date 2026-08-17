@@ -287,37 +287,41 @@ def _wayback_fallback_content(url, timeout):
     failures qualify is decided by ``wayback.fallback_reason_for_exception``:
     blocks (401/403/429) and unreachable origins (timeouts, DNS/connection
     errors) do; a 404 (genuinely gone) and a 5xx (the origin's own problem)
-    deliberately do not. A single attempt, no retry loop. Returns
-    the snapshot's ``(url, text, kind, wayback_result)`` on success, or None if
-    there's no snapshot or the snapshot itself doesn't resolve. The snapshot
-    body goes through the same extraction as a direct fetch — a Wayback page is
-    HTML (with archive.org's own banner chrome on top), so it needs it even more.
+    deliberately do not. A single attempt, no retry loop. The snapshot body goes
+    through the same extraction as a direct fetch — a Wayback page is HTML (with
+    archive.org's own banner chrome on top), so it needs it even more.
 
-    The availability result is handed back so the caller can reuse it instead
-    of asking archive.org the same question twice, and so the snapshot's own
-    staleness flags land on the citation that was satisfied by it.
+    Returns ``(content, wayback_result)``, where ``content`` is the snapshot's
+    ``(url, text, kind)`` on success and None when there is no snapshot or the
+    snapshot itself doesn't resolve. ``wayback_result`` comes back on *both*
+    paths, and that is the point of the two-part return: `not archived` below
+    deliberately covers False and None alike, because with no snapshot URL there
+    is nothing to fetch either way and the fallback fails identically — but what
+    differs is *why*. False is "archive.org has no snapshot", None is "we never
+    got an answer", and the rate limiter's circuit breaker makes the second the
+    common case in a throttled run rather than a rare one. Dropping `wb` here
+    left the caller's ``resolved: False`` citation recording no archive state at
+    all, so a reader could not tell which of the two had happened.
+
+    The availability result is also what lets the caller skip a second lookup
+    for the same URL, and carries the snapshot's own staleness flags onto the
+    citation that was satisfied by it.
     """
     wb = wayback.check(url, timeout=timeout)
     snapshot_url = wb.get("snapshot_url")
-    # `not archived` deliberately covers both False and None here, and the two
-    # cannot be told apart from the outside: with no snapshot URL there is
-    # nothing to fetch either way, so the fallback fails identically. What
-    # differs is *why* — False is "archive.org has no snapshot", None is "we
-    # never got an answer", and the rate limiter's circuit breaker makes the
-    # second common in a throttled run. The distinction is lost at this return
-    # because `wb` is dropped on the failure path; the caller's `resolved:
-    # False` citation therefore records no wayback state at all. Worth carrying
-    # `wb` out of here so the citation can say which happened, but that is a
-    # change to this function's contract and belongs in its own commit.
     if not wb.get("archived") or not snapshot_url:
-        return None
+        return None, wb
     try:
         resp = safe_get(snapshot_url, timeout=timeout)
         resp.raise_for_status()
     except Exception:
-        return None
+        # archive.org answered and *does* have a snapshot; we just could not read
+        # it this run. `wb` still carries the snapshot URL, so the citation can
+        # offer the reader a copy to open by hand even though the pipeline could
+        # not fetch one.
+        return None, wb
     text, kind = _extract_fetched(resp, snapshot_url)
-    return snapshot_url, text, kind, wb
+    return (snapshot_url, text, kind), wb
 
 
 #: Length of the stored page excerpt. Unchanged; only its shape is sanitised.
@@ -516,6 +520,17 @@ def _resolve_known_url(
     ``verified_via`` and ``origin_failure`` so a citation read from the archive
     is never mistaken for one read from the live source.
 
+    When that fallback is attempted and still yields nothing readable, the
+    unresolved result carries the ``wayback`` availability answer anyway, so the
+    citation records which of the three happened: archive.org has no snapshot,
+    the lookup never completed, or a snapshot exists that we could not fetch —
+    and that last one gives the author a copy to open by hand, which is the most
+    useful thing a refused fetch can leave behind. A failure that does not
+    qualify for the fallback at all
+    (404, 5xx, or a refused non-public address) never asked, so it carries no
+    ``wayback`` key — the absence is the signal, and the renderer distinguishes
+    the two.
+
     The fetched body is reduced to readable text (main-article extraction for
     HTML, pypdf for PDFs) before anything else touches it — see
     ``_extract_fetched``. If nothing readable comes out, the citation is marked
@@ -559,16 +574,33 @@ def _resolve_known_url(
         # One except for both shapes of failure: wayback.fallback_reason_for_exception
         # dispatches an HTTPError on its status and everything else on its type.
         reason = wayback.fallback_reason_for_exception(e)
-        fallback = _wayback_fallback_content(known_url, timeout) if reason else None
+        # A falsy `reason` means no lookup was made at all, so there is genuinely
+        # no `wb` to carry — that stays None, distinct from a lookup that ran and
+        # came back None. Collapsing the two would report "the archive.org lookup
+        # did not complete" for a 404, which was never looked up in the first
+        # place and never will be on a re-run.
+        fallback, wb = (
+            _wayback_fallback_content(known_url, timeout) if reason else (None, None)
+        )
         if fallback is None:
             log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
-            return {
+            failed = {
                 "claim": claim,
                 "url": known_url,
                 "resolved": False,
                 "note": f"Known source URL could not be fetched: {e}",
             }
-        _, content, content_kind, wb = fallback
+            if wb is not None:
+                # The fallback was tried and did not produce readable content,
+                # but archive.org's answer is still a fact about this citation:
+                # "no snapshot exists" and "we never found out" need different
+                # follow-up from the author, and without this the citation
+                # recorded neither. Only set when a lookup actually happened —
+                # an absent key means "never asked", which the renderer says
+                # differently.
+                failed["wayback"] = wb
+            return failed
+        _, content, content_kind = fallback
         verified_via = "wayback_fallback"
         fallback_reason = reason
 
