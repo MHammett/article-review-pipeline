@@ -2711,10 +2711,10 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python pipeline.py --draft handoff.md --publication myblog\n"
-            "  python pipeline.py --url https://example.com/post --publication myblog\n"
-            "  python pipeline.py --publish pub_handoff.md --publication myblog --publish-live\n"
-            "  python pipeline.py --draft handoff.md --publication myblog --verbose\n"
+            "  uv run ci-review --draft handoff.md --publication myblog\n"
+            "  uv run ci-review --url https://example.com/post --publication myblog\n"
+            "  uv run ci-review --publish pub_handoff.md --publication myblog --publish-live\n"
+            "  uv run ci-review --draft handoff.md --publication myblog --verbose\n"
         ),
     )
     group = parser.add_mutually_exclusive_group(required=True)

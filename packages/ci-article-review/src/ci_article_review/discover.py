@@ -530,7 +530,7 @@ def main():
     )
     print(
         "To update your configured model, edit models: in configs/user.yaml\n"
-        "and run: python check.py --publication your_publication_name\n"
+        "and run: uv run ci-check --publication your_publication_name\n"
         "\nTo update the built-in registry after a model audit:\n"
         "  1. Edit ci-core's configs/model_registry.yaml: superseded, newer_available\n"
         "  2. Bump registry_date to today's date\n"
