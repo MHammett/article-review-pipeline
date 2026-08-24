@@ -48,27 +48,34 @@ api_keys:
 #     model without removing its API key.  Simple-form entries are unaffected —
 #     you can mix forms.
 #
-# Current model IDs (June 2026):
-#   OpenAI:      gpt-5.5 ($5/$30 /MTok), gpt-5.4 ($2.50/$15), gpt-5.4-mini ($0.75/$4.50)
-#              o4-mini reasoning ($1.10/$4.40), o3 reasoning ($10/$40)
+# Current model IDs (August 2026):
+#   OpenAI:      gpt-5.6-sol ($5/$30 /MTok), gpt-5.6-terra ($2/$12), gpt-5.6-luna ($0.20/$1.20)
+#              Sol/Terra/Luna replaced 5.5/5.4/5.4-mini on 2026-07-09 at matching tiers;
+#              Terra and Luna then got price cuts on 2026-07-30 (rates above are post-cut).
 #   Gemini:      gemini-2.5-pro ($1.25/$10), gemini-2.5-flash ($0.30/$2.50), gemini-2.5-flash-lite ($0.10/$0.40)
-#              Note: gemini-3.5-flash does NOT exist in Vertex AI as of June 2026.
+#              Note: Gemini 3 Flash and 3.1 Pro are preview-only on Vertex AI as of Aug 2026 —
+#              not used here yet. 2.5-family retirement date is 2026-10-16.
 #   Mistral:     mistral-large-latest (~$3/$9), mistral-small-latest (~$0.10/$0.30)
-#              magistral-medium-latest (native thinking), magistral-small-latest
-#              Note: reasoning_effort is NOT supported on any Mistral model (API rejects it).
-#              Magistral models think automatically — no parameter needed.
+#              mistral-medium-3-5 (reasoning_effort "high" or "none" only)
+#              Note: reasoning_effort is NOT supported on most Mistral models (API rejects it) —
+#              mistral-medium-3-5 is the one exception, and litellm needs an explicit
+#              allowed_openai_params escape hatch to send it (see ci_core/llm/client.py).
 #   Perplexity:  sonar-reasoning-pro, sonar-pro, sonar, sonar-deep-research
-#   Grok:        grok-4.3 ($1.25/$2.50), grok-4.20-0309-reasoning ($1.25/$2.50, same price)
-#   Claude:      claude-opus-4-8 ($5/$25), claude-sonnet-4-6 ($3/$15), claude-haiku-4-5-20251001 ($1/$5)
+#   Grok:        grok-4.6 ($2/$6, released 2026-08-12), grok-4.3 ($1.25/$2.50, lighter/non-reasoning)
+#              grok-4.6 has a real reasoning_effort parameter (low/medium/high/xhigh); older
+#              grok models selected reasoning via a separate "-reasoning" model name instead.
+#   Claude:      claude-opus-5 ($5/$25), claude-sonnet-5 ($2/$10), claude-haiku-4-5-20251001 ($1/$5)
+#              opus-5/sonnet-5 replaced opus-4-8/sonnet-4-6 in 2026-06/07; sonnet-5 is
+#              cheaper than sonnet-4-6 was ($2/$10 vs $3/$15), opus-5 is the same price.
 #
 # Simple form (default):
 models:
-  openai: gpt-5.4
+  openai: gpt-5.6-terra
   gemini: gemini-2.5-flash
   mistral: mistral-large-latest
   perplexity: sonar-reasoning-pro
   grok: grok-4.3
-  claude: claude-opus-4-8
+  claude: claude-opus-5
 
 # To disable a model without removing its API key, use the extended form:
 #
@@ -78,7 +85,7 @@ models:
 #
 #  claude:
 #    enabled: false
-#    model: claude-opus-4-8
+#    model: claude-opus-5
 
 # To restrict which prompt domains a model runs (overrides thoroughness preset):
 #
@@ -94,30 +101,30 @@ models:
 # Set timeout_seconds on a model only to OVERRIDE the formula for that model.
 #
 # OpenAI — reasoning.effort: none | low | medium | high | xhigh
-# Supported on gpt-5.x models.  Default is "medium" on gpt-5.5.
+# Supported on gpt-5.x models.  Default is "medium" on gpt-5.6-sol.
 #
 #  openai:
-#    model: gpt-5.4
+#    model: gpt-5.6-terra
 #    reasoning_effort: medium   # "none" | "low" | "medium" | "high" | "xhigh"
 #    timeout_seconds: 300
 #
 # Claude — thinking mode depends on model generation:
 #
-#   Adaptive thinking (claude-opus-4-8, claude-opus-4-7, claude-fable-5, claude-sonnet-4-6):
+#   Adaptive thinking (claude-opus-5, claude-sonnet-5, claude-opus-4-8, claude-fable-5):
 #     Always on — no thinking_budget needed.  Control depth via effort parameter.
-#     Sonnet 4.6 uses the adaptive path; extended thinking is deprecated for it.
+#     Sonnet 5 uses the adaptive path; extended thinking is deprecated for it.
 #
 #   Extended thinking (claude-haiku-4-5-20251001 and earlier):
 #     Opt-in via thinking_budget.  Beta header is added automatically.
-#     Do NOT use thinking_budget on Opus 4.8+ or Sonnet 4.6 — use effort instead.
+#     Do NOT use thinking_budget on Opus 4.8+/5 or Sonnet 4.6+/5 — use effort instead.
 #
 #  claude:
-#    model: claude-opus-4-8
+#    model: claude-opus-5
 #    effort: high               # "low" | "medium" | "high" — adaptive thinking depth
 #    timeout_seconds: 360
 #
 #  claude:
-#    model: claude-sonnet-4-6
+#    model: claude-sonnet-5
 #    effort: medium             # adaptive thinking (recommended); do NOT use thinking_budget
 #    timeout_seconds: 360
 #
@@ -132,9 +139,12 @@ models:
 #    thinking_budget: 8192      # 0 = disable thinking; omit = dynamic default
 #    timeout_seconds: 180
 #
-# Grok — reasoning is model-selection based. Use the reasoning variant for CoT;
-# reasoning_effort is not a supported Grok parameter.
-#  grok: grok-4.20-0309-reasoning      # CoT variant (same price as grok-4.3)
+# Grok — grok-4.6 (released 2026-08-12) has a real reasoning_effort parameter
+# (low/medium/high/xhigh, default high) — earlier Grok models selected reasoning
+# via a separate model name instead. Not yet verified against litellm's xAI
+# parameter allowlist here (see the Grok note in configs/presets.yaml); until
+# then, just switching the model name gets the API's own default ("high").
+#  grok: grok-4.6      # replaces grok-4.20-0309-reasoning as the reasoning-capable choice
 #
 # Mistral — only mistral-medium-3-5 supports reasoning_effort, and only "high"/"none".
 # (magistral-medium-latest is deprecated; mistral-medium-3-5-latest does not exist.)
