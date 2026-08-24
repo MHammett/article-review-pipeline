@@ -147,3 +147,43 @@ def compute_all(char_count, model_configs, task_ceiling_seconds, config=None):
             config=config,
         )
     return out
+
+
+def flag_stale_overrides(
+    char_count, model_configs, task_ceiling_seconds, config=None, ratio=0.5
+):
+    """Explicit ``timeout_seconds`` overrides that undercut what the formula
+    would compute for the model's *current* effort and this draft's size.
+
+    This is the failure mode that hit perplexity (fixed 2026-08-16, see
+    configs/user.example.yaml's note on it) and claude (fixed 2026-08-18,
+    losing 3 of 5 domains on a real run): a ``timeout_seconds`` set while a
+    provider ran light gets left behind after that provider's preset moves to
+    a heavier effort or a grounded/reasoning model, and ``compute_all`` treats
+    any explicit value as authoritative — so the formula never gets a chance
+    to say the override is now too tight. This does not run automatically; a
+    caller logs its findings so an operator sees them.
+
+    Returns ``[(provider, override_seconds, formula_seconds), ...]`` for every
+    enabled model whose override sits below ``ratio`` of the unclamped formula
+    value. Silent about models with no override — that is the normal,
+    recommended state.
+    """
+    out = []
+    for provider, cfg in (model_configs or {}).items():
+        if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+            continue
+        explicit = cfg.get("timeout_seconds")
+        if explicit is None:
+            continue
+        effort = cfg.get("reasoning_effort") or cfg.get("effort")
+        formula = compute_timeout(
+            char_count,
+            cfg.get("model", ""),
+            effort,
+            task_ceiling_seconds,
+            config=config,
+        )
+        if explicit < ratio * formula:
+            out.append((provider, int(explicit), formula))
+    return out

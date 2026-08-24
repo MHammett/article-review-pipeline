@@ -142,6 +142,64 @@ class TestComputeAll:
         assert a["x"] == b["x"]
 
 
+class TestFlagStaleOverrides:
+    """Catches the perplexity/claude failure mode: an explicit timeout_seconds
+    left over from a lighter preset, silently undercutting what the formula
+    would now compute for the model's current effort."""
+
+    def test_flags_an_override_far_below_the_formula(self):
+        # claude at effort=high, ANCHOR size: formula computes well above 240s
+        # (base 60 x model 1.0 x effort-high 3.5 x variance 2.5 = 525s at this
+        # anchor size's 1.0 multiplier) -- the actual 2026-08-18 bug.
+        cfgs = {
+            "claude": {
+                "model": "claude-opus-4-8",
+                "effort": "high",
+                "timeout_seconds": 240,
+            }
+        }
+        flagged = tm.flag_stale_overrides(ANCHOR, cfgs, CEILING)
+        assert len(flagged) == 1
+        provider, override, formula = flagged[0]
+        assert provider == "claude"
+        assert override == 240
+        assert formula > 240 * 2  # comfortably below the 0.5 ratio, not a near-miss
+
+    def test_silent_when_no_override_present(self):
+        cfgs = {"claude": {"model": "claude-opus-4-8", "effort": "high"}}
+        assert tm.flag_stale_overrides(ANCHOR, cfgs, CEILING) == []
+
+    def test_silent_when_override_is_generous(self):
+        # An override comfortably above the formula is a deliberate ceiling,
+        # not a stale one -- must not be flagged.
+        cfgs = {"gemini": {"model": "gemini-2.5-pro", "timeout_seconds": 100000}}
+        assert tm.flag_stale_overrides(ANCHOR, cfgs, CEILING) == []
+
+    def test_silent_for_disabled_models(self):
+        cfgs = {
+            "claude": {
+                "model": "claude-opus-4-8",
+                "effort": "high",
+                "timeout_seconds": 240,
+                "enabled": False,
+            }
+        }
+        assert tm.flag_stale_overrides(ANCHOR, cfgs, CEILING) == []
+
+    def test_ratio_is_configurable(self):
+        # A 240s override against a formula of ~525s is 0.46x -- flagged at the
+        # default 0.5 ratio, not flagged at a looser 0.4 ratio.
+        cfgs = {
+            "claude": {
+                "model": "claude-opus-4-8",
+                "effort": "high",
+                "timeout_seconds": 240,
+            }
+        }
+        assert tm.flag_stale_overrides(ANCHOR, cfgs, CEILING, ratio=0.5) != []
+        assert tm.flag_stale_overrides(ANCHOR, cfgs, CEILING, ratio=0.1) == []
+
+
 class TestGlobalCeiling:
     """The parallel batch's outer wall-clock bound (pipeline._global_ceiling)."""
 
