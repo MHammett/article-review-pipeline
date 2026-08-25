@@ -456,7 +456,20 @@ def _provider_params(provider, cfg, response_schema=None):
                 # would hide the next parameter mismatch too.
                 params["allowed_openai_params"] = ["reasoning_effort"]
         if provider == "mistral":
-            params["max_tokens"] = int(cfg.get("max_tokens", 8000))
+            # Default scales with effort rather than a flat cap. Measured
+            # 2026-08-18 on a maximum-preset run (135514 chars, effort=high):
+            # 4 of 5 domains hit exactly 8000 output tokens and got cut off
+            # mid-JSON (salvage found nothing recoverable); the one domain
+            # that finished used 7231, just under the old ceiling. The model
+            # itself supports far more (mistral-medium-3-5's real
+            # max_output_tokens is 262144 per litellm's model map) — 8000 was
+            # a self-imposed cap, not a provider limit. 16000 matches the
+            # budget claude's own effort="high" path already uses
+            # (_provider_params above) and is still 16x below the real
+            # ceiling; raise cfg["max_tokens"] explicitly if a domain still
+            # truncates at 16000.
+            default_max_tokens = 16000 if effort == "high" else 8000
+            params["max_tokens"] = int(cfg.get("max_tokens", default_max_tokens))
 
         # Ask the provider to guarantee JSON where it can. A schema, when the
         # caller supplied one, is strictly better and is applied below for every

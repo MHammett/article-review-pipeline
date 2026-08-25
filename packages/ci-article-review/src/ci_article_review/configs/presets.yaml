@@ -21,8 +21,21 @@
 #
 # Mistral note: mistral-medium-3-5 only accepts reasoning_effort "high" or "none".
 #   "low" and "medium" return 400. Standard models do not support reasoning_effort at all.
-# Grok note: reasoning is model-selection based. Use grok-4.20-0309-reasoning for CoT;
-#   reasoning_effort is not a supported Grok API parameter.
+# Grok note: grok-4.6 (released 2026-08-12, replacing 4.20-reasoning below) is the
+#   first Grok model with a real reasoning_effort parameter (low/medium/high/xhigh,
+#   default high) instead of reasoning being model-selection only. NOT turned on here
+#   yet — client.py already forwards reasoning_effort for grok generically, but
+#   whether litellm's xAI allowlist accepts it unverified is unconfirmed (mistral
+#   needed an explicit allowed_openai_params escape hatch for the same parameter; grok
+#   may need the same). Verify with a cheap ci-check run (a client-side reject fails in
+#   ~0.05s, same as the mistral case) before setting it in any tier below.
+#
+# 2026-08-18 model refresh: OpenAI's gpt-5.6 family (Sol/Terra/Luna, launched
+# 2026-07-09) replaces 5.5/5.4/5.4-mini at matching price tiers; Anthropic's
+# opus-5/sonnet-5 replace opus-4-8/sonnet-4-6; xAI's grok-4.6 replaces
+# 4.20-0309-reasoning. Gemini and Mistral are UNCHANGED this round: Gemini 3 is
+# still preview-only on Vertex AI as of this date (see the maximum tier's gemini
+# note) and ci-discover found no newer Mistral model than mistral-medium-3-5.
 #
 # stream_read_timeout note: the review adapters stream (SSE). There are now TWO
 # streaming knobs, and they do different jobs (see ci_core/llm/streaming.py):
@@ -74,7 +87,7 @@ economy:
   thoroughness: standard
   models:
     openai:
-      model: gpt-5.4-mini
+      model: gpt-5.6-luna   # was gpt-5.4-mini; matching price tier, 2026-08-18 refresh
     gemini:
       model: gemini-2.5-flash
     mistral:
@@ -90,7 +103,7 @@ standard:
   thoroughness: standard
   models:
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
     gemini:
       model: gemini-2.5-flash
     mistral:
@@ -106,7 +119,7 @@ balanced:
   thoroughness: thorough
   models:
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
       reasoning_effort: low
     gemini:
       model: gemini-2.5-flash
@@ -116,16 +129,16 @@ balanced:
     perplexity:
       model: sonar-reasoning-pro
     grok:
-      model: grok-4.20-0309-reasoning
+      model: grok-4.6   # was grok-4.20-0309-reasoning; see the Grok note above
     claude:
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5   # was claude-sonnet-4-6; 2026-08-18 refresh
       effort: medium
 
 thorough:
   thoroughness: thorough
   models:
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
       reasoning_effort: high
       # No stream_read_timeout override — Responses API + reasoning.summary
       # keeps the default 120s read-gap safe (see the note above).
@@ -154,16 +167,16 @@ thorough:
                                   # here costs nothing in dead-connection detection
                                   # (stream_gap_timeout stays at the 60s default).
     grok:
-      model: grok-4.20-0309-reasoning
+      model: grok-4.6   # was grok-4.20-0309-reasoning; see the Grok note above
     claude:
-      model: claude-opus-4-8
+      model: claude-opus-5   # was claude-opus-4-8; 2026-08-18 refresh, same price
       effort: high
 
 maximum:
   thoroughness: maximum
   models:
     openai:
-      model: gpt-5.5
+      model: gpt-5.6-sol   # was gpt-5.5; matching price tier, 2026-08-18 refresh
       reasoning_effort: xhigh
       # No stream_read_timeout override — live-verified against xhigh (see the
       # note above); Responses API reasoning.summary deltas keep the socket
@@ -171,7 +184,11 @@ maximum:
     gemini:
       model: gemini-2.5-pro
       thinking_budget: 16000
-      # gemini-2.5-pro confirmed available on Vertex AI; gemini-3.x returns 404 there
+      # gemini-2.5-pro confirmed available on Vertex AI; gemini-3.x returns 404 there.
+      # Re-checked 2026-08-18: Gemini 3 Flash is public preview and Gemini 3.1 Pro is
+      # preview-in-Model-Garden on Vertex AI, neither GA — left unchanged rather than
+      # move production traffic onto a preview model. gemini-2.5-pro's retirement date
+      # is 2026-10-16; revisit before then regardless of GA status.
       stream_read_timeout: 260   # grounding (160s default) + thinking_budget 16000 stacks
                                   # extra silent time on top of search latency; observed a
                                   # real timeout at 205.78s on a maximum-preset Vertex AI
@@ -187,7 +204,7 @@ maximum:
       model: sonar-reasoning-pro
       stream_read_timeout: 500   # see the thorough tier's note above
     grok:
-      model: grok-4.20-0309-reasoning
+      model: grok-4.6   # was grok-4.20-0309-reasoning; see the Grok note above
       # xAI Live Search is real and works — asked for the newest litellm release
       # on PyPI, grok said "I do not know" without it and answered with a cited
       # version with it. NOT enabled here because litellm cannot currently send
@@ -197,7 +214,7 @@ maximum:
       # combination is unusable until that is fixed. Filed upstream; see
       # UPSTREAM.md. Flip this on once litellm ships the fix.
     claude:
-      model: claude-opus-4-8
+      model: claude-opus-5   # was claude-opus-4-8; 2026-08-18 refresh, same price
       effort: high
       web_search: [fact_check]   # Same check, same result. fact_check had two
                                   # grounded models out of six; this makes four.

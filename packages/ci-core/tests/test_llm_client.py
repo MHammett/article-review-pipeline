@@ -1021,6 +1021,56 @@ class TestMistralReasoningEscapeHatch:
         assert client.litellm.drop_params is False
 
 
+class TestMistralMaxTokens:
+    """The default scales with effort instead of a flat cap.
+
+    Measured 2026-08-18 on a maximum-preset run (135514 chars, effort=high):
+    4 of 5 mistral domains hit exactly the old 8000-token ceiling and got cut
+    off mid-JSON, unrecoverable by salvage. The model's real limit
+    (mistral-medium-3-5) is 262144 output tokens — 8000 was self-imposed, not
+    a provider constraint.
+    """
+
+    def test_default_is_8000_without_reasoning(self):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call("mistral")
+
+        assert seen["max_tokens"] == 8000
+
+    def test_default_raises_to_16000_at_high_effort(self):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call("mistral", provider_config={"reasoning_effort": "high"})
+
+        assert seen["max_tokens"] == 16000
+
+    def test_explicit_max_tokens_overrides_either_default(self):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call(
+                "mistral",
+                provider_config={"reasoning_effort": "high", "max_tokens": 24000},
+            )
+
+        assert seen["max_tokens"] == 24000
+
+
 class TestWebSearch:
     """Live search on the Responses API.
 
