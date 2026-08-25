@@ -1,6 +1,6 @@
 """Tests for redact — secret scrubbing before error output."""
 
-from ci_core.redact import redact_url_keys, redact_value, truncate_excerpt
+from ci_core.redact import mask_secret, redact_url_keys, redact_value, truncate_excerpt
 
 
 class TestRedactUrlKeys:
@@ -63,3 +63,31 @@ class TestTruncateExcerpt:
     def test_exactly_at_boundary_unchanged(self):
         text = "X" * 2500
         assert truncate_excerpt(text, head=2000, tail=500) == text
+
+
+class TestMaskSecret:
+    def test_default_head_and_tail_lengths(self):
+        key = "sk-proj-abcdefghijklmnopqrstuvwxyz1234"
+        assert mask_secret(key) == "sk-proj-...1234"
+
+    def test_never_leaks_a_substring_from_the_middle(self):
+        key = "sk-proj-" + "x" * 40 + "kA12"
+        out = mask_secret(key)
+        assert out.startswith("sk-proj-")
+        assert out.endswith("kA12")
+        assert key[10:-4] not in out
+
+    def test_short_value_is_fully_masked_not_partially_revealed(self):
+        out = mask_secret("shortkey")
+        assert out == "*" * len("shortkey")
+        assert "short" not in out
+        assert "key" not in out
+
+    def test_empty_string_reports_not_set(self):
+        assert mask_secret("") == "(not set)"
+
+    def test_none_reports_not_set(self):
+        assert mask_secret(None) == "(not set)"
+
+    def test_custom_head_and_tail(self):
+        assert mask_secret("abcdefghijklmnop", head=2, tail=2) == "ab...op"
