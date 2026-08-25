@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from ci_core.config_helpers import (
     PackagedConfigError,
@@ -9,8 +9,46 @@ from ci_core.config_helpers import (
     normalize_model_configs as _normalize_model_configs,
     resolve_env_recursive as _resolve_env_recursive,
 )
+from ci_core.env_provenance import (
+    provenance as _env_var_provenance,
+    shadowed_mismatches as _shadowed_mismatches,
+    snapshot as _snapshot_dotenv,
+)
+from ci_core.redact import mask_secret
 
-load_dotenv()
+# Resolved once so the snapshot below and the actual load agree on exactly
+# which file (if any) is in play -- see ci_core.env_provenance for why this
+# matters: the snapshot has to be taken before load_dotenv() touches the OS
+# environment.
+_DOTENV_PATH = find_dotenv()
+_ENV_SNAPSHOT = _snapshot_dotenv(_DOTENV_PATH)
+load_dotenv(_DOTENV_PATH or None)
+
+
+def warn_env_shadowing(env_snapshot=None):
+    """Print a loud, unprompted warning for every OS env var that's silently
+    overriding a *different* value from the .env file.
+
+    No flag needed -- a silent, load-bearing config mismatch like this costs
+    real money if nobody notices (see this module's incident history in
+    ci_core.env_provenance). Called once below against the real environment;
+    tests pass ``env_snapshot`` to exercise specific scenarios without
+    touching process state.
+    """
+    snap = _ENV_SNAPSHOT if env_snapshot is None else env_snapshot
+    for m in _shadowed_mismatches(snap):
+        print(
+            f"WARNING: {m['var_name']} is set in the OS environment, and its "
+            "value differs from what's in your .env file. The .env value is "
+            "being silently ignored (python-dotenv's load_dotenv() never "
+            "overrides an existing OS environment variable). If you edited "
+            ".env expecting it to take effect, it will not until the OS-level "
+            "variable is unset. Run `uv run ci-check --publication <name> "
+            "--show-keys` to see exactly which value each provider will use."
+        )
+
+
+warn_env_shadowing()
 
 REQUIRED_USER_KEYS = [
     # LanguageTool is intentionally absent — grammar_pass is optional.
@@ -60,6 +98,97 @@ def load_user_config(config_dir="configs"):
     config = _resolve_env_recursive(config)
     _validate_user_config(config)
     return config
+
+
+def _iter_leaf_strings(node, path=()):
+    """Yield (field_path_tuple, value) for every leaf under a nested dict."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _iter_leaf_strings(v, path + (k,))
+    elif node is not None:
+        yield path, node
+
+
+def describe_api_key_sources(config_dir="configs", env_snapshot=None):
+    """Masked, provenance-annotated view of every ``api_keys.*`` entry in
+    ``user.yaml`` -- what a run would actually send as credentials, and where
+    each value came from.
+
+    Reads the file directly rather than through ``load_user_config()``, so it
+    still works when required keys are missing -- the point is diagnosing a
+    key that looks wrong *before* validation gets a chance to complain about
+    something else. Returns a list of dicts in file order, one per leaf under
+    ``api_keys``:
+
+      provider      -- e.g. "openai"
+      field         -- e.g. "api_key" ("username" for languagetool, etc.)
+      var_name      -- the ``${VAR_NAME}`` this entry references, or None if
+                        the value is written literally in user.yaml
+      masked_value  -- the resolved value, masked for display (see
+                        ci_core.redact.mask_secret)
+      source        -- "env" (came from the .env file, unshadowed), "os_env"
+                        (a pre-existing OS environment variable -- either
+                        there's no conflicting .env entry, or there is and it
+                        happens to match), "os_env_shadowing_env_file" (the
+                        loud case: a pre-existing OS env var is silently
+                        overriding a *different* .env value), "literal"
+                        (hardcoded directly in user.yaml, not from an env
+                        var), or "unset" (references an env var that isn't
+                        set anywhere).
+    """
+    snap = _ENV_SNAPSHOT if env_snapshot is None else env_snapshot
+    path = Path(config_dir) / "user.yaml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"User config not found at {path}.\n"
+            "Copy configs/user.example.yaml to configs/user.yaml and fill in your API keys.\n"
+            "API keys can also be set as environment variables — see .env.example."
+        )
+    raw = _load_yaml(path)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} is empty or not a valid YAML mapping.")
+
+    entries = []
+    for field_path, raw_value in _iter_leaf_strings(raw.get("api_keys") or {}):
+        provider, field = field_path[0], ".".join(field_path[1:])
+        if (
+            isinstance(raw_value, str)
+            and raw_value.startswith("${")
+            and raw_value.endswith("}")
+        ):
+            var_name = raw_value[2:-1]
+            prov = _env_var_provenance(snap, var_name)
+            active = prov["active_value"]
+            if active is None:
+                source = "unset"
+            elif prov["mismatched"]:
+                source = "os_env_shadowing_env_file"
+            elif prov["shadowed_by_os_env"]:
+                source = "os_env"
+            elif prov["in_dotenv_file"]:
+                source = "env"
+            else:
+                source = "os_env"
+            entries.append(
+                {
+                    "provider": provider,
+                    "field": field,
+                    "var_name": var_name,
+                    "masked_value": mask_secret(active) if active else "(NOT SET)",
+                    "source": source,
+                }
+            )
+        else:
+            entries.append(
+                {
+                    "provider": provider,
+                    "field": field,
+                    "var_name": None,
+                    "masked_value": mask_secret(raw_value),
+                    "source": "literal",
+                }
+            )
+    return entries
 
 
 def load_publication_config(publication_name, config_dir="configs"):
