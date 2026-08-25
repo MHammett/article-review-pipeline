@@ -134,7 +134,24 @@ A complete worked example — a real published article with every section filled
 out — ships alongside it at
 `handoff_templates/examples/draft_submission.filled-example.md`. Read it to see
 what a good PRE-DRAFT ANALYSIS looks like; do not edit it as your starting
-point.
+point. It's also ~72,000 characters, so a `maximum`-preset run against it costs
+$3-5 — fine for a real submission, wasteful for "did this code change work."
+
+For routine dev-loop testing — "did this code change work" — use
+`handoff_templates/examples/draft_submission.short-example.md` instead: a
+~1,000-word fixture, still with real citations, a genuine argument structure,
+and one deliberately planted overreach so a healthy run has something to
+catch. A `--cost-preset economy` run against it costs about $0.03-0.05,
+live-verified end to end (fact_check, voice_style, completeness,
+argument_integrity, and red_team all produced real findings, including
+catching the planted overreach).
+
+For smoke-testing a pipeline *code* change instead of a draft, use
+`handoff_templates/examples/draft_submission.short-example.full-coverage.md` —
+a similarly short fixture deliberately engineered to touch more of the
+pipeline's edges in one pass: a mix of resolving, dead, and mismatched
+citations, a claim that needs a live web search, an AI-speak passage several
+models should flag in consensus, and a vague SEO heading.
 
 **6. Publish an approved draft:**
 
