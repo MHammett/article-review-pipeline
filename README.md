@@ -98,6 +98,8 @@ uv run ci-check --publication your_publication_name
 
 Makes one minimal call to each configured service and reports pass/fail with specific error messages before you run a real article through.
 
+If a review ever seems to be using the wrong account or org, run `ci-check --publication your_publication_name --show-keys` before anything else. It prints a masked view of every configured key (`sk-proj-xV...xkA` style) and, critically, where each one actually came from — the `.env` file, or a pre-existing OS environment variable that silently shadowed it. `load_dotenv()` never overrides an OS-level variable of the same name, so editing `.env` has zero effect if that variable is already set in your shell or user profile; `--show-keys` makes that visible in seconds instead of days. The same mismatch also prints an unprompted `WARNING` on every `ci-check`/`ci-review` run, no flag required.
+
 **Check for newer models** (optional, run any time):
 
 ```powershell
@@ -426,7 +428,10 @@ content-intelligence/
 │   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
 │   │   │   ├── concurrency.py    run_with_timeout — the wall-clock backstop both
 │   │   │   │                     applications run their provider calls under
-│   │   │   ├── redact.py         scrubs API keys from error output before logging
+│   │   │   ├── redact.py         scrubs API keys from error output before logging;
+│   │   │   │                     mask_secret() masks a key for display (ci-check --show-keys)
+│   │   │   ├── env_provenance.py detects a pre-existing OS env var silently shadowing
+│   │   │   │                     a .env value (python-dotenv's override=False)
 │   │   │   ├── console.py        force_utf8_stdio — every CLI calls it first, so a
 │   │   │   │                     cp1252 Windows console cannot kill a report mid-print
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
