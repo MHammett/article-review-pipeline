@@ -98,6 +98,34 @@ Copy `.env.example` to `.env`, fill in the values. The pipeline loads `.env` aut
 
 ---
 
+### API key precedence
+
+Four tiers, most to least specific — a value at a higher tier overrides the same provider's value at every lower one:
+
+1. **`--api-key` on the CLI** (`ci-review` and `ci-check`, repeatable). Highest precedence, scoped to that one invocation — nothing is written to disk. `PROVIDER=VALUE` is shorthand for the common case, the provider's `api_key` field: `openai`, `gemini`, `mistral`, `grok`, `perplexity`, `claude`. A credential with more than one field needs the explicit `PROVIDER.FIELD=VALUE` form: `languagetool.username`, `languagetool.api_key`, `archive_org.access_key`, `archive_org.secret_key`.
+   ```powershell
+   uv run ci-review --draft handoff.md --publication mypub --api-key openai=sk-proj-...
+   uv run ci-review --draft handoff.md --publication mypub --api-key languagetool.username=me@example.com
+   ```
+   WordPress credentials aren't under `api_keys` (they live in `publication.wordpress`), so they get their own flags instead: `--wp-user` / `--wp-password`, valid with `--publish`.
+2. **A publication config's own `api_keys` section.** Same shape as `user.yaml`'s, and it only has to name the providers/fields it overrides — anything it doesn't mention falls through to `user.yaml`. Useful when one publication bills to a different OpenAI project, say. (WordPress credentials don't have a separate override tier here — a publication config's own `wordpress.*` fields already *are* this tier, which is what `--wp-user`/`--wp-password` sit above.)
+   ```yaml
+   # configs/mypub.yaml
+   api_keys:
+     openai:
+       api_key: ${MYPUB_OPENAI_API_KEY}
+   ```
+3. **`user.yaml`'s `api_keys` section**, `${VAR}`-resolved against `.env` (see below). The shared fallback every publication sits on top of.
+4. **A bare OS environment variable**, when nothing above defines it — the pipeline still runs, it just isn't pinned to a specific `.env` entry or config.
+
+Within tier 3, `.env` always wins over a same-named OS environment variable — not the reverse. If both define `OPENAI_API_KEY` with different values, the `.env` value is what gets used, so editing `.env` always takes effect regardless of what's already set in your shell or user profile. `ci-check --publication <name> --show-keys` prints exactly which value each provider resolved to and, if `.env` and the OS disagree, an unprompted `NOTE` names the variable — informational, since the outcome is no longer ambiguous, but worth confirming the winner is the one you meant.
+
+This precedence isn't unique to `ci-review`/`ci-check` — `ci-discover` and `ci-style-profile` (package `ci-style-profile`) read the same `configs/user.yaml` and `.env`, and resolve `${VAR}` the same `.env`-wins way (tiers 3–4; they don't have a publication-config or `--api-key` concept of their own, so tiers 1–2 don't apply there).
+
+This replaced an earlier design where a pre-existing OS-level variable silently beat `.env` with no override available short of unsetting the shell variable — the exact shape of a real incident where a stale `OPENAI_API_KEY` billed the wrong project for days before anyone noticed. `--api-key` and per-publication `api_keys` exist so an intentional override now has a place to go instead.
+
+---
+
 ### Model configuration
 
 Two forms are accepted. Mix and match — each model can use either form independently.
@@ -832,6 +860,7 @@ Open `configs/your_publication_name.yaml`. Key fields:
 | `wordpress.site_url` | `https://yoursite.com` |
 | `wordpress.username` | Your WordPress login username |
 | `wordpress.application_password` | The application password from your WordPress profile |
+| `api_keys` | Optional — overrides specific providers' credentials from `user.yaml` for this publication only. See [API key precedence](#api-key-precedence). |
 
 **`seo_rules`** is optional — omit it to use the defaults. Add it when your publication has different SEO standards from the defaults:
 

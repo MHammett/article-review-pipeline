@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from ci_core.concurrency import run_with_timeout
+from ci_core.concurrency import run_all_with_timeout, run_with_timeout
 
 
 class TestContract:
@@ -134,4 +134,130 @@ class TestProcessExit:
         assert elapsed >= self.ABANDONED_SECONDS - 2, (
             f"the executor form exited in {elapsed:.1f}s — it used to be held "
             f"open for the full {self.ABANDONED_SECONDS}s by the atexit join"
+        )
+
+
+class TestRunAllWithTimeout:
+    """The N-way sibling of run_with_timeout, for pipeline.py's parallel
+    review-call fan-out and any other caller that used to hand a whole batch
+    to a ``with ThreadPoolExecutor() as executor:`` block."""
+
+    def test_returns_every_value_on_success(self):
+        jobs = [("a", lambda: 1, 5), ("b", lambda: 2, 5)]
+        results = run_all_with_timeout(jobs, global_timeout=5)
+        assert results == {"a": (1, None), "b": (2, None)}
+
+    def test_reraises_what_the_call_raised(self):
+        def _boom():
+            raise ValueError("provider said no")
+
+        results = run_all_with_timeout([("a", _boom, 5)], global_timeout=5)
+        value, error = results["a"]
+        assert value is None
+        assert isinstance(error, ValueError)
+        assert "provider said no" in str(error)
+
+    def test_own_timeout_fires_before_the_global_one(self):
+        results = run_all_with_timeout(
+            [("slow", lambda: time.sleep(5), 0.2)], global_timeout=10
+        )
+        value, error = results["slow"]
+        assert value is None
+        assert isinstance(error, TimeoutError)
+        assert "Timed out after 0.2s" in str(error)
+
+    def test_global_timeout_fires_before_an_individual_ones(self):
+        """A call whose own budget hasn't run out yet still gets cut off once
+        the group deadline arrives — the same shape as pipeline.py's global
+        ceiling cancelling calls that are individually still within budget."""
+        results = run_all_with_timeout(
+            [("slow", lambda: time.sleep(5), 30)], global_timeout=0.2
+        )
+        value, error = results["slow"]
+        assert value is None
+        assert isinstance(error, TimeoutError)
+        assert "Exceeded global timeout of 0.2s" in str(error)
+
+    def test_a_none_own_timeout_still_respects_the_global_one(self):
+        """A model with no calibrated per-call budget must not be able to
+        stall the whole batch forever — the group deadline is the backstop."""
+        results = run_all_with_timeout(
+            [("uncapped", lambda: time.sleep(5), None)], global_timeout=0.2
+        )
+        value, error = results["uncapped"]
+        assert value is None
+        assert isinstance(error, TimeoutError)
+        assert "Exceeded global timeout of 0.2s" in str(error)
+
+    def test_one_slow_job_does_not_hold_up_the_others(self):
+        """The whole point: fast jobs are not blocked waiting on a slow one."""
+        finished_order = []
+
+        def _slow():
+            time.sleep(2)
+            finished_order.append("slow")
+            return "slow"
+
+        def _fast():
+            finished_order.append("fast")
+            return "fast"
+
+        started = time.monotonic()
+        results = run_all_with_timeout(
+            [("slow", _slow, 0.2), ("fast", _fast, 5)], global_timeout=5
+        )
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.5
+        assert results["fast"] == ("fast", None)
+        assert isinstance(results["slow"][1], TimeoutError)
+        assert finished_order == ["fast"]
+
+    def test_jobs_actually_run_concurrently(self):
+        """Two 1s jobs must take about 1s total, not 2 — proves these are
+        parallel threads, not a sequential loop with a shared deadline."""
+        started = time.monotonic()
+        jobs = [(str(i), lambda: time.sleep(1), 5) for i in range(4)]
+        run_all_with_timeout(jobs, global_timeout=5)
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0
+
+
+class TestRunAllWithTimeoutProcessExit:
+    """Same regression as TestProcessExit, for the N-way form: an abandoned
+    job in the group must not hold the interpreter open either."""
+
+    ABANDONED_SECONDS = 20
+    MUST_EXIT_WITHIN = 10
+
+    def test_an_abandoned_job_does_not_hold_the_process_open(self):
+        script = textwrap.dedent(
+            """
+            import time
+            from ci_core.concurrency import run_all_with_timeout
+
+            results = run_all_with_timeout(
+                [("stuck", lambda: time.sleep({abandoned}), 0.5)],
+                global_timeout=0.5,
+            )
+            print("backstop fired" if results["stuck"][1] else "no backstop")
+            print("exiting")
+            """
+        ).format(abandoned=self.ABANDONED_SECONDS)
+
+        t0 = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=self.ABANDONED_SECONDS + 30,
+        )
+        elapsed = time.monotonic() - t0
+
+        assert proc.returncode == 0, proc.stderr
+        assert "backstop fired" in proc.stdout
+        assert "exiting" in proc.stdout
+        assert elapsed < self.MUST_EXIT_WITHIN, (
+            f"process took {elapsed:.1f}s to exit with a {self.ABANDONED_SECONDS}s "
+            f"abandoned job still running in the group"
         )

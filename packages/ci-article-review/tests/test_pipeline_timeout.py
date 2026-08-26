@@ -8,45 +8,48 @@ eventually raised.
 
 from __future__ import annotations
 
-import concurrent.futures
 import threading
 import time
 
 from unittest.mock import patch
 
-import pytest
 
 import ci_article_review.pipeline as pipeline
 
 
-class TestRunWithTimeout:
-    def test_returns_result_when_under_budget(self):
-        from ci_article_review.pipeline import _run_with_timeout
+class TestRunReviewsInParallel:
+    """Exercises ``_run_reviews_in_parallel`` — the pipeline's real fan-out for
+    the (model, domain) review calls, not a standalone reimplementation of the
+    pattern. It delegates the daemon-thread mechanics to
+    :func:`ci_core.concurrency.run_all_with_timeout`, which has its own
+    thorough coverage (including the subprocess-level "does not hold the
+    interpreter open" regression); these tests are about this function's own
+    bookkeeping — result shape, per-model timeout lookup, and that a slow call
+    doesn't stall its batch-mates.
+    """
 
-        assert _run_with_timeout(lambda: {"ok": True}, 5, "claude:accuracy") == {
-            "ok": True
-        }
+    def test_returns_result_when_under_budget(self):
+        runners = [("claude:accuracy", lambda: {"ok": True})]
+        results = pipeline._run_reviews_in_parallel(runners, {}, {}, task_timeout=5)
+        assert results["claude:accuracy"] == {"ok": True}
 
     def test_propagates_exceptions_from_the_task(self):
-        from ci_article_review.pipeline import _run_with_timeout
-
         def _boom():
             raise ValueError("adapter blew up")
 
-        with pytest.raises(ValueError, match="adapter blew up"):
-            _run_with_timeout(_boom, 5, "claude:accuracy")
+        runners = [("claude:accuracy", _boom)]
+        results = pipeline._run_reviews_in_parallel(runners, {}, {}, task_timeout=5)
+        assert results["claude:accuracy"]["failed"] is True
+        assert "adapter blew up" in results["claude:accuracy"]["error"]
 
     def test_gives_up_before_the_slow_call_completes(self):
         """The backstop must bound wall-clock time, not just detect the overrun.
 
-        The context-manager form of ThreadPoolExecutor re-joins the worker on
-        the way out, so the TimeoutError was previously raised only *after* the
-        slow call had run to completion. Under streaming the socket timeout is
-        only the inter-token read gap, so a model that keeps dribbling tokens
-        has nothing else to stop it.
+        Under streaming the socket timeout is only the inter-token read gap, so
+        a model that keeps dribbling tokens has nothing else to stop it — the
+        thread backstop has to be what returns control, not the call itself
+        finishing.
         """
-        from ci_article_review.pipeline import _run_with_timeout
-
         finished = threading.Event()
 
         def _slow():
@@ -54,54 +57,66 @@ class TestRunWithTimeout:
             finished.set()
             return {"failed": False}
 
+        runners = [("claude:accuracy", _slow)]
+        model_configs = {"claude": {"timeout_seconds": 0.2}}
+
         started = time.monotonic()
-        with pytest.raises(TimeoutError, match="Timed out after 0.2s"):
-            _run_with_timeout(_slow, 0.2, "claude:accuracy")
+        results = pipeline._run_reviews_in_parallel(
+            runners, {}, model_configs, task_timeout=5
+        )
         gave_up_after = time.monotonic() - started
 
         assert gave_up_after < 1.5
+        assert results["claude:accuracy"]["failed"] is True
+        assert "timed out after 0.2s" in results["claude:accuracy"]["error"].lower()
         # The abandoned call is genuinely still running — that is the accepted
-        # tradeoff (a running thread cannot be killed), not a leak.
+        # tradeoff (a running thread cannot be killed), not a leak. Because it
+        # runs on a daemon thread, it cannot hold the interpreter open either
+        # (see ci_core.concurrency for the regression test proving that).
         assert not finished.is_set()
         finished.wait(timeout=5)
 
     def test_one_slow_task_does_not_hold_up_the_batch(self):
         """Shape of the pipeline's parallel block: fast passes are not blocked.
 
-        The outer executor's own ``with`` exit joins its workers, so a backstop
-        that only *detects* the overrun would stall the whole batch until the
+        Previously the outer executor's own ``with`` exit joined its workers —
+        including ones that had already been given up on — so a backstop that
+        only *detected* the overrun would stall the whole batch until the
         slowest call finished.
         """
-        from ci_article_review.pipeline import _run_with_timeout
 
         def _slow():
             time.sleep(2)
             return {"failed": False}
 
         runners = [
-            ("claude:accuracy", _slow, 0.2),
-            ("openai:structure", lambda: {"failed": False}, 5),
+            ("claude:accuracy", _slow),
+            ("openai:structure", lambda: {"failed": False}),
         ]
+        model_configs = {"claude": {"timeout_seconds": 0.2}}
 
         started = time.monotonic()
-        results: dict[str, dict] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_name = {
-                executor.submit(_run_with_timeout, fn, timeout, name): name
-                for name, fn, timeout in runners
-            }
-            for future in concurrent.futures.as_completed(future_to_name):
-                name = future_to_name[future]
-                try:
-                    results[name] = future.result()
-                except Exception as e:
-                    results[name] = {"failed": True, "error": str(e)}
+        results = pipeline._run_reviews_in_parallel(
+            runners, {}, model_configs, task_timeout=5
+        )
         batch_elapsed = time.monotonic() - started
 
         assert batch_elapsed < 1.5
         assert results["openai:structure"] == {"failed": False}
         assert results["claude:accuracy"]["failed"] is True
         assert "timed out" in results["claude:accuracy"]["error"].lower()
+
+    def test_an_explicit_null_task_timeout_does_not_crash(self):
+        """``task_timeout_seconds: null`` in user.yaml is a real, reachable
+        value — config_loader's 180 default only fires when the key is
+        *absent*, not when it is present and null, which is exactly the shape
+        of the PR #105 regression. Computing this runner's own timeout must
+        not raise trying to add a stagger offset to None; it falls back to
+        being bound by the group's global ceiling instead (see
+        ci_core.concurrency.run_all_with_timeout)."""
+        runners = [("claude:accuracy", lambda: {"ok": True})]
+        results = pipeline._run_reviews_in_parallel(runners, {}, {}, task_timeout=None)
+        assert results["claude:accuracy"] == {"ok": True}
 
 
 class TestSameProviderStagger:

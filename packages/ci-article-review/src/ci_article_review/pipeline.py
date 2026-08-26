@@ -40,7 +40,6 @@ if _missing:
     sys.exit(1)
 
 import argparse
-import concurrent.futures
 import logging
 import re
 import time
@@ -50,9 +49,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config_loader import (
+    apply_api_key_overrides,
+    apply_wordpress_overrides,
     load_user_config,
     load_publication_config,
     merge_configs,
+    parse_api_key_overrides,
     validate_publication_name,
 )
 from .handoff_parser import (
@@ -67,7 +69,7 @@ from ci_core import redact
 from ci_core.config_helpers import normalize_model_configs
 from ci_core import llm
 from . import schemas
-from ci_core.concurrency import run_with_timeout
+from ci_core.concurrency import run_all_with_timeout
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from . import live_model_check
@@ -979,20 +981,111 @@ def _global_ceiling(per_task_timeouts, retry_delay):
     return max(per_task_timeouts) + retry_delay + 30
 
 
-def _run_with_timeout(fn, timeout, name):
-    """Run ``fn`` under a per-task wall-clock backstop. Raises TimeoutError on expiry.
+def _run_reviews_in_parallel(runners, pipeline_cfg, model_configs, task_timeout):
+    """Fire every (model, domain) review call concurrently and collect results.
 
-    The budget applies to this call alone rather than to the position of its
-    future in a completion queue, and on expiry the call is genuinely abandoned
-    rather than killed — a running thread cannot be killed, and the run stops
-    *waiting* on it now, which is the whole point of a wall-clock backstop.
+    Two budgets bound each call: its own per-model timeout (config key
+    ``timeout_seconds``, falling back to the pipeline-level ``task_timeout``),
+    and a shared global ceiling sized to comfortably clear the slowest one
+    (see :func:`_global_ceiling`). Whichever fires first is recorded as that
+    call's outcome; the other side of the race is simply abandoned rather than
+    killed — a running thread cannot be killed, and stopping *waiting* on it is
+    the whole point of a wall-clock backstop.
 
-    See :mod:`ci_core.concurrency` for why this is a daemon thread and not a
-    single-worker executor. Short version: the executor form left abandoned
-    calls holding the interpreter open at exit, and ``ci-review`` processes were
-    found alive two days after finishing their work.
+    Runs on :func:`ci_core.concurrency.run_all_with_timeout`, i.e. one daemon
+    thread per call, not a ``ThreadPoolExecutor``. A ``with ThreadPoolExecutor``
+    block's own exit — and the atexit hook ``concurrent.futures.thread``
+    registers regardless of how you shut it down — joins every worker with a
+    bare, untimed ``t.join()``, so one abandoned call held the interpreter open
+    for exactly as long as it kept running: measured 2026-08-16 at ``ci-review``
+    processes still alive two days after their report was written. Daemon
+    threads can't do that; an abandoned one goes with the interpreter instead
+    of holding it open.
     """
-    return run_with_timeout(fn, timeout)
+
+    def _per_model_timeout(runner_name):
+        m = runner_name.split(":")[0]
+        return model_configs.get(m, {}).get("timeout_seconds", task_timeout)
+
+    def _configured_model_id(runner_name):
+        m = runner_name.split(":")[0]
+        return model_configs.get(m, {}).get("model", m)
+
+    stagger = pipeline_cfg.get("provider_stagger_seconds", 3)
+    offsets = _stagger_offsets([name for name, _ in runners], stagger)
+    if any(offsets.values()):
+        log.info(
+            "Staggering same-provider calls by %ss to avoid self-inflicted "
+            "rate limiting (max offset %ss)",
+            stagger,
+            max(offsets.values()),
+        )
+
+    def _own_timeout(runner_name):
+        # None is a real, reachable value here — an explicit
+        # `task_timeout_seconds: null` in user.yaml survives config_loader's
+        # 180-default (dict.get only falls back when the key is *absent*, and
+        # this key is present with value None), which is exactly the shape of
+        # the PR #105 regression. run_all_with_timeout treats a None per-call
+        # timeout as "no budget of its own" and falls back to the group's
+        # global_ceiling, so this must not raise trying to add an offset to it.
+        per = _per_model_timeout(runner_name)
+        return per + offsets[runner_name] if per is not None else None
+
+    # The offset is added to the budget, not spent from it: a staggered call
+    # still gets the full timeout its model was calibrated for.
+    runner_timeouts = [
+        (name, _delay_start(fn, offsets[name]), _own_timeout(name))
+        for name, fn in runners
+    ]
+    global_ceiling = _global_ceiling(
+        [t for _, _, t in runner_timeouts if t is not None],
+        pipeline_cfg.get("retry_delay_seconds", 10),
+    )
+
+    raw_results = {}
+    for name, (value, error) in run_all_with_timeout(
+        runner_timeouts, global_ceiling
+    ).items():
+        if error is None:
+            raw_results[name] = value
+            continue
+        per_timeout = _per_model_timeout(name)
+        timed_out = isinstance(error, TimeoutError)
+        hit_global_ceiling = timed_out and "global timeout" in str(error).lower()
+        if hit_global_ceiling:
+            log.error(
+                f"Review pass {name} exceeded global ceiling {global_ceiling}s and was cancelled."
+            )
+            raw_results[name] = {
+                "failed": True,
+                "error": f"Exceeded global timeout of {global_ceiling}s",
+                "model": _configured_model_id(name),
+                "tokens": {},
+                # The call was cancelled at the global ceiling, so we don't know
+                # the true elapsed time — record the ceiling as a lower bound
+                # rather than leaving it None (breaks [CALIBRATION] log parsing).
+                "elapsed_seconds": global_ceiling,
+                "_model": name.split(":")[0],
+                "_domain": name.split(":", 1)[1] if ":" in name else name,
+            }
+        else:
+            log.error(
+                f"Review pass {name} {'timed out after ' + str(per_timeout) + 's' if timed_out else 'raised exception: ' + str(error)}"
+            )
+            raw_results[name] = {
+                "failed": True,
+                "error": str(error),
+                "model": _configured_model_id(name),
+                "tokens": {},
+                # Best available lower bound on elapsed time — the task ran
+                # at least this long before being cancelled. Avoids "elapsed=Nones"
+                # in the [CALIBRATION] log line for timed-out passes.
+                "elapsed_seconds": per_timeout if timed_out else None,
+                "_model": name.split(":")[0],
+                "_domain": name.split(":", 1)[1] if ":" in name else name,
+            }
+    return raw_results
 
 
 def run_draft_pipeline(
@@ -1007,6 +1100,7 @@ def run_draft_pipeline(
     seo_suggestions=None,
     replay_results=None,
     offline=False,
+    api_key_overrides=None,
 ):
     """Run the full draft review pipeline.
 
@@ -1018,6 +1112,11 @@ def run_draft_pipeline(
     ``seo_suggestions=False`` suppresses the SEO suggestion call for this run
     only, overriding the publication config's ``seo_rules.suggestions``. None
     (the default) leaves the decision to the config.
+
+    ``api_key_overrides`` (``{(provider, field): value}``, from ``--api-key``
+    on the CLI) is the highest tier of this project's credential precedence —
+    CLI > publication config file > user.yaml/.env > OS environment variable
+    — and is applied last, after the other three have already been merged.
     """
     t_start = time.monotonic()
 
@@ -1029,6 +1128,12 @@ def run_draft_pipeline(
         user_config.setdefault("pipeline", {})["cost_preset"] = cost_preset
         log.info(f"cost_preset overridden via --cost-preset: {cost_preset}")
     config = merge_configs(user_config, pub_config_raw)
+    if api_key_overrides:
+        config = apply_api_key_overrides(config, api_key_overrides)
+        log.info(
+            "api_key overridden via --api-key for: %s",
+            ", ".join(f"{p}.{f}" for p, f in sorted(api_key_overrides)),
+        )
 
     # Model currency check — runs against the fully resolved (post-preset) model config.
     currency = check_model_currency(config.get("models", {}))
@@ -1271,7 +1376,7 @@ def run_draft_pipeline(
     # is treated as an override and left untouched.
     #
     # Since the review adapters stream (SSE), this computed value is the per-task
-    # thread WALL-CLOCK BACKSTOP enforced by _run_with_timeout — NOT a socket
+    # thread WALL-CLOCK BACKSTOP enforced by _run_reviews_in_parallel — NOT a socket
     # timeout. Streaming does not make a long generation finish faster (a gpt-5.5
     # xhigh call still emits tokens for ~800s); it changes the socket read timeout,
     # which the adapters now hold at a small constant inter-token gap (see
@@ -1433,93 +1538,9 @@ def run_draft_pipeline(
         log.info("Pass 2: REPLAY — %s", ensemble_capture.describe(replay_results))
         log.info("No model calls made; this run costs nothing.")
     elif pipeline_cfg.get("parallel_review_calls", True):
-        # Resolve per-model timeouts. Per-model config key: timeout_seconds.
-        # Falls back to the pipeline-level task_timeout_seconds for any model
-        # that doesn't set its own. The global ceiling is the maximum of all
-        # individual timeouts plus a small scheduling buffer.
-        def _per_model_timeout(runner_name):
-            m = runner_name.split(":")[0]
-            return model_configs.get(m, {}).get("timeout_seconds", task_timeout)
-
-        def _configured_model_id(runner_name):
-            m = runner_name.split(":")[0]
-            return model_configs.get(m, {}).get("model", m)
-
-        stagger = pipeline_cfg.get("provider_stagger_seconds", 3)
-        offsets = _stagger_offsets([name for name, _ in runners], stagger)
-        # The offset is added to the budget, not spent from it: a staggered call
-        # still gets the full timeout its model was calibrated for.
-        runner_timeouts = [
-            (
-                name,
-                _delay_start(fn, offsets[name]),
-                _per_model_timeout(name) + offsets[name],
-            )
-            for name, fn in runners
-        ]
-        if any(offsets.values()):
-            log.info(
-                "Staggering same-provider calls by %ss to avoid self-inflicted "
-                "rate limiting (max offset %ss)",
-                stagger,
-                max(offsets.values()),
-            )
-        global_ceiling = _global_ceiling(
-            [t for _, _, t in runner_timeouts],
-            pipeline_cfg.get("retry_delay_seconds", 10),
+        raw_results = _run_reviews_in_parallel(
+            runners, pipeline_cfg, model_configs, task_timeout
         )
-
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(runner_timeouts)
-        ) as executor:
-            future_to_name = {
-                executor.submit(_run_with_timeout, fn, timeout, name): name
-                for name, fn, timeout in runner_timeouts
-            }
-            done, not_done = concurrent.futures.wait(
-                future_to_name.keys(),
-                timeout=global_ceiling,
-            )
-            for future in not_done:
-                name = future_to_name[future]
-                future.cancel()
-                log.error(
-                    f"Review pass {name} exceeded global ceiling {global_ceiling}s and was cancelled."
-                )
-                raw_results[name] = {
-                    "failed": True,
-                    "error": f"Exceeded global timeout of {global_ceiling}s",
-                    "model": _configured_model_id(name),
-                    "tokens": {},
-                    # The call was cancelled at the global ceiling, so we don't know
-                    # the true elapsed time — record the ceiling as a lower bound
-                    # rather than leaving it None (breaks [CALIBRATION] log parsing).
-                    "elapsed_seconds": global_ceiling,
-                    "_model": name.split(":")[0],
-                    "_domain": name.split(":", 1)[1] if ":" in name else name,
-                }
-            for future in done:
-                name = future_to_name[future]
-                try:
-                    raw_results[name] = future.result()
-                except Exception as e:
-                    per_timeout = _per_model_timeout(name)
-                    timed_out = "timed out" in str(e).lower()
-                    log.error(
-                        f"Review pass {name} {'timed out after ' + str(per_timeout) + 's' if timed_out else 'raised exception: ' + str(e)}"
-                    )
-                    raw_results[name] = {
-                        "failed": True,
-                        "error": str(e),
-                        "model": _configured_model_id(name),
-                        "tokens": {},
-                        # Best available lower bound on elapsed time — the task ran
-                        # at least this long before being cancelled. Avoids "elapsed=Nones"
-                        # in the [CALIBRATION] log line for timed-out passes.
-                        "elapsed_seconds": per_timeout if timed_out else None,
-                        "_model": name.split(":")[0],
-                        "_domain": name.split(":", 1)[1] if ":" in name else name,
-                    }
     else:
         for name, fn in runners:
             try:
@@ -2643,11 +2664,32 @@ def run_publish_pipeline(
     publish_live=False,
     config_dir="configs",
     seo_suggestions=None,
+    api_key_overrides=None,
+    wp_user=None,
+    wp_password=None,
 ):
     log.info(f"Loading configs (publication={publication_name})")
     user_config = load_user_config(config_dir)
     pub_config_raw = load_publication_config(publication_name, config_dir)
     config = merge_configs(user_config, pub_config_raw)
+    if api_key_overrides:
+        config = apply_api_key_overrides(config, api_key_overrides)
+        log.info(
+            "api_key overridden via --api-key for: %s",
+            ", ".join(f"{p}.{f}" for p, f in sorted(api_key_overrides)),
+        )
+    if wp_user is not None or wp_password is not None:
+        config = apply_wordpress_overrides(
+            config, username=wp_user, application_password=wp_password
+        )
+        log.info(
+            "WordPress credentials overridden via %s",
+            ", ".join(
+                f
+                for f, v in [("--wp-user", wp_user), ("--wp-password", wp_password)]
+                if v is not None
+            ),
+        )
 
     pub_config = config["publication"]
     wp_config = pub_config.get("wordpress", {})
@@ -2788,6 +2830,31 @@ def build_parser():
         help="Override cost_preset from user.yaml for this run only (useful for calibration sweeps)",
     )
     parser.add_argument(
+        "--api-key",
+        metavar="PROVIDER[.FIELD]=VALUE",
+        action="append",
+        help="Override one credential field for this run only — the highest "
+        "tier of this project's credential precedence (CLI > publication "
+        "config file > user.yaml/.env > OS environment variable). Repeatable. "
+        "PROVIDER=VALUE is shorthand for the common case (api_key) — openai, "
+        "gemini, mistral, grok, perplexity, claude. Multi-field credentials "
+        "need the explicit field: languagetool.username, languagetool.api_key, "
+        "archive_org.access_key, archive_org.secret_key.",
+    )
+    parser.add_argument(
+        "--wp-user",
+        metavar="USERNAME",
+        help="Override the WordPress username for this run only (--publish "
+        "mode). Same precedence idea as --api-key, applied to "
+        "publication.wordpress instead of api_keys.",
+    )
+    parser.add_argument(
+        "--wp-password",
+        metavar="APPLICATION_PASSWORD",
+        help="Override the WordPress application password for this run only "
+        "(--publish mode).",
+    )
+    parser.add_argument(
         "--no-seo-suggestions",
         action="store_true",
         help="Skip the SEO suggestion pass (one cheap model call proposing focus "
@@ -2843,6 +2910,11 @@ def main():
     if args.metadata and not args.raw_draft:
         parser.error("--metadata requires --raw-draft")
 
+    try:
+        api_key_overrides = parse_api_key_overrides(args.api_key)
+    except ValueError as e:
+        parser.error(str(e))
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -2884,6 +2956,7 @@ def main():
                 seo_suggestions=False if args.no_seo_suggestions else None,
                 replay_results=args.replay,
                 offline=args.offline,
+                api_key_overrides=api_key_overrides,
             )
         elif args.url:
             handoff = build_handoff_from_url(args.url)
@@ -2899,6 +2972,7 @@ def main():
                 replay_results=args.replay,
                 offline=args.offline,
                 handoff=handoff,
+                api_key_overrides=api_key_overrides,
             )
         elif args.raw_draft:
             raw_text = _read_handoff_file(args.raw_draft)
@@ -2923,6 +2997,7 @@ def main():
                 replay_results=args.replay,
                 offline=args.offline,
                 handoff=handoff,
+                api_key_overrides=api_key_overrides,
             )
         elif args.publish:
             run_publish_pipeline(
@@ -2931,6 +3006,9 @@ def main():
                 publish_live=args.publish_live,
                 config_dir=args.config_dir,
                 seo_suggestions=False if args.no_seo_suggestions else None,
+                api_key_overrides=api_key_overrides,
+                wp_user=args.wp_user,
+                wp_password=args.wp_password,
             )
     except (FileNotFoundError, ValueError) as e:
         log.error(str(e))

@@ -5,7 +5,7 @@ effort, so timeouts track real call latency instead of being hand-tuned per pres
 Calibrated from runs on 2026-06-22; see configs/timeouts.yaml.
 
 Since the review adapters stream (SSE), the value computed here is the per-task
-thread WALL-CLOCK BACKSTOP (enforced by pipeline._run_with_timeout), not the HTTP
+thread WALL-CLOCK BACKSTOP (enforced by pipeline._run_reviews_in_parallel), not the HTTP
 socket timeout. The socket timeout is a small constant inter-token read gap held by
 the adapters (ci_core/llm/streaming.py). This module is unchanged by streaming —
 only the *meaning* of its output shifted from "socket read timeout" to "wall-clock

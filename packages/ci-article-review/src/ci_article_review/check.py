@@ -37,21 +37,25 @@ import requests
 import base64
 
 from .config_loader import (
+    apply_api_key_overrides,
     describe_api_key_sources,
     load_user_config,
     load_publication_config,
     merge_configs,
+    parse_api_key_overrides,
     validate_publication_name,
 )
 from ci_core.redact import redact_url_keys
 
-# Labels for describe_api_key_sources()'s `source` field. The shadowing case
-# gets a visibly different label on purpose -- it's the one that cost real
-# money by going unnoticed for days (see ci_core.env_provenance).
+# Labels for describe_api_key_sources()'s `source` field. The
+# env_overrides_os_env case gets a visibly different label on purpose -- it's
+# the disagreement that used to cost real money by going unnoticed for days
+# (see ci_core.env_provenance). .env wins either way now; this is a heads-up,
+# not an alarm.
 _KEY_SOURCE_LABELS = {
     "env": "[.env]",
+    "env_overrides_os_env": "[.env — differs from an OS env var, .env wins]",
     "os_env": "[OS ENV]",
-    "os_env_shadowing_env_file": "[OS ENV — .env value ignored]",
     "literal": "[user.yaml, literal]",
     "unset": "[NOT SET]",
 }
@@ -61,9 +65,11 @@ def print_key_sources(config_dir):
     """Print a masked, provenance-annotated view of every configured API key.
 
     Reads user.yaml directly and never makes a network call -- this is meant
-    to answer "which key is this run actually about to use, and did it come
-    from .env or a shadowing OS environment variable" in under a second,
-    instead of days of misdiagnosing the wrong org's billing.
+    to answer "which key is this run actually about to use, and where did it
+    come from" in under a second. Only reflects the user.yaml/.env/OS-env
+    tiers -- a publication config's own api_keys section or a --api-key CLI
+    override (both higher-precedence) can still change what an actual run
+    uses; this is the fallback those layers sit on top of.
     """
     entries = describe_api_key_sources(config_dir)
     print("\nAPI key sources (masked):\n")
@@ -73,11 +79,11 @@ def print_key_sources(config_dir):
         print(
             f"  {entry['provider']}.{entry['field']:<10} {label:34s} {entry['masked_value']}{var}"
         )
-        if entry["source"] == "os_env_shadowing_env_file":
+        if entry["source"] == "env_overrides_os_env":
             print(
-                "      └─ a pre-existing OS environment variable is "
-                "shadowing .env -- editing .env will have no effect until it "
-                "is unset"
+                "      └─ an OS environment variable also sets this, with a "
+                "different value -- .env wins under this project's "
+                "precedence (CLI > publication config > .env > OS env)"
             )
     print()
 
@@ -436,9 +442,18 @@ def main():
         "--show-keys",
         action="store_true",
         help="Print a masked view of each provider's resolved API key and "
-        "where it actually came from (.env file vs. a pre-existing OS "
-        "environment variable that silently shadowed it), then exit without "
-        "making any network calls.",
+        "where it actually came from (.env file vs. OS environment variable "
+        "fallback), then exit without making any network calls. Reflects the "
+        "user.yaml/.env/OS-env tiers only — a publication config's api_keys "
+        "section or --api-key (both higher-precedence) aren't shown here.",
+    )
+    parser.add_argument(
+        "--api-key",
+        metavar="PROVIDER=VALUE",
+        action="append",
+        help="Override one provider's api_key for this check only — same "
+        "precedence and same single-field providers as ci-review's "
+        "--api-key. Repeatable.",
     )
     args = parser.parse_args()
 
@@ -451,10 +466,17 @@ def main():
         sys.exit(0)
 
     try:
+        api_key_overrides = parse_api_key_overrides(args.api_key)
+    except ValueError as e:
+        parser.error(str(e))
+
+    try:
         validate_publication_name(args.publication)
         user_config = load_user_config(args.config_dir)
         pub_config_raw = load_publication_config(args.publication, args.config_dir)
         config = merge_configs(user_config, pub_config_raw)
+        if api_key_overrides:
+            config = apply_api_key_overrides(config, api_key_overrides)
     except (FileNotFoundError, ValueError) as e:
         print(f"Config error: {e}")
         sys.exit(1)

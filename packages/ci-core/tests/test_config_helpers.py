@@ -97,3 +97,33 @@ class TestConfigHelpers:
             del os.environ[env_key]
         with pytest.raises(ValueError, match="not set"):
             resolve_env(f"${{{env_key}}}")
+
+    def test_resolve_env_defaults_to_os_environ(self, monkeypatch):
+        from ci_core.config_helpers import resolve_env
+
+        monkeypatch.setenv("PIPELINE_TEST_VAR_ABC", "from_os_environ")
+        assert resolve_env("${PIPELINE_TEST_VAR_ABC}") == "from_os_environ"
+
+    def test_resolve_env_prefers_the_given_mapping_over_os_environ(self, monkeypatch):
+        """The whole point of the ``env`` parameter: a caller-supplied mapping
+        (e.g. ci_core.env_provenance.effective_env's .env-wins merge) takes
+        priority over whatever resolve_env would find in os.environ."""
+        from ci_core.config_helpers import resolve_env
+
+        monkeypatch.setenv("PIPELINE_TEST_VAR_ABC", "from_os_environ")
+        assert (
+            resolve_env(
+                "${PIPELINE_TEST_VAR_ABC}", env={"PIPELINE_TEST_VAR_ABC": "from_dotenv"}
+            )
+            == "from_dotenv"
+        )
+
+    def test_resolve_env_recursive_threads_env_through(self, monkeypatch):
+        from ci_core.config_helpers import resolve_env_recursive
+
+        monkeypatch.delenv("PIPELINE_TEST_VAR_ABC", raising=False)
+        result = resolve_env_recursive(
+            {"api_keys": {"openai": {"api_key": "${PIPELINE_TEST_VAR_ABC}"}}},
+            env={"PIPELINE_TEST_VAR_ABC": "from_dotenv"},
+        )
+        assert result["api_keys"]["openai"]["api_key"] == "from_dotenv"

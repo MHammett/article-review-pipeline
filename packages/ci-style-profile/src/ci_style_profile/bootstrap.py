@@ -35,9 +35,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import yaml as _yaml
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from ci_core.console import force_utf8_stdio
+from ci_core.env_provenance import (
+    effective_env as _effective_env,
+    snapshot as _snapshot_dotenv,
+)
 
 # The corpus stats and bias warnings quote collected documents.
 force_utf8_stdio()
@@ -47,7 +51,18 @@ force_utf8_stdio()
 # loaded before either is read. This used to happen implicitly: the config
 # helpers were imported from ci_article_review.config_loader, which calls
 # load_dotenv() at import time. That import is gone, so do it explicitly here.
-load_dotenv()
+#
+# Snapshot before load_dotenv() touches the OS environment, same reasoning as
+# ci_article_review.config_loader: a .env-defined value must win over a
+# same-named OS environment variable, not the reverse (see
+# ci_core.env_provenance). Without this, ci-discover / ci-style-profile share
+# configs/user.yaml and .env with ci-review but silently resolved ${VAR}
+# against plain os.environ — the exact incident ci-review's config_loader was
+# fixed for, just not fixed here too.
+_DOTENV_PATH = find_dotenv()
+_ENV_SNAPSHOT = _snapshot_dotenv(_DOTENV_PATH)
+load_dotenv(_DOTENV_PATH or None)
+_EFFECTIVE_ENV = _effective_env(_ENV_SNAPSHOT)
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +90,7 @@ def _load_sources_yaml() -> dict:
         return {}
     from ci_core.config_helpers import resolve_env_recursive
 
-    return resolve_env_recursive(data)
+    return resolve_env_recursive(data, env=_EFFECTIVE_ENV)
 
 
 def _load_presets() -> dict:
@@ -180,7 +195,7 @@ def _load_user_config_lenient() -> dict:
         return {}
     try:
         config = load_yaml(str(path))
-        config = resolve_env_recursive(config or {})
+        config = resolve_env_recursive(config or {}, env=_EFFECTIVE_ENV)
         return config
     except Exception as e:
         log.warning("Could not load user.yaml: %s", e)

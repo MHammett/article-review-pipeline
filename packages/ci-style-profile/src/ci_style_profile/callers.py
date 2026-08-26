@@ -182,11 +182,13 @@ def call_all(
     def _task(name: str, cfg: dict) -> tuple[str, dict]:
         """Run one call under its wall-clock backstop.
 
-        Same shape as the review pipeline's ``_run_with_timeout``, and the same
-        shared helper: the budget applies to this call alone rather than to the
-        position of its future in a completion queue, and a timed-out call is
-        abandoned rather than killed. See :mod:`ci_core.concurrency` for why
-        that abandonment has to happen on a daemon thread.
+        Same shape as the review pipeline's per-call backstop
+        (``ci_article_review.pipeline._run_reviews_in_parallel``), and the same
+        shared helper (:func:`ci_core.concurrency.run_with_timeout`): the budget
+        applies to this call alone rather than to the position of its future in
+        a completion queue, and a timed-out call is abandoned rather than
+        killed. See :mod:`ci_core.concurrency` for why that abandonment has to
+        happen on a daemon thread.
         """
         budget = backstops.get(name)
         try:

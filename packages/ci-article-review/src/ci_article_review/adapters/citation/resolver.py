@@ -1,4 +1,3 @@
-import concurrent.futures
 import hashlib
 import importlib
 import logging
@@ -6,6 +5,7 @@ import secrets
 import threading
 
 
+from ci_core.concurrency import run_all_with_timeout
 from ci_core.http import UnsafeURLError, is_public_host, safe_get
 
 from ci_core import extract
@@ -118,6 +118,31 @@ _VERIFY_SEMAPHORE = threading.Semaphore(_MAX_VERIFY_PARALLEL)
 #: pipeline's IP rate-limited or blocked. Submissions run as a follow-up pass
 #: after the main resolution completes, rather than inline per-claim.
 _MAX_SUBMIT_PARALLEL = 2
+
+#: Per-call safety-net timeout for one claim resolution (fetch + adapters +
+#: Wayback check + relevance call). Generous on purpose — the real bound on
+#: each of those steps is the timeout already inside it (safe_get,
+#: wayback.check); this one exists only to catch whatever those don't, e.g. a
+#: DNS resolution that hangs past what requests' own timeout covers.
+_RESOLVE_TIMEOUT_SECONDS = 90
+
+#: Per-call safety-net timeout for one Wayback submission, above wayback.submit's
+#: own 30s default for the same reason as _RESOLVE_TIMEOUT_SECONDS.
+_SUBMIT_TIMEOUT_SECONDS = 45
+
+
+def _batch_ceiling(job_count, max_parallel, per_call_timeout, slack=60):
+    """Wall-clock ceiling for a semaphore-bounded batch of daemon-thread jobs.
+
+    Enough waves at ``max_parallel`` concurrency to clear every job at its own
+    per-call timeout, plus scheduling slack — a safety net for the batch as a
+    whole, on top of each call's own safety net. Not the primary timeout
+    mechanism for either; see the callers for why one is still worth having.
+    """
+    if job_count == 0:
+        return slack
+    waves = -(-job_count // max_parallel)  # ceil division, no math.ceil import
+    return waves * per_call_timeout + slack
 
 
 #: Adapter names already warned about, so a 40-claim run logs each once rather
@@ -913,10 +938,38 @@ def _submit_missing_archives(results, archive_org_creds=None):
         if sub.get("error"):
             entry["wayback"]["submission_error"] = sub["error"]
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(len(targets), _MAX_SUBMIT_PARALLEL)
-    ) as pool:
-        list(pool.map(_submit_one, targets))
+    # Bounded to _MAX_SUBMIT_PARALLEL concurrent requests via the semaphore,
+    # same as the ThreadPoolExecutor form this replaces — a burst of unbounded
+    # submissions risks the IP-block the low bound exists to avoid. Every job
+    # still starts its own daemon thread immediately; most just wait on the
+    # semaphore. Daemon threads, not ThreadPoolExecutor, so a submission that
+    # outlives its own timeout AND the batch ceiling (e.g. a DNS resolution
+    # hanging past what requests' own timeout catches) is abandoned rather
+    # than left holding the run open — a ThreadPoolExecutor's own exit, and
+    # the atexit hook it registers regardless of how it's shut down, joins
+    # every worker with a bare, untimed t.join(), which is how finished
+    # ci-review processes were previously found still alive two days later.
+    submit_semaphore = threading.Semaphore(min(len(targets), _MAX_SUBMIT_PARALLEL))
+
+    def _bounded_submit(entry):
+        with submit_semaphore:
+            _submit_one(entry)
+
+    jobs = [
+        (
+            entry["url"],
+            lambda entry=entry: _bounded_submit(entry),
+            _SUBMIT_TIMEOUT_SECONDS,
+        )
+        for entry in targets
+    ]
+    ceiling = _batch_ceiling(
+        len(targets), _MAX_SUBMIT_PARALLEL, _SUBMIT_TIMEOUT_SECONDS
+    )
+    outcomes = run_all_with_timeout(jobs, global_timeout=ceiling)
+    for url, (_, error) in outcomes.items():
+        if error is not None:
+            log.warning(f"Wayback submission abandoned for {url}: {error}")
 
 
 def _normalize_claim_entry(entry):
@@ -993,33 +1046,51 @@ def resolve_citations(
     call_log = verification_call_log if verification_call_log is not None else []
     checksum_index = build_checksum_index(history_root) if history_root else {}
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(len(normalized), _MAX_PARALLEL)
-    ) as pool:
-        futures = {
-            pool.submit(
-                _resolve_one,
+    # Bounded to _MAX_PARALLEL concurrent resolutions via the semaphore, same
+    # as the ThreadPoolExecutor form this replaces (each one opens a socket,
+    # per _MAX_PARALLEL's own docstring). Daemon threads, not
+    # ThreadPoolExecutor — see _submit_missing_archives just above for why
+    # that distinction is the whole point: an abandoned call here must not be
+    # able to hold the run open the way a ThreadPoolExecutor's atexit join
+    # would.
+    resolve_semaphore = threading.Semaphore(min(len(normalized), _MAX_PARALLEL))
+
+    def _bounded_resolve(claim, known_urls):
+        with resolve_semaphore:
+            return _resolve_one(
                 claim,
                 citation_sources,
                 known_urls,
                 api_keys,
                 call_log,
                 checksum_index,
-            ): idx
-            for idx, (claim, known_urls, _bucket) in enumerate(normalized)
-        }
-        ordered: dict[int, dict] = {}
-        for future in concurrent.futures.as_completed(futures):
-            idx = futures[future]
-            try:
-                ordered[idx] = future.result()
-            except Exception as e:
-                log.warning(f"Citation resolution raised for claim index {idx}: {e}")
-                ordered[idx] = {
-                    "claim": normalized[idx][0],
-                    "resolved": False,
-                    "note": f"Resolution error: {e}",
-                }
+            )
+
+    jobs = [
+        (
+            str(idx),
+            lambda claim=claim, known_urls=known_urls: _bounded_resolve(
+                claim, known_urls
+            ),
+            _RESOLVE_TIMEOUT_SECONDS,
+        )
+        for idx, (claim, known_urls, _bucket) in enumerate(normalized)
+    ]
+    ceiling = _batch_ceiling(len(normalized), _MAX_PARALLEL, _RESOLVE_TIMEOUT_SECONDS)
+    outcomes = run_all_with_timeout(jobs, global_timeout=ceiling)
+
+    ordered: dict[int, dict] = {}
+    for idx_str, (value, error) in outcomes.items():
+        idx = int(idx_str)
+        if error is None:
+            ordered[idx] = value
+        else:
+            log.warning(f"Citation resolution raised for claim index {idx}: {error}")
+            ordered[idx] = {
+                "claim": normalized[idx][0],
+                "resolved": False,
+                "note": f"Resolution error: {error}",
+            }
 
     resolved_results = []
     for i in range(len(normalized)):
