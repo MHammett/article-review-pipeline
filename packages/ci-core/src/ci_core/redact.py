@@ -48,6 +48,22 @@ def truncate_excerpt(text, head=2000, tail=500):
     return f"{text[:head]}\n...[{omitted} chars omitted]...\n{text[-tail:]}"
 
 
+def mask_secret(value, head=8, tail=4):
+    """Mask a secret for display, keeping just enough of both ends (the
+    provider prefix and a few trailing characters) to recognize which key it
+    is, with everything in between redacted.
+
+    Values too short to reveal ``head + tail`` characters without exposing
+    most of the secret are masked completely instead.
+    """
+    if not value:
+        return "(not set)"
+    value = str(value)
+    if len(value) < head + tail + 4:
+        return "*" * len(value)
+    return f"{value[:head]}...{value[-tail:]}"
+
+
 def capture_error_body(exc):
     """Return a redacted, truncated excerpt of an HTTP error response body.
 

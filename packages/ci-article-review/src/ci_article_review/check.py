@@ -37,12 +37,50 @@ import requests
 import base64
 
 from .config_loader import (
+    describe_api_key_sources,
     load_user_config,
     load_publication_config,
     merge_configs,
     validate_publication_name,
 )
 from ci_core.redact import redact_url_keys
+
+# Labels for describe_api_key_sources()'s `source` field. The shadowing case
+# gets a visibly different label on purpose -- it's the one that cost real
+# money by going unnoticed for days (see ci_core.env_provenance).
+_KEY_SOURCE_LABELS = {
+    "env": "[.env]",
+    "os_env": "[OS ENV]",
+    "os_env_shadowing_env_file": "[OS ENV — .env value ignored]",
+    "literal": "[user.yaml, literal]",
+    "unset": "[NOT SET]",
+}
+
+
+def print_key_sources(config_dir):
+    """Print a masked, provenance-annotated view of every configured API key.
+
+    Reads user.yaml directly and never makes a network call -- this is meant
+    to answer "which key is this run actually about to use, and did it come
+    from .env or a shadowing OS environment variable" in under a second,
+    instead of days of misdiagnosing the wrong org's billing.
+    """
+    entries = describe_api_key_sources(config_dir)
+    print("\nAPI key sources (masked):\n")
+    for entry in entries:
+        label = _KEY_SOURCE_LABELS[entry["source"]]
+        var = f"  (${{{entry['var_name']}}})" if entry["var_name"] else ""
+        print(
+            f"  {entry['provider']}.{entry['field']:<10} {label:34s} {entry['masked_value']}{var}"
+        )
+        if entry["source"] == "os_env_shadowing_env_file":
+            print(
+                "      └─ a pre-existing OS environment variable is "
+                "shadowing .env -- editing .env will have no effect until it "
+                "is unset"
+            )
+    print()
+
 
 PASS = "\033[32m PASS\033[0m"
 FAIL = "\033[31m FAIL\033[0m"
@@ -394,7 +432,23 @@ def main():
         "--publication", required=True, help="Publication config name (without .yaml)"
     )
     parser.add_argument("--config-dir", default="configs")
+    parser.add_argument(
+        "--show-keys",
+        action="store_true",
+        help="Print a masked view of each provider's resolved API key and "
+        "where it actually came from (.env file vs. a pre-existing OS "
+        "environment variable that silently shadowed it), then exit without "
+        "making any network calls.",
+    )
     args = parser.parse_args()
+
+    if args.show_keys:
+        try:
+            print_key_sources(args.config_dir)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Config error: {e}")
+            sys.exit(1)
+        sys.exit(0)
 
     try:
         validate_publication_name(args.publication)

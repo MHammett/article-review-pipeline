@@ -98,6 +98,8 @@ uv run ci-check --publication your_publication_name
 
 Makes one minimal call to each configured service and reports pass/fail with specific error messages before you run a real article through.
 
+If a review ever seems to be using the wrong account or org, run `ci-check --publication your_publication_name --show-keys` before anything else. It prints a masked view of every configured key (`sk-proj-xV...xkA` style) and, critically, where each one actually came from — the `.env` file, or a pre-existing OS environment variable that silently shadowed it. `load_dotenv()` never overrides an OS-level variable of the same name, so editing `.env` has zero effect if that variable is already set in your shell or user profile; `--show-keys` makes that visible in seconds instead of days. The same mismatch also prints an unprompted `WARNING` on every `ci-check`/`ci-review` run, no flag required.
+
 **Check for newer models** (optional, run any time):
 
 ```powershell
@@ -132,7 +134,24 @@ A complete worked example — a real published article with every section filled
 out — ships alongside it at
 `handoff_templates/examples/draft_submission.filled-example.md`. Read it to see
 what a good PRE-DRAFT ANALYSIS looks like; do not edit it as your starting
-point.
+point. It's also ~72,000 characters, so a `maximum`-preset run against it costs
+$3-5 — fine for a real submission, wasteful for "did this code change work."
+
+For routine dev-loop testing — "did this code change work" — use
+`handoff_templates/examples/draft_submission.short-example.md` instead: a
+~1,000-word fixture, still with real citations, a genuine argument structure,
+and one deliberately planted overreach so a healthy run has something to
+catch. A `--cost-preset economy` run against it costs about $0.03-0.05,
+live-verified end to end (fact_check, voice_style, completeness,
+argument_integrity, and red_team all produced real findings, including
+catching the planted overreach).
+
+For smoke-testing a pipeline *code* change instead of a draft, use
+`handoff_templates/examples/draft_submission.short-example.full-coverage.md` —
+a similarly short fixture deliberately engineered to touch more of the
+pipeline's edges in one pass: a mix of resolving, dead, and mismatched
+citations, a claim that needs a live web search, an AI-speak passage several
+models should flag in consensus, and a vague SEO heading.
 
 **6. Publish an approved draft:**
 
@@ -409,7 +428,10 @@ content-intelligence/
 │   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
 │   │   │   ├── concurrency.py    run_with_timeout — the wall-clock backstop both
 │   │   │   │                     applications run their provider calls under
-│   │   │   ├── redact.py         scrubs API keys from error output before logging
+│   │   │   ├── redact.py         scrubs API keys from error output before logging;
+│   │   │   │                     mask_secret() masks a key for display (ci-check --show-keys)
+│   │   │   ├── env_provenance.py detects a pre-existing OS env var silently shadowing
+│   │   │   │                     a .env value (python-dotenv's override=False)
 │   │   │   ├── console.py        force_utf8_stdio — every CLI calls it first, so a
 │   │   │   │                     cp1252 Windows console cannot kill a report mid-print
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs

@@ -15,7 +15,7 @@ economy:
       model: claude-haiku-4-5-20251001
       effort: low
     openai:
-      model: gpt-5.4-mini
+      model: gpt-5.6-luna   # was gpt-5.4-mini; matching price tier, 2026-08-18 refresh
     gemini:
       model: gemini-2.5-flash-lite
     mistral:
@@ -32,7 +32,7 @@ standard:
     claude:
       model: claude-haiku-4-5-20251001
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
     gemini:
       model: gemini-2.5-flash
     mistral:
@@ -47,9 +47,9 @@ balanced:
   detection_models: []
   models:
     claude:
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5   # was claude-sonnet-4-6; 2026-08-18 refresh
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
     gemini:
       model: gemini-2.5-flash
     mistral:
@@ -64,10 +64,10 @@ thorough:
   detection_models: []
   models:
     claude:
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5   # was claude-sonnet-4-6; 2026-08-18 refresh
       effort: medium
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
       reasoning_effort: medium
     gemini:
       model: gemini-2.5-pro
@@ -83,10 +83,10 @@ maximum:
   detection_models: "*"
   models:
     claude:
-      model: claude-opus-4-8
+      model: claude-opus-5   # was claude-opus-4-8; 2026-08-18 refresh, same price
       effort: high
     openai:
-      model: gpt-5.4
+      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
       reasoning_effort: high
     gemini:
       model: gemini-2.5-pro

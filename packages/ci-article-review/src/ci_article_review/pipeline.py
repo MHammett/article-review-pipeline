@@ -1299,6 +1299,30 @@ def run_draft_pipeline(
             CALIBRATION_TIMEOUT,
         )
     else:
+        # Catch a stale explicit timeout_seconds before it silently caps a run —
+        # the bug that hit perplexity (fixed 2026-08-16) and claude (fixed
+        # 2026-08-18, cost 3 of 5 domains on a real run) the same way: an
+        # override left over from a lighter preset undercutting what the
+        # model's current effort actually needs, with no signal that it's
+        # doing so. Read against the config as the caller passed it in, before
+        # the mutation loop below back-fills computed values into it.
+        for _prov, _override, _formula in timeout_model.flag_stale_overrides(
+            char_count, model_configs, task_timeout
+        ):
+            log.warning(
+                "%s has an explicit timeout_seconds=%ds in configs/user.yaml, but "
+                "the sliding-scale formula computes %ds for this run (%d chars). "
+                "The override may be truncating calls that would otherwise "
+                "succeed — remove timeout_seconds to let it size automatically, "
+                "or raise it to at least %ds if you want to keep an explicit "
+                "ceiling.",
+                _prov,
+                _override,
+                _formula,
+                char_count,
+                _formula,
+            )
+
         computed_timeouts = timeout_model.compute_all(
             char_count, model_configs, task_timeout
         )

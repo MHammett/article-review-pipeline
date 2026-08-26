@@ -14,6 +14,15 @@ pipeline_out.txt
 .cache/
 handoff_templates/dc-environment*.md
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+*.pfx
+*.p12
+credentials*.json
+secrets.*
 __pycache__/
 *.pyc
 *.pyo
