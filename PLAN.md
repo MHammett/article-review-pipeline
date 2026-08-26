@@ -302,8 +302,33 @@ design, not a port.
 >
 > Phases 2 and 3 are done as part of #103 (timeouts ported and re-verified; the
 > preserved fields re-checked against the live pipeline, including a 30-call
-> `maximum` run). **Phase 4 — the small swaps, `instructor` / `rapidfuzz` /
-> `language-tool-python` — has not been started.**
+> `maximum` run). ~~Phase 4 — the small swaps, `instructor` / `rapidfuzz` /
+> `language-tool-python` — has not been started.~~ **Phase 4 — closed
+> 2026-08-17, no swap made. The premise was wrong: none of the three were ever
+> actual dependencies of this codebase**, so there was nothing for litellm to
+> replace. Checked `uv.lock` and every `pyproject.toml` (no entries), then every
+> import site:
+>
+> - `instructor` was never adopted. It was one of two options offered for
+>   replacing `schema_format.py` in the Hold table above (`instructor`, or
+>   litellm's own `response_format` passthrough) — Phase 1 took the second
+>   option. `schema_format.py` is gone; structured output today goes through
+>   hand-rolled `ci_core/llm/schema.py` (`schema_mod.as_request_params`),
+>   calling litellm's `response_format` / `text.format` directly. Nothing left
+>   to swap.
+> - `rapidfuzz` was never imported anywhere. PR #79's claim dedup
+>   (`pipeline.py`'s `_claim_key` / `_is_duplicate_claim`) is hand-rolled
+>   Jaccard similarity over token sets — no fuzzy-matching library involved.
+>   Not LLM-related and was mis-scoped into this phase.
+> - `language-tool-python` was never imported either.
+>   `adapters/grammar/languagetool.py` is a ~30-line `requests` client against
+>   LanguageTool's public HTTP API (`api.languagetool.org/v2/check`), not the
+>   `language-tool-python` package. Also not LLM-related.
+>
+> Documentation-only close-out: no source change. Verified with a clean `uv
+> sync` in a fresh worktree (`objective-robinson-a9dd63`) confirming the
+> editable install resolved to that worktree, then `uv run pytest packages/` —
+> 1448 passed.
 
 Spiked against 1.96.2 on 2026-08-12. **Verdict: migrate.** Everything the
 pipeline depends on survives: Perplexity `citations`/`search_results`, Gemini
@@ -331,7 +356,8 @@ OpenAI through `responses()`.
 2. Port the timeouts calibration — it is measured knowledge and survives as
    config, but litellm has its own timeout/retry semantics to fit it to.
 3. Re-verify the five preserved fields against the real pipeline, not a spike.
-4. Then the small swaps: `instructor`, `rapidfuzz`, `language-tool-python`.
+4. ~~Then the small swaps: `instructor`, `rapidfuzz`, `language-tool-python`.~~
+   Closed 2026-08-17 — none were actual dependencies; see the note above.
 
 **Not recommended:** replacing `analysis/links.py` with lychee. It is a Rust
 binary (subprocess, not import) and the tier semantics would need rebuilding

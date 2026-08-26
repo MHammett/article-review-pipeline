@@ -1208,7 +1208,11 @@ def run_draft_pipeline(
     # Pass 1: LanguageTool grammar correction (optional)
     grammar_enabled = pipeline_cfg.get("grammar_pass", True)
     lt_creds = api_keys.get("languagetool", {})
-    lt_has_creds = bool(lt_creds.get("username") and lt_creds.get("api_key"))
+    # A self-hosted server (server_url set) needs no auth. Otherwise this is
+    # the hosted API, which does.
+    lt_has_creds = bool(lt_creds.get("server_url")) or bool(
+        lt_creds.get("username") and lt_creds.get("api_key")
+    )
 
     if not grammar_enabled:
         log.info("Pass 1: Grammar pass disabled (grammar_pass: false) — skipping.")
@@ -1242,10 +1246,11 @@ def run_draft_pipeline(
         lt_result = lt.run(
             handoff["draft"],
             lt_config,
-            lt_creds["username"],
-            lt_creds["api_key"],
+            lt_creds.get("username"),
+            lt_creds.get("api_key"),
             retry=pipeline_cfg.get("retry_on_failure", True),
             retry_delay=pipeline_cfg.get("retry_delay_seconds", 10),
+            url=lt_creds.get("server_url") or lt.LANGUAGETOOL_API_URL,
         )
         if lt_result["failed"]:
             log.warning(

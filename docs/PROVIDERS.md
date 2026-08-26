@@ -304,15 +304,40 @@ For argument integrity depth, `claude-opus-4-8` with `effort: high` is the recom
 
 The grammar correction pass applies deterministic rule-based corrections before the AI review passes, so the models aren't distracted by surface errors. It's the only component that modifies your draft without asking.
 
-Skip it if you already do a manual Grammarly pass — you're covering the same ground.
+Skip it if you already do a manual, thorough pass yourself (e.g. Grammarly Premium) — you're covering the same ground.
 
 **To skip:** Set `grammar_pass: false` in `configs/user.yaml`, or simply omit the `languagetool` credentials block. The pipeline skips automatically and reminds you to run a manual check.
 
-**To use:** Go to https://languagetool.org, create an account, subscribe to Premium, go to account settings, and generate an API key.
+Two ways to use it, at different cost:
 
-**What you need:**
-- Username: your email address
-- API key: from account settings
+### Self-hosted (free)
+
+Run the open-source LanguageTool server yourself and point the pipeline at it — no LanguageTool account, no `username`/`api_key`.
+
+```bash
+docker run -d -p 8010:8010 erikvl87/languagetool
+```
+
+```yaml
+api_keys:
+  languagetool:
+    server_url: http://localhost:8010/v2/check
+```
+
+**Trade-off:** this runs the open-source Community rule set, not the fuller Premium one. Verified 2026-08-17 against languagetool.org's own account settings page (`/editor/settings/access-tokens`): Premium's "Access Tokens" there are scoped to *native app integrations* (Obsidian, LibreOffice, their browser add-on), not general programmatic access — so self-hosting isn't giving up something the $4.99–19.99/mo personal tier would otherwise unlock. See the note below.
+
+### Hosted API (paid)
+
+**This is not the same product as the $4.99–19.99/mo personal "Premium" subscription.** That tier's account settings page frames its own API tokens as being for LanguageTool's supported native integrations, not general HTTP access — despite the site being genuinely unclear about this. Programmatic access to the full rule set (what `username`/`api_key` credentials against `api.languagetool.org` require) is a separate commercial product, the [Proofreading API](https://languagetool.org/proofreading-api), starting around $40/month.
+
+**To use:** Sign up for the Proofreading API, get a `username`/`api_key` pair, and configure:
+
+```yaml
+api_keys:
+  languagetool:
+    username: your_email@example.com
+    api_key: your_languagetool_key
+```
 
 ---
 

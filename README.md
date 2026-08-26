@@ -46,7 +46,7 @@ The rest of this README covers **ci-article-review**, the primary tool today.
 
 A multi-pass automated review pipeline for published web content. Takes a drafted article through deterministic grammar correction and ensemble multi-model AI review, consolidates weighted feedback into a single prioritized report, and publishes to WordPress when you approve.
 
-At `standard` thoroughness (one model per domain), typical cost is under $1.00 per article. At `thorough` or `maximum` thoroughness with all optional providers configured, expect $2–5 per run. The only fixed cost is LanguageTool Premium at $4.99/month (optional — skip if you already do a manual Grammarly pass).
+At `standard` thoroughness (one model per domain), typical cost is under $1.00 per article. At `thorough` or `maximum` thoroughness with all optional providers configured, expect $2–5 per run. Grammar correction (optional — skip if you already do a manual pass yourself) can be free by self-hosting LanguageTool, or run through their hosted API starting around $40/month — see [docs/PROVIDERS.md](docs/PROVIDERS.md#languagetool-optional) for both options.
 
 ---
 
