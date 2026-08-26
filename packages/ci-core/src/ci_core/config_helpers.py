@@ -28,16 +28,24 @@ DEFAULT_PROVIDERS = {
 }
 
 
-def resolve_env(value):
+def resolve_env(value, env=None):
     """Resolve a single ``${ENV_VAR}`` placeholder to its environment value.
 
     Non-placeholder values pass through untouched. Raises ``ValueError`` when
     the referenced variable is not set, so a missing credential fails loudly at
     config-load time rather than as an opaque 401 mid-run.
+
+    ``env`` is the mapping to look ``ENV_VAR`` up in, defaulting to
+    ``os.environ`` for backward compatibility. A caller that wants a ``.env``
+    file's value to win over a same-named OS environment variable (see
+    ``ci_core.env_provenance.effective_env``) passes that merged mapping
+    instead — this function itself has no opinion on precedence, it just
+    reads whatever mapping it's given.
     """
     if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
         env_key = value[2:-1]
-        resolved = os.getenv(env_key)
+        lookup = env if env is not None else os.environ
+        resolved = lookup.get(env_key)
         if resolved is None:
             raise ValueError(
                 f"Environment variable {env_key!r} is not set. "
@@ -47,14 +55,18 @@ def resolve_env(value):
     return value
 
 
-def resolve_env_recursive(obj):
-    """Apply :func:`resolve_env` to every string in a nested dict/list tree."""
+def resolve_env_recursive(obj, env=None):
+    """Apply :func:`resolve_env` to every string in a nested dict/list tree.
+
+    ``env`` is passed straight through to :func:`resolve_env` — see there for
+    what it's for.
+    """
     if isinstance(obj, dict):
-        return {k: resolve_env_recursive(v) for k, v in obj.items()}
+        return {k: resolve_env_recursive(v, env) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [resolve_env_recursive(i) for i in obj]
+        return [resolve_env_recursive(i, env) for i in obj]
     if isinstance(obj, str):
-        return resolve_env(obj)
+        return resolve_env(obj, env)
     return obj
 
 

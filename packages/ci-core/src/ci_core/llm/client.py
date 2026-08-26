@@ -30,8 +30,9 @@ sizes. Conflating any two of them breaks one of the others:
    a stream that has started emitting keeps emitting, so a long silence
    mid-response means the connection is dead, not slow.
 3. **Wall-clock backstop** (the pipeline's sliding-scale ``timeout_seconds``,
-   enforced by ``ci_article_review.pipeline._run_with_timeout``) — "this call is
-   alive but I am not waiting any longer". Deliberately ignored here.
+   enforced by ``ci_article_review.pipeline._run_reviews_in_parallel`` via
+   :func:`ci_core.concurrency.run_all_with_timeout`) — "this call is alive but
+   I am not waiting any longer". Deliberately ignored here.
 
 Layers 1 and 2 were a single value until 2026-08-15, which meant the stall
 detector had to be sized for the *search* phase. That is how perplexity's read

@@ -98,7 +98,7 @@ uv run ci-check --publication your_publication_name
 
 Makes one minimal call to each configured service and reports pass/fail with specific error messages before you run a real article through.
 
-If a review ever seems to be using the wrong account or org, run `ci-check --publication your_publication_name --show-keys` before anything else. It prints a masked view of every configured key (`sk-proj-xV...xkA` style) and, critically, where each one actually came from — the `.env` file, or a pre-existing OS environment variable that silently shadowed it. `load_dotenv()` never overrides an OS-level variable of the same name, so editing `.env` has zero effect if that variable is already set in your shell or user profile; `--show-keys` makes that visible in seconds instead of days. The same mismatch also prints an unprompted `WARNING` on every `ci-check`/`ci-review` run, no flag required.
+If a review ever seems to be using the wrong account or org, run `ci-check --publication your_publication_name --show-keys` before anything else. It prints a masked view of every configured key (`sk-proj-xV...xkA` style) and where each one actually came from. Credentials resolve through four tiers, most to least specific: a `--api-key` CLI override, then a publication config's own `api_keys` section, then `user.yaml`/`.env`, then a bare OS environment variable as the last resort — a `.env`-defined value always wins over a same-named OS variable, not the reverse, so editing `.env` always takes effect regardless of what else is set in your shell. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#api-key-precedence) for the full precedence and how to override it per publication or per run. The two sources disagreeing still prints an unprompted `NOTE` on every `ci-check`/`ci-review` run, no flag required — informational now, not a warning that something is broken.
 
 **Check for newer models** (optional, run any time):
 
@@ -290,6 +290,9 @@ Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required —
 | `--publish-live` | Publish live instead of as a WordPress draft |
 | `--config-dir DIR` | Config directory (default `configs`) |
 | `--cost-preset PRESET` | Override `cost_preset` for this run: `economy` / `standard` / `balanced` / `thorough` / `maximum`. Doesn't modify `user.yaml`. |
+| `--api-key PROVIDER[.FIELD]=VALUE` | Override one credential field for this run only — highest tier of the credential precedence (CLI > publication config > `.env`/`user.yaml` > OS environment variable). Repeatable. `PROVIDER=VALUE` is shorthand for `api_key` (`openai`, `gemini`, `mistral`, `grok`, `perplexity`, `claude`); multi-field credentials need `PROVIDER.FIELD` (`languagetool.username`, `archive_org.secret_key`, etc.). See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#api-key-precedence). |
+| `--wp-user USERNAME` | Override the WordPress username for this run only (`--publish` mode) — same precedence idea as `--api-key`, applied to `publication.wordpress`. |
+| `--wp-password APPLICATION_PASSWORD` | Override the WordPress application password for this run only (`--publish` mode). |
 | `--no-seo-suggestions` | Skip both SEO model calls for this run — the [metadata suggestions](docs/CONFIGURATION.md#seo-suggestions) (focus keyword candidates, meta description, OG title, OG description, schema type) and the [structure review](docs/CONFIGURATION.md#seo-structure-review). Deterministic on-page checks still run. Permanent off: `seo_rules.suggestions` / `seo_rules.content_review`. |
 | `--verbose`, `-v` | DEBUG logging |
 

@@ -86,15 +86,17 @@ class TestDescribeApiKeySources:
         openai = next(e for e in entries if e["provider"] == "openai")
         assert openai["source"] == "env"
 
-    def test_shadowing_os_env_var_is_flagged_loudly(
+    def test_differing_os_env_var_is_flagged_but_dotenv_still_wins(
         self, config_dir, monkeypatch, dotenv_file
     ):
-        """The exact incident: a pre-existing OS var wins over a different .env value."""
+        """The exact incident, as it now resolves: a pre-existing OS var
+        differs from .env, but .env wins the effective value — flagged as an
+        FYI, not the old silent-override alarm."""
         monkeypatch.setenv("OPENAI_API_KEY", "stale_real_key_value_1234567890")
         snap = snapshot(dotenv_file)  # captures OPENAI_API_KEY as pre-existing
         entries = describe_api_key_sources(str(config_dir), env_snapshot=snap)
         openai = next(e for e in entries if e["provider"] == "openai")
-        assert openai["source"] == "os_env_shadowing_env_file"
+        assert openai["source"] == "env_overrides_os_env"
 
     def test_shadowing_os_env_var_that_happens_to_match_is_not_flagged_loudly(
         self, config_dir, monkeypatch, dotenv_file
@@ -103,7 +105,7 @@ class TestDescribeApiKeySources:
         snap = snapshot(dotenv_file)
         entries = describe_api_key_sources(str(config_dir), env_snapshot=snap)
         openai = next(e for e in entries if e["provider"] == "openai")
-        assert openai["source"] == "os_env"
+        assert openai["source"] == "env"
 
     def test_masked_value_never_contains_the_real_secret(self, config_dir, monkeypatch):
         secret = "sk-proj-REALSECRETVALUEDONOTLEAK9999"
@@ -130,14 +132,14 @@ class TestWarnEnvShadowing:
         )
         assert capsys.readouterr().out == ""
 
-    def test_prints_a_warning_naming_the_variable(
+    def test_prints_a_notice_naming_the_variable(
         self, monkeypatch, capsys, dotenv_file
     ):
         monkeypatch.setenv("OPENAI_API_KEY", "stale_real_key_value")
         snap = snapshot(dotenv_file)
         warn_env_shadowing(env_snapshot=snap)
         out = capsys.readouterr().out
-        assert "WARNING" in out
+        assert "NOTE" in out
         assert "OPENAI_API_KEY" in out
         assert "--show-keys" in out
 
@@ -178,7 +180,7 @@ class TestShowKeysCli:
         out = capsys.readouterr().out
         assert "API key sources" in out
 
-    def test_show_keys_labels_the_shadowing_case_loudly(
+    def test_show_keys_labels_the_env_override_case(
         self, config_dir, monkeypatch, capsys
     ):
         monkeypatch.setenv("OPENAI_API_KEY", "some_key_value_here_12345")
@@ -202,7 +204,7 @@ class TestShowKeysCli:
                         "field": "api_key",
                         "var_name": "OPENAI_API_KEY",
                         "masked_value": "some_ke...2345",
-                        "source": "os_env_shadowing_env_file",
+                        "source": "env_overrides_os_env",
                     }
                 ],
             ):
@@ -210,7 +212,7 @@ class TestShowKeysCli:
                     check_mod.main()
         assert exc_info.value.code == 0
         out = capsys.readouterr().out
-        assert "OS ENV" in out and "ignored" in out
+        assert ".env" in out and "wins" in out
 
     def test_show_keys_never_prints_a_raw_secret(self, config_dir, monkeypatch, capsys):
         secret = "sk-proj-REALSECRETDONOTLEAK999999"

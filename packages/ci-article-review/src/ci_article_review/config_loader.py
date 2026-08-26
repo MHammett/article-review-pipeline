@@ -10,6 +10,7 @@ from ci_core.config_helpers import (
     resolve_env_recursive as _resolve_env_recursive,
 )
 from ci_core.env_provenance import (
+    effective_env as _effective_env,
     provenance as _env_var_provenance,
     shadowed_mismatches as _shadowed_mismatches,
     snapshot as _snapshot_dotenv,
@@ -24,26 +25,35 @@ _DOTENV_PATH = find_dotenv()
 _ENV_SNAPSHOT = _snapshot_dotenv(_DOTENV_PATH)
 load_dotenv(_DOTENV_PATH or None)
 
+# What every ``${VAR}`` in user.yaml / a publication config actually resolves
+# against: .env's own value overrides a same-named OS environment variable,
+# not the reverse (see ci_core.env_provenance.effective_env). This is the
+# lowest tier of this project's config precedence — CLI override (--api-key)
+# > publication config file > this.
+_EFFECTIVE_ENV = _effective_env(_ENV_SNAPSHOT)
+
 
 def warn_env_shadowing(env_snapshot=None):
-    """Print a loud, unprompted warning for every OS env var that's silently
-    overriding a *different* value from the .env file.
+    """Print a loud, unprompted notice for every OS env var whose value
+    differs from the .env file's — informational, not a warning that
+    something is misconfigured, since .env now wins either way (see
+    ci_core.env_provenance). Two sources disagreeing is still worth surfacing
+    in case the OS-level value was the one actually intended for this shell.
 
-    No flag needed -- a silent, load-bearing config mismatch like this costs
-    real money if nobody notices (see this module's incident history in
-    ci_core.env_provenance). Called once below against the real environment;
-    tests pass ``env_snapshot`` to exercise specific scenarios without
-    touching process state.
+    Called once below against the real environment; tests pass
+    ``env_snapshot`` to exercise specific scenarios without touching process
+    state.
     """
     snap = _ENV_SNAPSHOT if env_snapshot is None else env_snapshot
     for m in _shadowed_mismatches(snap):
         print(
-            f"WARNING: {m['var_name']} is set in the OS environment, and its "
-            "value differs from what's in your .env file. The .env value is "
-            "being silently ignored (python-dotenv's load_dotenv() never "
-            "overrides an existing OS environment variable). If you edited "
-            ".env expecting it to take effect, it will not until the OS-level "
-            "variable is unset. Run `uv run ci-check --publication <name> "
+            f"NOTE: {m['var_name']} is set in both your .env file and the OS "
+            "environment, with different values. The .env value is being "
+            "used — this project's precedence is CLI override > publication "
+            "config > .env > OS environment variable. If you meant the "
+            "OS-level value to apply for this run, pass `--api-key "
+            "provider=value` on the command line instead of relying on the "
+            "shell variable. Run `uv run ci-check --publication <name> "
             "--show-keys` to see exactly which value each provider will use."
         )
 
@@ -95,7 +105,7 @@ def load_user_config(config_dir="configs"):
     config = _load_yaml(path)
     if not isinstance(config, dict):
         raise ValueError(f"{path} is empty or not a valid YAML mapping.")
-    config = _resolve_env_recursive(config)
+    config = _resolve_env_recursive(config, env=_EFFECTIVE_ENV)
     _validate_user_config(config)
     return config
 
@@ -126,15 +136,14 @@ def describe_api_key_sources(config_dir="configs", env_snapshot=None):
                         the value is written literally in user.yaml
       masked_value  -- the resolved value, masked for display (see
                         ci_core.redact.mask_secret)
-      source        -- "env" (came from the .env file, unshadowed), "os_env"
-                        (a pre-existing OS environment variable -- either
-                        there's no conflicting .env entry, or there is and it
-                        happens to match), "os_env_shadowing_env_file" (the
-                        loud case: a pre-existing OS env var is silently
-                        overriding a *different* .env value), "literal"
-                        (hardcoded directly in user.yaml, not from an env
-                        var), or "unset" (references an env var that isn't
-                        set anywhere).
+      source        -- "env" (resolved from the .env file), "env_overrides_os_env"
+                        (same, but a same-named OS environment variable with a
+                        *different* value also exists — .env still wins, this
+                        just flags the disagreement), "os_env" (no .env entry
+                        for this variable, so the OS environment is the
+                        fallback), "literal" (hardcoded directly in
+                        user.yaml, not from an env var), or "unset"
+                        (references an env var that isn't set anywhere).
     """
     snap = _ENV_SNAPSHOT if env_snapshot is None else env_snapshot
     path = Path(config_dir) / "user.yaml"
@@ -161,12 +170,8 @@ def describe_api_key_sources(config_dir="configs", env_snapshot=None):
             active = prov["active_value"]
             if active is None:
                 source = "unset"
-            elif prov["mismatched"]:
-                source = "os_env_shadowing_env_file"
-            elif prov["shadowed_by_os_env"]:
-                source = "os_env"
             elif prov["in_dotenv_file"]:
-                source = "env"
+                source = "env_overrides_os_env" if prov["mismatched"] else "env"
             else:
                 source = "os_env"
             entries.append(
@@ -203,7 +208,7 @@ def load_publication_config(publication_name, config_dir="configs"):
     config = _load_yaml(path)
     if not isinstance(config, dict):
         raise ValueError(f"{path} is empty or not a valid YAML mapping.")
-    config = _resolve_env_recursive(config)
+    config = _resolve_env_recursive(config, env=_EFFECTIVE_ENV)
     _validate_publication_config(config, publication_name)
     return config
 
@@ -469,6 +474,26 @@ PIPELINE_DEFAULTS = {
 }
 
 
+def _merge_api_keys(user_keys, pub_keys):
+    """Publication-level api_keys override user.yaml's, per provider/field —
+    a partial override (e.g. one provider, one field) leaves everything else
+    from user.yaml untouched, same "per-key" philosophy as pipeline config
+    merging just below. This is the second tier of this project's precedence
+    (CLI override > publication config file > user.yaml/.env > OS
+    environment variable); user.yaml is the fallback every publication
+    shares, not something each one has to repeat.
+    """
+    merged = {
+        k: dict(v) if isinstance(v, dict) else v for k, v in (user_keys or {}).items()
+    }
+    for provider, fields in (pub_keys or {}).items():
+        if isinstance(fields, dict) and isinstance(merged.get(provider), dict):
+            merged[provider] = {**merged[provider], **fields}
+        else:
+            merged[provider] = fields
+    return merged
+
+
 def merge_configs(user_config, pub_config):
     # Per-key, so a partial block keeps the defaults it did not mention.
     user_pipeline = user_config.get("pipeline") or {}
@@ -486,7 +511,9 @@ def merge_configs(user_config, pub_config):
     models_raw = _apply_preset_overrides(pipeline, models_raw)
 
     return {
-        "api_keys": user_config.get("api_keys", {}),
+        "api_keys": _merge_api_keys(
+            user_config.get("api_keys", {}), pub_config.get("api_keys", {})
+        ),
         "pipeline": pipeline,
         "delta": user_config.get(
             "delta",
@@ -500,3 +527,99 @@ def merge_configs(user_config, pub_config):
         "models": _normalize_model_configs(models_raw),
         "publication": pub_config,
     }
+
+
+#: Every field --api-key can address, per provider. The five review models
+#: have one (`api_key`); languagetool needs a username alongside its key, and
+#: archive_org splits into an access/secret pair — both still addressable,
+#: just via the explicit PROVIDER.FIELD form instead of the PROVIDER
+#: shorthand (which always means the common case, `api_key`).
+_PROVIDER_FIELDS = {
+    "openai": {"api_key"},
+    "gemini": {"api_key"},
+    "mistral": {"api_key"},
+    "grok": {"api_key"},
+    "perplexity": {"api_key"},
+    "claude": {"api_key"},
+    "languagetool": {"username", "api_key"},
+    "archive_org": {"access_key", "secret_key"},
+}
+
+
+def parse_api_key_overrides(cli_values):
+    """Parse repeated ``--api-key`` arguments into ``{(provider, field): value}``
+    — the CLI tier of this project's credential precedence (CLI > publication
+    config file > user.yaml/.env > OS environment variable), applied last by
+    :func:`apply_api_key_overrides`.
+
+    Two forms:
+
+    - ``PROVIDER=VALUE`` — shorthand for the common case, sets ``api_key``.
+    - ``PROVIDER.FIELD=VALUE`` — for a credential with more than one field
+      (``languagetool.username``, ``archive_org.secret_key``, etc.).
+
+    Raises ``ValueError`` (not a silent no-op) on a malformed entry or an
+    unrecognized provider/field, so a typo fails at startup rather than as a
+    confusing 401 partway through a paid run.
+    """
+    overrides = {}
+    for raw in cli_values or []:
+        key, sep, value = raw.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise ValueError(
+                f"--api-key must be PROVIDER=VALUE or PROVIDER.FIELD=VALUE, got {raw!r}"
+            )
+        provider, _, field = key.partition(".")
+        field = field or "api_key"
+        valid_fields = _PROVIDER_FIELDS.get(provider)
+        if valid_fields is None:
+            raise ValueError(
+                f"--api-key does not recognize provider {provider!r} — "
+                f"expected one of {', '.join(sorted(_PROVIDER_FIELDS))}."
+            )
+        if field not in valid_fields:
+            raise ValueError(
+                f"--api-key does not support {provider}.{field} — "
+                f"{provider} accepts {', '.join(sorted(valid_fields))}."
+            )
+        overrides[(provider, field)] = value
+    return overrides
+
+
+def apply_api_key_overrides(config, overrides):
+    """Apply CLI-level ``{(provider, field): value}`` overrides to an
+    already-merged config's ``api_keys`` — the last, highest-precedence step.
+    Returns a new config dict; ``config`` itself is left unmodified.
+    """
+    if not overrides:
+        return config
+    api_keys = {
+        k: dict(v) if isinstance(v, dict) else v for k, v in config["api_keys"].items()
+    }
+    for (provider, field), value in overrides.items():
+        api_keys[provider] = {**api_keys.get(provider, {}), field: value}
+    return {**config, "api_keys": api_keys}
+
+
+def apply_wordpress_overrides(config, username=None, application_password=None):
+    """CLI-level overrides for WordPress credentials (``--wp-user`` /
+    ``--wp-password``) — same precedence principle as ``--api-key``, applied
+    to ``publication.wordpress`` since that's where those fields live rather
+    than under ``api_keys``. A publication config already *is* the
+    "publication tier" for WordPress (there's no user.yaml-level default to
+    override), so this adds the one tier above it: a one-off run using
+    different WordPress credentials without editing the publication config.
+
+    Returns a new config dict; ``config`` itself is left unmodified. A
+    ``None`` argument leaves that field as the publication config set it.
+    """
+    if username is None and application_password is None:
+        return config
+    pub_config = config["publication"]
+    wordpress = dict(pub_config.get("wordpress", {}))
+    if username is not None:
+        wordpress["username"] = username
+    if application_password is not None:
+        wordpress["application_password"] = application_password
+    return {**config, "publication": {**pub_config, "wordpress": wordpress}}
