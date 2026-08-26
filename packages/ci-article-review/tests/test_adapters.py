@@ -294,6 +294,52 @@ class TestLanguageTool:
         assert len(result["change_log"]) == 1
         assert "elapsed_seconds" in result
 
+    def test_run_passes_custom_url_through(self):
+        """A self-hosted server URL reaches check_text, not the public default."""
+        from ci_article_review.adapters.grammar.languagetool import run
+
+        lt_config = {"auto_apply": [], "flag_for_review": [], "suppress": []}
+        with patch(
+            "ci_article_review.adapters.grammar.languagetool.check_text",
+            return_value={"matches": []},
+        ) as mock_check:
+            run(
+                "Some text",
+                lt_config,
+                None,
+                None,
+                url="http://localhost:8010/v2/check",
+            )
+        mock_check.assert_called_once_with(
+            "Some text", None, None, url="http://localhost:8010/v2/check"
+        )
+
+    def test_check_text_omits_auth_when_not_supplied(self):
+        """A self-hosted server takes no auth — don't send empty credentials."""
+        from ci_article_review.adapters.grammar.languagetool import check_text
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"matches": []}
+        mock_resp.raise_for_status = MagicMock()
+        with patch("requests.Session.post", return_value=mock_resp) as mock_post:
+            check_text("Some text", None, None, url="http://localhost:8010/v2/check")
+        _, kwargs = mock_post.call_args
+        assert "username" not in kwargs["data"]
+        assert "apiKey" not in kwargs["data"]
+        assert mock_post.call_args[0][0] == "http://localhost:8010/v2/check"
+
+    def test_check_text_includes_auth_when_supplied(self):
+        from ci_article_review.adapters.grammar.languagetool import check_text
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"matches": []}
+        mock_resp.raise_for_status = MagicMock()
+        with patch("requests.Session.post", return_value=mock_resp) as mock_post:
+            check_text("Some text", "user@example.com", "key")
+        _, kwargs = mock_post.call_args
+        assert kwargs["data"]["username"] == "user@example.com"
+        assert kwargs["data"]["apiKey"] == "key"
+
 
 # ---------------------------------------------------------------------------
 # Config loader
