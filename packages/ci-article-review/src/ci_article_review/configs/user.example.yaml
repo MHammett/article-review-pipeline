@@ -20,7 +20,14 @@ api_keys:
   claude:
     api_key: your_key_here
 
-  # Optional — set grammar_pass: false in pipeline below to skip entirely
+  # Optional — set grammar_pass: false in pipeline below to skip entirely.
+  # Two ways to configure this adapter — pick one (see docs/PROVIDERS.md):
+  #
+  # Self-hosted (free, e.g. `docker run -d -p 8010:8010 erikvl87/languagetool`):
+  #   server_url: http://localhost:8010/v2/check
+  #
+  # Hosted API (paid, https://languagetool.org/proofreading-api — NOT the
+  # cheap personal "Premium" subscription, which doesn't include this):
   languagetool:
     username: your_email@example.com
     api_key: your_key_here

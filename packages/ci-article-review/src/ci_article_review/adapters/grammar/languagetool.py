@@ -9,16 +9,16 @@ log = logging.getLogger(__name__)
 RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 
 
-def check_text(text, username, api_key, language="en-US"):
-    payload = {
-        "text": text,
-        "language": language,
-        "username": username,
-        "apiKey": api_key,
-    }
+def check_text(text, username, api_key, language="en-US", url=LANGUAGETOOL_API_URL):
+    payload = {"text": text, "language": language}
+    # Self-hosted servers (e.g. the erikvl87/languagetool Docker image) take no
+    # auth, so only send it when a Premium account actually supplied it.
+    if username and api_key:
+        payload["username"] = username
+        payload["apiKey"] = api_key
     session = requests.Session()
     try:
-        resp = session.post(LANGUAGETOOL_API_URL, data=payload, timeout=60)
+        resp = session.post(url, data=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()
     finally:
@@ -71,7 +71,15 @@ def apply_corrections(text, matches, auto_apply_categories, suppress_categories)
     return text, change_log
 
 
-def run(text, lt_config, username, api_key, retry=True, retry_delay=10):
+def run(
+    text,
+    lt_config,
+    username,
+    api_key,
+    retry=True,
+    retry_delay=10,
+    url=LANGUAGETOOL_API_URL,
+):
     """
     Main entry point. Returns dict with keys:
       corrected_text, change_log, flagged_matches, failed (bool), elapsed_seconds
@@ -83,7 +91,7 @@ def run(text, lt_config, username, api_key, retry=True, retry_delay=10):
     t0 = time.monotonic()
 
     def _attempt():
-        return check_text(text, username, api_key)
+        return check_text(text, username, api_key, url=url)
 
     try:
         result = _attempt()
