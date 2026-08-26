@@ -523,7 +523,49 @@ around its output. 239 lines is not where the pain is.
   fact-check verdict reports whether it arrived with a verbatim quote and a
   direct URL. The underlying ratio is still low — the reporting is honest about
   it now rather than inviting more confidence than earned.
-- Rerun nondeterminism: consensus flags vary between identical runs.
+- ~~Rerun nondeterminism: consensus flags vary between identical runs.~~
+  **Diagnosed, 2026-08-17 — not fixed.** Two things checked:
+
+  1. *Sampling config* (`ci_core/llm/client.py`): no provider is ever called
+     with a `seed`. Temperature is 0.2 (never 0) and only reaches
+     gemini/mistral/grok/perplexity — Claude never gets a temperature at all
+     (Anthropic 400s on non-default values for reasoning models) and OpenAI
+     drops it whenever `reasoning_effort` is set (the Responses API rejects
+     it). So on the `maximum` preset, the two deepest-reasoning models in the
+     six-model ensemble (`gpt-5.5` xhigh, `claude-opus-4-8`) run with **zero**
+     sampling control. This predates the litellm migration — verified
+     identical in the old adapters — and was never a deliberate choice either
+     way.
+  2. *Per-domain breakdown*, computed from the same 4 runs behind the
+     prompt-cache-layout A/B (`ci-wt-cache-layout`'s
+     `pipeline_history/dc-environment/run_{16,17,19,20}_*_report.json` — the
+     untracked `arm_c`/`arm_e` logs are gone, but these survived and are the
+     same dataset). Cross-run clustering on passage+problem text, robust
+     across three strictness thresholds: `fact_check` reproduces best (~5.5%
+     of findings show up in 3+ of 4 runs), `completeness` worst (**0%**),
+     `voice_style` (~1.8%) and `argument_integrity` (~4.2%) in between. That's
+     the **opposite** of "subjective domains are noisier" — it looks like
+     task shape, not provider: `fact_check` checks a finite, textually-fixed
+     set of claims, while `completeness`/`voice_style` ask for an open-ended
+     judgment call with an effectively unbounded answer space, so independent
+     samples don't converge. Consensus flags — which already require ≥2
+     models to agree within one run — reproduce at 26.3%, 5-15x better than
+     raw single-model findings, which is evidence *for* multi-run aggregation
+     specifically, not for a sampling-parameter fix (a `seed` wouldn't reach
+     Claude or OpenAI's reasoning models anyway — neither supports it there).
+
+  **Not fixed, and the reason is a real design problem, not inertia.** The
+  fix the evidence points to — rerun N times, keep only findings that repeat
+  — multiplies cost on a pipeline that's already $1-8/article at `maximum`,
+  and Mike's workflow iterates a draft many times before it's final. Paying
+  the N× cost on every intermediate iteration is wasteful; paying it only on
+  the last run requires knowing a run is the last one before running it,
+  which nothing today can tell you. Direction not yet chosen — candidates
+  raised but not evaluated: an explicit `--final` flag the author sets by
+  hand, a lighter/cheaper consensus-only rerun pass instead of N full
+  `maximum` runs, or leaving single-run reports as a first-pass tool and only
+  invoking N-run aggregation as a separate, deliberately-invoked step once a
+  draft is believed final.
 - ~~Grok's output volume is far below the other providers on identical domains
   (602 tokens vs 9,377 and 22,414 on `voice_style`). An explicit `max_tokens`
   now removes the provider default as a suspect; the cause is still unknown.~~
