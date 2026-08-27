@@ -468,6 +468,8 @@ PIPELINE_DEFAULTS = {
     "parallel_review_calls": True,
     "retry_on_failure": True,
     "retry_delay_seconds": 10,
+    "recovery_passes": 1,
+    "recovery_delay_seconds": 30,
     "abort_if_all_provider_calls_fail": False,
     "task_timeout_seconds": 180,
     "thoroughness": "standard",

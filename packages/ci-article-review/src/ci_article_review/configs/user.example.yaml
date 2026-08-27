@@ -227,6 +227,18 @@ pipeline:
 
   retry_on_failure: true
   retry_delay_seconds: 10
+
+  # After the main ensemble batch, re-attempt calls still marked failed —
+  # a provider stream stall or a malformed-JSON response that also failed its
+  # one retry, not a config problem. recovery_delay_seconds is deliberately
+  # longer than retry_delay_seconds: it's a "give the provider a breather"
+  # pause between whole passes, not the per-call backoff above. Set
+  # recovery_passes: 0 to disable. Skips calls whose error looks permanent
+  # (bad key, archived account, quota exhausted) rather than retrying a dead
+  # account identically every pass.
+  recovery_passes: 1
+  recovery_delay_seconds: 30
+
   abort_if_all_provider_calls_fail: false
   task_timeout_seconds: 1100   # absolute ceiling for the sliding-scale timeout model
                                 # (configs/timeouts.yaml); per-model timeouts clamp to this − 15

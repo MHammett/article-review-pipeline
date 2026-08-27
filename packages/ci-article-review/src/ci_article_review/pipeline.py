@@ -1088,6 +1088,112 @@ def _run_reviews_in_parallel(runners, pipeline_cfg, model_configs, task_timeout)
     return raw_results
 
 
+# Mirrors ci_core.llm.client._TERMINAL_QUOTA_MARKERS, but matched against the
+# already-redacted `error` string a failed raw_results entry carries, not a
+# live exception — a recovery pass never sees the original exception, only
+# what _run_domain/_attempt already turned it into. Broader than the client's
+# list because raw_results also surfaces auth/config failures (bad key,
+# archived project) that never reach litellm as a quota error at all.
+# Measured 2026-08-25: an archived OpenAI project failed all 5 domains
+# identically on every attempt — retrying it costs money to learn nothing.
+_PERMANENT_FAILURE_MARKERS = (
+    "invalid api key",
+    "invalid_api_key",
+    "unauthorized",
+    "not_authorized",
+    "archived",
+    "authentication_error",
+    "insufficient_quota",
+    "no credits remaining",
+    "insufficient credit",
+    "exceeded your current quota",
+    "billing",
+    "payment required",
+    "account is not active",
+)
+
+
+def _looks_permanent(error_text):
+    """True when a retry cannot possibly fix this failure — skip recovery."""
+    text = (error_text or "").lower()
+    return any(marker in text for marker in _PERMANENT_FAILURE_MARKERS)
+
+
+def _run_reviews_for_names(names, runners, pipeline_cfg, model_configs, task_timeout):
+    """Run only the runners in ``names`` through the normal parallel batch.
+
+    Shared by the recovery pass here and by ``--retry-failed``'s manual
+    re-attempt — both need "the same fan-out machinery, restricted to a
+    subset of calls" rather than a second implementation of it.
+    """
+    subset = [(name, fn) for name, fn in runners if name in names]
+    return _run_reviews_in_parallel(subset, pipeline_cfg, model_configs, task_timeout)
+
+
+def _recover_failed_calls(
+    raw_results, runners, pipeline_cfg, model_configs, task_timeout
+):
+    """Re-attempt calls still marked failed, up to ``recovery_passes`` times.
+
+    A run that comes back 28/30 calls costs the same as a clean one, and until
+    now the only way to fill the gap was a full re-run. This retries just the
+    gaps in place, on a coarser delay than the per-call retry in
+    ``ci_core.llm.client`` — a "give the provider a breather" pause between
+    whole passes, not a per-socket backoff. Calls ``_looks_permanent`` flags
+    are skipped: retrying a dead account identically every pass spends money
+    to learn nothing new.
+    """
+    recovery_passes = pipeline_cfg.get("recovery_passes", 1)
+    recovery_delay = pipeline_cfg.get("recovery_delay_seconds", 30)
+    originally_failed = {name for name, r in raw_results.items() if r.get("failed")}
+    if not originally_failed or recovery_passes <= 0:
+        return raw_results
+
+    for pass_num in range(1, recovery_passes + 1):
+        names_to_retry = [
+            name
+            for name, r in raw_results.items()
+            if r.get("failed") and not _looks_permanent(r.get("error", ""))
+        ]
+        if not names_to_retry:
+            break
+        log.info(
+            "Recovery pass %d/%d: retrying %d failed call(s): %s",
+            pass_num,
+            recovery_passes,
+            len(names_to_retry),
+            ", ".join(sorted(names_to_retry)),
+        )
+        time.sleep(recovery_delay)
+        raw_results.update(
+            _run_reviews_for_names(
+                names_to_retry, runners, pipeline_cfg, model_configs, task_timeout
+            )
+        )
+
+    still_failed = [name for name, r in raw_results.items() if r.get("failed")]
+    recovered = len(originally_failed) - len(still_failed)
+    log.info(
+        "Recovery summary: %d recovered, %d still failing out of %d originally failed.",
+        recovered,
+        len(still_failed),
+        len(originally_failed),
+    )
+    return raw_results
+
+
+def _merge_recovered_results(prior_results, retried_results):
+    """Combine a ``--retry-failed`` capture with the calls just re-attempted.
+
+    Previously-successful entries pass through unchanged. Previously-failed
+    entries are replaced by whatever the new attempt produced — win or lose,
+    the fresh result is more useful than the stale failure it replaces.
+    """
+    merged = dict(prior_results)
+    merged.update(retried_results)
+    return merged
+
+
 def run_draft_pipeline(
     handoff_path,
     publication_name,
@@ -1099,6 +1205,7 @@ def run_draft_pipeline(
     handoff=None,
     seo_suggestions=None,
     replay_results=None,
+    retry_failed_results=None,
     offline=False,
     api_key_overrides=None,
 ):
@@ -1117,6 +1224,13 @@ def run_draft_pipeline(
     on the CLI) is the highest tier of this project's credential precedence —
     CLI > publication config file > user.yaml/.env > OS environment variable
     — and is applied last, after the other three have already been merged.
+
+    ``retry_failed_results`` (a path, from ``--retry-failed``) is the manual
+    counterpart to the automatic recovery pass: it loads a prior run's capture,
+    makes model calls only for the (model, domain) pairs marked failed in it,
+    and merges the new attempts back over everything that already succeeded.
+    Unlike ``replay_results`` this still spends money and still writes a new,
+    distinct ``run_N`` — it fills gaps, it does not replay a whole run for free.
     """
     t_start = time.monotonic()
 
@@ -1542,6 +1656,36 @@ def run_draft_pipeline(
         raw_results = ensemble_capture.load(replay_results)
         log.info("Pass 2: REPLAY — %s", ensemble_capture.describe(replay_results))
         log.info("No model calls made; this run costs nothing.")
+    elif retry_failed_results:
+        # Manual gap-fill: make model calls only for the (model, domain) pairs
+        # a prior capture marked failed, then merge onto everything that
+        # already succeeded. Unlike replay this does cost money — just not for
+        # the calls that already worked.
+        prior_results = ensemble_capture.load(retry_failed_results)
+        names_to_retry = [name for name, r in prior_results.items() if r.get("failed")]
+        log.info(
+            "Pass 2: RETRY-FAILED — %s", ensemble_capture.describe(retry_failed_results)
+        )
+        if names_to_retry:
+            log.info(
+                "Re-attempting %d failed call(s): %s",
+                len(names_to_retry),
+                ", ".join(sorted(names_to_retry)),
+            )
+            retried = _run_reviews_for_names(
+                names_to_retry, runners, pipeline_cfg, model_configs, task_timeout
+            )
+        else:
+            log.info("No failed calls in the prior capture — nothing to retry.")
+            retried = {}
+        raw_results = _merge_recovered_results(prior_results, retried)
+        still_failed = [name for name, r in raw_results.items() if r.get("failed")]
+        log.info(
+            "Retry-failed summary: %d attempted, %d still failing out of %d total.",
+            len(names_to_retry),
+            len(still_failed),
+            len(raw_results),
+        )
     elif pipeline_cfg.get("parallel_review_calls", True):
         raw_results = _run_reviews_in_parallel(
             runners, pipeline_cfg, model_configs, task_timeout
@@ -1560,6 +1704,14 @@ def run_draft_pipeline(
                     "_model": name.split(":")[0],
                     "_domain": name.split(":", 1)[1] if ":" in name else name,
                 }
+
+    # Replay makes no model calls at all, so there is nothing to recover.
+    # Applies to the parallel, serial, and retry-failed branches above alike —
+    # each of them can strand the same kind of transient failure.
+    if not replay_results and pipeline_cfg.get("recovery_passes", 1) > 0:
+        raw_results = _recover_failed_calls(
+            raw_results, runners, pipeline_cfg, model_configs, task_timeout
+        )
 
     # Hold the raw ensemble output for capture. Written next to the report once
     # the save path is known, so a later run can replay this one for free.
@@ -2891,6 +3043,16 @@ def build_parser():
         "re-run consolidation, citations and reporting over it for free.",
     )
     parser.add_argument(
+        "--retry-failed",
+        metavar="RESULTS_JSON",
+        help="Fill in the gaps from a prior run: make model calls only for the "
+        "(model, domain) pairs marked failed in a run_N_<ts>_results.json, "
+        "merging the new attempts onto everything that already succeeded. "
+        "Requires the same draft-loading flags (--draft/--url/--raw-draft) as "
+        "the original run, so the same runners and prompts can be rebuilt. "
+        "Mutually exclusive with --replay, which makes no model calls at all.",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Skip every pass that reaches the network (link validation, Wayback, "
@@ -2914,6 +3076,15 @@ def main():
 
     if args.metadata and not args.raw_draft:
         parser.error("--metadata requires --raw-draft")
+
+    if args.retry_failed and args.replay:
+        parser.error(
+            "--retry-failed and --replay are mutually exclusive — --replay "
+            "makes no model calls at all, --retry-failed makes calls for the "
+            "still-failed subset."
+        )
+    if args.retry_failed and args.publish:
+        parser.error("--retry-failed only applies to draft review runs, not --publish")
 
     try:
         api_key_overrides = parse_api_key_overrides(args.api_key)
@@ -2960,6 +3131,7 @@ def main():
                 only_domain=args.only_domain,
                 seo_suggestions=False if args.no_seo_suggestions else None,
                 replay_results=args.replay,
+                retry_failed_results=args.retry_failed,
                 offline=args.offline,
                 api_key_overrides=api_key_overrides,
             )
@@ -2975,6 +3147,7 @@ def main():
                 only_domain=args.only_domain,
                 seo_suggestions=False if args.no_seo_suggestions else None,
                 replay_results=args.replay,
+                retry_failed_results=args.retry_failed,
                 offline=args.offline,
                 handoff=handoff,
                 api_key_overrides=api_key_overrides,
@@ -3000,6 +3173,7 @@ def main():
                 only_domain=args.only_domain,
                 seo_suggestions=False if args.no_seo_suggestions else None,
                 replay_results=args.replay,
+                retry_failed_results=args.retry_failed,
                 offline=args.offline,
                 handoff=handoff,
                 api_key_overrides=api_key_overrides,
