@@ -299,6 +299,42 @@ class TestRetryPolicy:
         assert len(attempts) == 1
         assert result["failed"] is True
 
+    def test_malformed_json_is_retried_once(self):
+        """A call that streamed fine but returned prose gets the same one-retry
+        treatment as a dropped socket — the parse failure has no HTTP status of
+        its own to land it in _RETRYABLE_STATUS."""
+        attempts = []
+
+        def _flaky(**kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return _completion_stream("I'd be happy to help!")
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_flaky):
+            result = _call("mistral", retry=True, retry_delay=0)
+
+        assert len(attempts) == 2
+        assert result["failed"] is False
+
+    def test_persistent_malformed_json_still_fails_cleanly(self):
+        """Both attempts return prose: same failure shape as the un-retried
+        case, not a raised exception."""
+        attempts = []
+
+        def _always_prose(**kwargs):
+            attempts.append(1)
+            return _completion_stream("I'd be happy to help!")
+
+        with patch.object(client.litellm, "completion", side_effect=_always_prose):
+            result = _call("mistral", retry=True, retry_delay=0)
+
+        assert len(attempts) == 2
+        assert result["failed"] is True
+        assert result["error"] == "Malformed JSON response"
+        assert result["raw"] == "I'd be happy to help!"
+        assert result["tokens"] == {"prompt": 100, "completion": 50}
+
 
 # ---------------------------------------------------------------------------
 # Result contract
