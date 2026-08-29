@@ -438,6 +438,8 @@ pipeline:
   parallel_review_calls: true
   retry_on_failure: true
   retry_delay_seconds: 10
+  recovery_passes: 1            # additional passes after the main batch, retrying only calls still marked failed
+  recovery_delay_seconds: 30    # pause before each recovery pass — deliberately coarser than retry_delay_seconds
   abort_if_all_provider_calls_fail: false
   task_timeout_seconds: 1100    # absolute ceiling for the sliding-scale timeout model; formula clamps to this − 15
   cost_preset: balanced         # economy | standard | balanced | thorough | maximum
@@ -448,6 +450,14 @@ pipeline:
 
   drafting_model: claude        # excluded from voice_style — see below
   prompt_cache_layout: false    # see "Prompt cache layout"
+```
+
+**`recovery_passes`/`recovery_delay_seconds`** re-attempt only the (model, domain) calls still marked failed after the main ensemble batch — a run that comes back 28/30 calls otherwise costs the same as a clean one, and the only way to fill the gap was a full re-run. A call whose error text looks permanent (bad key, archived account, quota exhausted) is skipped rather than retried every pass: it will fail the same way each time and only spends money to learn that again. Set `recovery_passes: 0` to disable. Not run for `--replay`, which makes no model calls at all.
+
+**`--retry-failed RESULTS_JSON`** is the manual counterpart to `recovery_passes`, for when the gap surfaces after the fact — the automatic passes exhausted their budget, or a run predates them. It loads a prior run's `run_N_results.json`, makes model calls only for the entries marked failed in it, and merges the new attempts onto everything that already succeeded, then continues through consolidation/citations/report as normal — a new, distinct `run_N` is written, nothing is overwritten in place. Requires the same draft-loading flags (`--draft`/`--url`/`--raw-draft`) as the original run, so the same runners and prompts can be rebuilt; mutually exclusive with `--replay`, which makes no model calls at all.
+
+```powershell
+uv run ci-review --draft handoff.md --publication mypub --retry-failed pipeline_history/<article>/run_16_20260815_140635_results.json
 ```
 
 **`wayback_snapshot_stale_days`** controls when a Wayback Machine snapshot is considered stale. At 180 days (default), a snapshot from more than six months ago triggers a `[STALE]` flag and a manual re-archive recommendation. Lower this for publications with high source-freshness standards (e.g., 90 days for breaking-news adjacent pieces). It applies to both draft link validation and resolved citation URLs.

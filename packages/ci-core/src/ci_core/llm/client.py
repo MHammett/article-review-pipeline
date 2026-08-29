@@ -300,6 +300,21 @@ class StreamStalled(Exception):
     status_code = 504
 
 
+class MalformedJSONError(Exception):
+    """A completed call's content didn't parse as JSON.
+
+    Carries ``assembled`` — the same dict ``_invoke()`` returns — so a final,
+    un-retried failure can still report token usage and finish_reason. Unlike
+    ``StreamStalled`` this has no HTTP status: the call succeeded, only the
+    parse failed, so it needs its own branch in ``_with_retry`` to be retried
+    at all.
+    """
+
+    def __init__(self, assembled):
+        super().__init__("malformed JSON response")
+        self.assembled = assembled
+
+
 def _close_stream(stream):
     """Best-effort release of the socket behind a litellm stream.
 
@@ -904,8 +919,25 @@ def _with_retry(fn, retry, retry_delay, label):
     which is exactly the spacing this pipeline uses. A new socket fixes it
     completely, so it must be retried; without that, a recoverable blip costs a
     whole domain's review.
+
+    ``StreamStalled`` and ``MalformedJSONError`` are checked ahead of the
+    status-code branch below and are always retryable. ``StreamStalled``
+    already carries a synthetic ``status_code = 504`` and so already matched
+    ``_RETRYABLE_STATUS`` on its own — this branch just makes that contract
+    explicit instead of leaving it as an accident of which status got
+    attached. ``MalformedJSONError`` has no HTTP status at all (the call
+    succeeded; only the JSON parse failed), so without this branch it would
+    never retry.
     """
     try:
+        return fn()
+    except (StreamStalled, MalformedJSONError) as exc:
+        if not retry:
+            raise
+        log.warning(
+            f"{label} {exc.__class__.__name__}. Waiting {retry_delay}s before one retry."
+        )
+        time.sleep(retry_delay)
         return fn()
     except Exception as exc:
         status = _status_of(exc)
@@ -1044,8 +1076,59 @@ def _attempt(
             gap,
         )
 
+    def _extras_from(assembled):
+        grounding = _grounding_chunks(assembled["grounding_metadata"])
+        citations = assembled["citations"]
+        extras = {}
+        if provider == "gemini":
+            extras["grounding_chunks"] = grounding
+            extras["grounding_available"] = bool(grounding)
+        elif provider == "perplexity" or citations or assembled["search_results"]:
+            # Perplexity always reports these; grok and claude do too once their
+            # search is switched on. Keyed off the payload rather than the
+            # provider name so a newly-grounded provider surfaces without
+            # another branch — the pipeline collects response-level sources by
+            # shape, not by who sent them.
+            extras["citations"] = citations
+            extras["search_results"] = assembled["search_results"]
+            extras["grounding_available"] = bool(
+                citations or assembled["search_results"]
+            )
+        return extras
+
+    def _invoke_and_parse():
+        # Parsing lives inside the retried callable, not after it: a call that
+        # streamed fine but returned prose needs the same one-retry treatment
+        # as a dropped socket, and _with_retry only sees what this raises.
+        assembled = _invoke()
+        parsed, truncated = extract_json_with_salvage(assembled["content"])
+        if parsed is None:
+            raise MalformedJSONError(assembled)
+        return assembled, parsed, truncated
+
     try:
-        assembled = _with_retry(_invoke, retry, retry_delay, label)
+        assembled, parsed, truncated = _with_retry(
+            _invoke_and_parse, retry, retry_delay, label
+        )
+    except MalformedJSONError as exc:
+        elapsed = round(time.monotonic() - t0, 2)
+        assembled = exc.assembled
+        content = assembled["content"]
+        tokens = _read_tokens(assembled["usage"])
+        hit_ceiling = assembled["finish_reason"] == "length"
+        log.warning(
+            f"{label} returned non-JSON content after {elapsed}s"
+            + (" (cut off at the output-token ceiling)" if hit_ceiling else "")
+        )
+        return {
+            "failed": True,
+            "error": "Malformed JSON response",
+            "raw": content,
+            "model": model,
+            "tokens": tokens,
+            "elapsed_seconds": elapsed,
+            **_extras_from(assembled),
+        }
     except Exception as exc:
         elapsed = round(time.monotonic() - t0, 2)
         body = _error_body(exc)
@@ -1073,39 +1156,7 @@ def _attempt(
     elapsed = round(time.monotonic() - t0, 2)
     content = assembled["content"]
     tokens = _read_tokens(assembled["usage"])
-    grounding = _grounding_chunks(assembled["grounding_metadata"])
-    citations = assembled["citations"]
-
-    extras = {}
-    if provider == "gemini":
-        extras["grounding_chunks"] = grounding
-        extras["grounding_available"] = bool(grounding)
-    elif provider == "perplexity" or citations or assembled["search_results"]:
-        # Perplexity always reports these; grok and claude do too once their
-        # search is switched on. Keyed off the payload rather than the provider
-        # name so a newly-grounded provider surfaces without another branch —
-        # the pipeline collects response-level sources by shape, not by who
-        # sent them.
-        extras["citations"] = citations
-        extras["search_results"] = assembled["search_results"]
-        extras["grounding_available"] = bool(citations or assembled["search_results"])
-
-    parsed, truncated = extract_json_with_salvage(content)
-    if parsed is None:
-        hit_ceiling = assembled["finish_reason"] == "length"
-        log.warning(
-            f"{label} returned non-JSON content after {elapsed}s"
-            + (" (cut off at the output-token ceiling)" if hit_ceiling else "")
-        )
-        return {
-            "failed": True,
-            "error": "Malformed JSON response",
-            "raw": content,
-            "model": model,
-            "tokens": tokens,
-            "elapsed_seconds": elapsed,
-            **extras,
-        }
+    extras = _extras_from(assembled)
 
     # finish_reason="length" means the ceiling cut the response off even when
     # the salvage path recovered parseable JSON from what arrived.

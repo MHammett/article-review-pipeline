@@ -119,6 +119,151 @@ class TestRunReviewsInParallel:
         assert results["claude:accuracy"] == {"ok": True}
 
 
+class TestRecoverFailedCalls:
+    """``_recover_failed_calls`` — the automatic gap-filling pass that
+    re-attempts calls still marked failed after the main ensemble batch, so a
+    28/30 run doesn't cost the same as a clean one and require a full re-run
+    to fill the last 2.
+    """
+
+    def _cfg(self, **overrides):
+        cfg = {"recovery_passes": 1, "recovery_delay_seconds": 0}
+        cfg.update(overrides)
+        return cfg
+
+    def test_a_call_that_recovers_is_recorded_as_successful(self):
+        attempts = []
+
+        def _now_succeeds():
+            attempts.append(1)
+            return {"failed": False}
+
+        raw_results = {
+            "claude:accuracy": {
+                "failed": True,
+                "error": "stream stalled mid-stream: nothing received for 120.0s",
+            }
+        }
+        runners = [("claude:accuracy", _now_succeeds)]
+
+        result = pipeline._recover_failed_calls(
+            raw_results, runners, self._cfg(), {}, task_timeout=5
+        )
+
+        assert len(attempts) == 1
+        assert result["claude:accuracy"]["failed"] is False
+
+    def test_a_permanent_failure_is_never_retried(self):
+        attempts = []
+
+        def _dead_account():
+            attempts.append(1)
+            return {"failed": False}
+
+        raw_results = {"openai:accuracy": {"failed": True, "error": "invalid api key"}}
+        runners = [("openai:accuracy", _dead_account)]
+
+        result = pipeline._recover_failed_calls(
+            raw_results, runners, self._cfg(), {}, task_timeout=5
+        )
+
+        assert attempts == []
+        assert result["openai:accuracy"]["error"] == "invalid api key"
+
+    def test_recovery_passes_zero_disables_recovery(self):
+        attempts = []
+
+        def _would_succeed():
+            attempts.append(1)
+            return {"failed": False}
+
+        raw_results = {"claude:accuracy": {"failed": True, "error": "stream stalled"}}
+        runners = [("claude:accuracy", _would_succeed)]
+
+        result = pipeline._recover_failed_calls(
+            raw_results, runners, self._cfg(recovery_passes=0), {}, task_timeout=5
+        )
+
+        assert attempts == []
+        assert result["claude:accuracy"]["failed"] is True
+
+    def test_persistent_failure_exhausts_both_passes_and_is_not_retried_a_third_time(
+        self,
+    ):
+        attempts = []
+
+        def _always_fails():
+            attempts.append(1)
+            return {"failed": True, "error": "stream stalled mid-stream"}
+
+        raw_results = {
+            "claude:accuracy": {"failed": True, "error": "stream stalled mid-stream"}
+        }
+        runners = [("claude:accuracy", _always_fails)]
+
+        result = pipeline._recover_failed_calls(
+            raw_results, runners, self._cfg(recovery_passes=2), {}, task_timeout=5
+        )
+
+        assert len(attempts) == 2
+        assert result["claude:accuracy"]["failed"] is True
+
+    def test_recovery_does_not_touch_calls_that_already_succeeded(self):
+        attempts = []
+
+        def _should_never_run():
+            attempts.append(1)
+            return {"failed": False}
+
+        raw_results = {
+            "claude:accuracy": {"failed": False, "data": {"flags": []}},
+            "openai:structure": {"failed": True, "error": "stream stalled"},
+        }
+        runners = [
+            ("claude:accuracy", _should_never_run),
+            ("openai:structure", lambda: {"failed": False}),
+        ]
+
+        result = pipeline._recover_failed_calls(
+            raw_results, runners, self._cfg(), {}, task_timeout=5
+        )
+
+        assert attempts == []
+        assert result["claude:accuracy"] == {"failed": False, "data": {"flags": []}}
+        assert result["openai:structure"]["failed"] is False
+
+
+class TestMergeRecoveredResults:
+    """``_merge_recovered_results`` — the ``--retry-failed`` merge step."""
+
+    def test_previously_successful_entries_pass_through_unchanged(self):
+        prior = {"claude:accuracy": {"failed": False, "data": {"flags": []}}}
+        merged = pipeline._merge_recovered_results(prior, {})
+        assert merged == prior
+
+    def test_previously_failed_entry_is_replaced_by_the_new_attempt(self):
+        prior = {"openai:structure": {"failed": True, "error": "stream stalled"}}
+        retried = {"openai:structure": {"failed": False, "data": {}}}
+        merged = pipeline._merge_recovered_results(prior, retried)
+        assert merged["openai:structure"] == {"failed": False, "data": {}}
+
+    def test_a_retry_that_fails_again_still_replaces_the_stale_failure(self):
+        prior = {"openai:structure": {"failed": True, "error": "stream stalled"}}
+        retried = {"openai:structure": {"failed": True, "error": "still stalled"}}
+        merged = pipeline._merge_recovered_results(prior, retried)
+        assert merged["openai:structure"]["error"] == "still stalled"
+
+    def test_untouched_entries_from_prior_survive_a_partial_retry(self):
+        prior = {
+            "claude:accuracy": {"failed": False, "data": {}},
+            "openai:structure": {"failed": True, "error": "stream stalled"},
+        }
+        retried = {"openai:structure": {"failed": False, "data": {}}}
+        merged = pipeline._merge_recovered_results(prior, retried)
+        assert merged["claude:accuracy"] == {"failed": False, "data": {}}
+        assert merged["openai:structure"]["failed"] is False
+
+
 class TestSameProviderStagger:
     """A provider's own calls must not all fire in the same instant.
 

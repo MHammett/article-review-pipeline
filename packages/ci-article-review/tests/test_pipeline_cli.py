@@ -58,6 +58,85 @@ class TestRawDraftArgparse:
                 pipeline.main()
 
 
+class TestRetryFailedArgparse:
+    def test_retry_failed_mutually_exclusive_with_replay(self):
+        import ci_article_review.pipeline as pipeline
+
+        argv = [
+            "pipeline.py",
+            "--draft",
+            "handoff.md",
+            "--publication",
+            "myblog",
+            "--replay",
+            "run_1_results.json",
+            "--retry-failed",
+            "run_1_results.json",
+        ]
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit):
+                pipeline.main()
+
+    def test_retry_failed_rejected_with_publish(self):
+        import ci_article_review.pipeline as pipeline
+
+        argv = [
+            "pipeline.py",
+            "--publish",
+            "handoff.md",
+            "--publication",
+            "myblog",
+            "--retry-failed",
+            "run_1_results.json",
+        ]
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit):
+                pipeline.main()
+
+
+class TestRetryFailedFlowsIntoReview:
+    """--retry-failed must reach run_draft_pipeline alongside normal draft-loading."""
+
+    def test_retry_failed_path_reaches_run_draft_pipeline(self):
+        import ci_article_review.pipeline as pipeline
+
+        argv = [
+            "pipeline.py",
+            "--draft",
+            "handoff.md",
+            "--publication",
+            "myblog",
+            "--retry-failed",
+            "run_1_results.json",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch("ci_article_review.pipeline.logging.FileHandler"),
+            patch("logging.Logger.addHandler"),
+            patch("ci_article_review.pipeline.run_draft_pipeline") as mock_run,
+        ):
+            pipeline.main()
+
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["retry_failed_results"] == "run_1_results.json"
+        # Normal draft loading is unaffected — the handoff path still flows through.
+        assert mock_run.call_args.args[0] == "handoff.md"
+
+    def test_absent_flag_defaults_to_none(self):
+        import ci_article_review.pipeline as pipeline
+
+        argv = ["pipeline.py", "--draft", "handoff.md", "--publication", "myblog"]
+        with (
+            patch.object(sys, "argv", argv),
+            patch("ci_article_review.pipeline.logging.FileHandler"),
+            patch("logging.Logger.addHandler"),
+            patch("ci_article_review.pipeline.run_draft_pipeline") as mock_run,
+        ):
+            pipeline.main()
+
+        assert mock_run.call_args.kwargs["retry_failed_results"] is None
+
+
 class TestRawDraftModeFlowsIntoReview:
     """--raw-draft alone must build a raw-text handoff and reach run_draft_pipeline."""
 
