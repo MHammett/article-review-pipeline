@@ -39,6 +39,7 @@ result re-keying, the API call log, consolidation, citations, cost and the save.
 import json
 import os
 
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -288,13 +289,17 @@ def _normalise(obj):
 
 
 @contextmanager
-def _stubbed_run(tmp_path, extra_patches=(), **run_kwargs):
+def _stubbed_run(tmp_path, extra_patches=(), sleeps=None, **run_kwargs):
     """Execute the full draft pipeline against stubs.
 
     ``extra_patches`` are entered last, so a test can override any stub set up
     here — used to inject failures into optional passes, and to swap the config,
     while asserting the run still completes. ``run_kwargs`` go to
     ``run_draft_pipeline`` (``offline=True``, say).
+
+    ``sleeps``, if given, is a list the pipeline's ``time.sleep`` durations are
+    appended to — see the ``time.sleep`` stub below for why it is recorded
+    rather than served.
     """
     from contextlib import ExitStack
 
@@ -307,6 +312,22 @@ def _stubbed_run(tmp_path, extra_patches=(), **run_kwargs):
         p("merge_configs", return_value=_CONFIG)
         p("check_model_currency", return_value=_CURRENCY)
         p("_run_domain", side_effect=_fake_run_domain)
+        # Record the pipeline's sleeps instead of serving them. Same-provider
+        # calls are staggered by `provider_stagger_seconds` (default 3), so an
+        # unstubbed run of this fixture spends its longest offset — 3 real
+        # seconds — sitting in `_delay_start`, once per test that uses it.
+        #
+        # Recording rather than no-op'ing keeps every step of that path live:
+        # the offsets are still computed, `_delay_start` still wraps each
+        # runner, and the sleep is still called with the offset it computed.
+        # `TestProviderStagger` below then asserts the durations, which is
+        # strictly more than the wall-clock version proved — it endured the
+        # delay and checked nothing. (ci_core.concurrency, which runs the
+        # dispatch, does not sleep, so nothing else here is stubbed by this.)
+        recorded = [] if sleeps is None else sleeps
+        stack.enter_context(
+            patch.object(pipeline.time, "sleep", side_effect=recorded.append)
+        )
         # Positional `new` — HISTORY_ROOT is a module-level string, not a callable.
         stack.enter_context(
             patch("ci_article_review.pipeline.HISTORY_ROOT", str(tmp_path / "history"))
@@ -546,4 +567,36 @@ class TestPipelineBodyBehaviour:
         claims = {c["claim"] for c in run_report["section_9_citations"]}
         assert "The 2019 figure was 33 percent." in claims, (
             "An 'outdated' fact-check claim did not reach citation resolution"
+        )
+
+
+class TestProviderStagger:
+    """Same-provider calls are spread; different providers all start at 0.
+
+    ``_stagger_offsets`` is unit-tested in ``test_pipeline_timeout.py`` against a
+    hand-built list of runner names. This asserts the wiring the unit test
+    cannot see: that a real run's assignments reach it, and that every offset it
+    returns is actually handed to ``_delay_start`` and slept.
+    """
+
+    def test_same_provider_calls_are_staggered_by_the_configured_interval(
+        self, tmp_path
+    ):
+        slept = []
+        with _stubbed_run(tmp_path, sleeps=slept) as report:
+            models = [c["model"] for c in report["api_call_log"]]
+
+        # One offset per runner beyond the first of its provider, at the
+        # documented 3s default. A provider dispatched once contributes none.
+        per_provider = Counter(m.split("-")[0] for m in models)
+        expected = sorted(
+            3 * i for count in per_provider.values() for i in range(1, count)
+        )
+        assert expected, (
+            "No provider was dispatched more than once, so this run cannot "
+            f"exercise staggering at all: {per_provider}"
+        )
+        assert sorted(slept) == expected, (
+            f"Staggered sleeps {sorted(slept)} do not match the offsets the "
+            f"dispatch implies for {dict(per_provider)}: {expected}"
         )

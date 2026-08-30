@@ -943,7 +943,15 @@ class TestKnownUrlWaybackFallback:
         mock_wb.assert_not_called()
 
     def _resolve_with_fetch_failure(self, exc, wayback_result):
-        """Run one known_url claim whose direct fetch raises ``exc``."""
+        """Run one known_url claim whose direct fetch raises ``exc``.
+
+        ``wayback.submit`` is stubbed alongside ``check``. It has to be: a
+        resolved result whose snapshot is absent or stale is a re-capture target
+        for ``_submit_missing_archives``, and ``example.com`` passes
+        ``is_public_host``, so an unstubbed run asks archive.org's Save Page Now
+        API to really capture the page — measured at 21s of live network in a
+        unit test, on every run of the suite.
+        """
         snap_resp = _page_response()
         with (
             patch(
@@ -954,18 +962,22 @@ class TestKnownUrlWaybackFallback:
                 "ci_article_review.adapters.citation.resolver.wayback.check",
                 return_value=wayback_result,
             ) as mock_wb,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ) as mock_submit,
         ):
             results = resolver.resolve_citations(
                 [{"claim": "a claim", "known_url": "https://example.com/page"}],
                 _SOURCES,
             )
-        return results[0], mock_get, mock_wb
+        return results[0], mock_get, mock_wb, mock_submit
 
     def test_timeout_recovers_via_wayback_snapshot(self):
         snapshot_url = (
             "https://web.archive.org/web/20240101000000/https://example.com/page"
         )
-        result, mock_get, _ = self._resolve_with_fetch_failure(
+        result, mock_get, _, _ = self._resolve_with_fetch_failure(
             requests.exceptions.ReadTimeout("read timed out"),
             {"archived": True, "snapshot_url": snapshot_url},
         )
@@ -981,7 +993,7 @@ class TestKnownUrlWaybackFallback:
             "https://web.archive.org/web/20240101000000/https://example.com/page"
         )
         # requests wraps urllib3's NameResolutionError in a ConnectionError.
-        result, _, _ = self._resolve_with_fetch_failure(
+        result, _, _, _ = self._resolve_with_fetch_failure(
             requests.exceptions.ConnectionError(
                 "NameResolutionError: getaddrinfo failed [Errno 11002]"
             ),
@@ -993,7 +1005,7 @@ class TestKnownUrlWaybackFallback:
         assert result["origin_failure"] == "unreachable"
 
     def test_timeout_with_no_snapshot_reports_unresolved(self):
-        result, _, _ = self._resolve_with_fetch_failure(
+        result, _, _, _ = self._resolve_with_fetch_failure(
             requests.exceptions.Timeout("timed out"), {"archived": False}
         )
 
@@ -1003,7 +1015,7 @@ class TestKnownUrlWaybackFallback:
 
     def test_stale_snapshot_stays_flagged_stale(self):
         """A 245-day-old snapshot satisfying a timeout is still stale."""
-        result, _, mock_wb = self._resolve_with_fetch_failure(
+        result, _, mock_wb, mock_submit = self._resolve_with_fetch_failure(
             requests.exceptions.Timeout("timed out"),
             {
                 "archived": True,
@@ -1018,6 +1030,11 @@ class TestKnownUrlWaybackFallback:
         assert "245 days old" in result["archive_provenance"]
         # The availability answer from the fallback is reused, not re-fetched.
         assert mock_wb.call_count == 1
+        # ...and a stale snapshot is queued for re-capture, which is the other
+        # half of _submit_missing_archives' contract. This ran unasserted
+        # against the live Save Page Now API before the stub above.
+        assert mock_submit.call_count == 1
+        assert mock_submit.call_args.args[0] == "https://example.com/page"
 
     def test_5xx_does_not_attempt_wayback_fallback(self):
         """An origin-side error is the origin's problem, not something an
@@ -1792,8 +1809,17 @@ class TestWaybackRateLimitHandling:
         wayback.reset_rate_limit_state()
 
     def test_calls_are_paced_apart(self):
+        # The interval is patched in explicitly rather than taken from the
+        # module: conftest's `neutralise_wayback_pacing` zeroes it for every
+        # test, so anything asserting the pacing has to ask for it back.
+        # (`test_wayback.py::TestPacingClock` asserts the exact durations and
+        # the interaction with a 429's backoff clock; this stays here as the
+        # resolver-side statement that pacing happens at all.)
         seen = []
-        with patch.object(wayback.time, "sleep", side_effect=seen.append):
+        with (
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 3.0),
+            patch.object(wayback.time, "sleep", side_effect=seen.append),
+        ):
             wayback._pace()
             wayback._pace()
         assert seen and seen[-1] > 0, "second call must wait for the interval"

@@ -335,7 +335,36 @@ uv run ci-review --draft handoff.md --publication mypub --cost-preset maximum --
 uv run pytest packages/
 ```
 
-Around 600 tests, all external API calls mocked — no keys required.
+Around 1,560 tests in roughly 20 seconds, all external API calls mocked — no
+keys required.
+
+### The `slow` marker
+
+One test is inherently wall-clock-bound: `test_the_executor_form_really_did_hang`
+proves that a `concurrent.futures` atexit join really does hold the interpreter
+open after a run finishes, and the only way to show a hang is to wait one out
+(~5s). It is marked `slow`.
+
+**`slow` tests are not skipped by default** — a green `uv run pytest packages/`
+means the whole suite passed, with nothing quietly sitting out. Deselect them
+only when you want a tighter inner loop:
+
+```powershell
+uv run pytest packages/ -m "not slow"
+```
+
+To run just those tests:
+
+```powershell
+uv run pytest packages/ -m slow
+```
+
+The marker is registered in the root `pyproject.toml` (and in
+`packages/ci-core/pyproject.toml`, which is the config pytest reads when that
+package's tests are run on their own). Reach for it sparingly: almost every
+slow test this suite has had was slow by accident — a real `time.sleep`, an
+unstubbed network call, or a per-test fixture doing shared work — and those
+should be fixed, not marked.
 
 ---
 

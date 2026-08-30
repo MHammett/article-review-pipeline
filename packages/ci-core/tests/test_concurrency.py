@@ -62,8 +62,22 @@ class TestProcessExit:
 
     # Longer than the assert below, so a process that waits for the abandoned
     # call cannot pass by finishing it.
-    ABANDONED_SECONDS = 20
-    MUST_EXIT_WITHIN = 10
+    #
+    # Sized from measurement, not guesswork. The two exit times these tests
+    # separate do not scale together:
+    #
+    #   * the fixed (daemon-thread) form exits in ~0.57s — interpreter start
+    #     plus importing ci_core — *independently* of how long the abandoned
+    #     call still has to run;
+    #   * the broken (executor) form exits at ~abandoned + 0.1s, because the
+    #     atexit join waits the call out.
+    #
+    # So the only job of ABANDONED_SECONDS is to put daylight between those
+    # two, and MUST_EXIT_WITHIN is the line drawn between them. At 5s/3s the
+    # margin is >5x on both sides (0.57s vs the 3s line, 3s vs 5.1s), which is
+    # as decisive as the 20s/10s this used to spend and 15s cheaper per run.
+    ABANDONED_SECONDS = 5
+    MUST_EXIT_WITHIN = 3
 
     def _run(self, body):
         script = textwrap.dedent(body).format(
@@ -108,11 +122,17 @@ class TestProcessExit:
             f"interpreter open, which is the bug this guards"
         )
 
+    @pytest.mark.slow
     def test_the_executor_form_really_did_hang(self):
         """Pins the diagnosis, so the fix cannot be argued away later.
 
         If this ever stops hanging, CPython changed its atexit behaviour and the
         comment in ci_core.concurrency explaining the fix needs revisiting.
+
+        Marked ``slow`` because proving a hang means waiting one out: this is
+        the only test in the suite whose cost is irreducible rather than
+        accidental. It still runs by default; ``-m "not slow"`` deselects it for
+        a fast inner loop.
         """
         proc, elapsed = self._run(
             """
@@ -214,13 +234,31 @@ class TestRunAllWithTimeout:
         assert finished_order == ["fast"]
 
     def test_jobs_actually_run_concurrently(self):
-        """Two 1s jobs must take about 1s total, not 2 — proves these are
-        parallel threads, not a sequential loop with a shared deadline."""
-        started = time.monotonic()
-        jobs = [(str(i), lambda: time.sleep(1), 5) for i in range(4)]
-        run_all_with_timeout(jobs, global_timeout=5)
-        elapsed = time.monotonic() - started
-        assert elapsed < 2.0
+        """All four jobs must be in flight at once, not run in a sequential loop.
+
+        A barrier rather than a stopwatch. Every job has to arrive before any of
+        them is released, so a sequential implementation cannot satisfy this at
+        any speed: the first job would sit waiting for three callers that will
+        not run until it returns, and the barrier would break. The previous
+        form slept 1s in each of four jobs and asserted the total stayed under
+        2s — the same claim, argued from wall-clock ratio, for 1s a run.
+
+        `run_all_with_timeout` starts one daemon thread per job with no pool
+        bound (see its implementation), so a four-party barrier is safe here.
+        """
+        gate = threading.Barrier(4, timeout=5)
+        jobs = [(str(i), gate.wait, 5) for i in range(4)]
+
+        results = run_all_with_timeout(jobs, global_timeout=5)
+
+        errors = {name: err for name, (_, err) in results.items() if err is not None}
+        assert not errors, (
+            f"Jobs did not all reach the barrier together, so they were not "
+            f"running concurrently: {errors}"
+        )
+        # Each waiter gets a distinct arrival index, so this also shows all four
+        # really passed through rather than one running four times.
+        assert sorted(value for value, _ in results.values()) == [0, 1, 2, 3]
 
 
 class TestRunAllWithTimeoutProcessExit:

@@ -495,3 +495,73 @@ class TestNonJsonAvailabilityResponse:
         assert result["archived"] is None
         assert "non-JSON 200 response" in result["error"]
         assert "Expecting value" not in result["error"]
+
+
+class TestPacingClock:
+    """``_pace()`` actually waits on the shared clock.
+
+    Everything else about the guard is asserted in ``TestRateLimitGuard``, but
+    every test there — and the ``neutralise_wayback_pacing`` fixture in
+    ``conftest.py`` — sets the intervals to 0.0, so nothing checks that a
+    non-zero interval is honoured. Before this class, the only thing standing
+    behind ``_MIN_INTERVAL_SECONDS`` was six unrelated tests in
+    ``TestWaybackCheck`` incidentally sitting out the wait and asserting nothing
+    about it.
+
+    The clock is left real and ``time.sleep`` is recorded instead of served, so
+    these assert the duration ``_pace`` computes without spending it.
+    """
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def test_a_second_call_waits_out_the_minimum_interval(self):
+        slept = []
+        with (
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 3.0),
+            patch.object(wayback.time, "sleep", side_effect=slept.append),
+        ):
+            wayback._pace()
+            assert slept == [], "The first call of a run has nothing to wait for"
+            wayback._pace()
+
+        assert len(slept) == 1, f"Second call did not pace at all: {slept}"
+        # Back-to-back, so the wait is the whole interval bar the microseconds
+        # spent between the two calls.
+        assert 2.9 <= slept[0] <= 3.0, slept
+
+    def test_a_429_from_another_thread_holds_this_one_back(self):
+        """The half that makes the backoff process-wide.
+
+        ``TestRateLimitGuard`` proves a 429 pushes ``_blocked_until`` forward;
+        this proves a caller that never saw the 429 waits for it. Without both,
+        the shared clock could move and be ignored.
+        """
+        slept = []
+        with (
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback.time, "sleep", side_effect=slept.append),
+        ):
+            wayback._note_rate_limited(30.0)
+            wayback._pace()
+
+        assert len(slept) == 1, "A backed-off caller did not wait at all"
+        assert 29.0 <= slept[0] <= 30.0, slept
+
+    def test_the_later_of_the_two_deadlines_wins(self):
+        """A short interval must not let a caller through a long backoff."""
+        slept = []
+        with (
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 3.0),
+            patch.object(wayback.time, "sleep", side_effect=slept.append),
+        ):
+            wayback._note_rate_limited(30.0)
+            wayback._pace()
+
+        assert len(slept) == 1, "A backed-off caller did not wait at all"
+        assert 29.0 <= slept[0] <= 30.0, (
+            f"Waited {slept} — the 3s interval won over the 30s backoff"
+        )
