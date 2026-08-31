@@ -1,4 +1,4 @@
-.PHONY: install setup lint test build
+.PHONY: install setup lint test test-fast build
 
 install:
 	uv sync
@@ -14,6 +14,11 @@ lint:
 
 test:
 	uv run pytest packages/
+
+# Same suite minus the inherently wall-clock-bound tests — for a tight inner
+# loop. `make test` is what has to be green; see README "The `slow` marker".
+test-fast:
+	uv run pytest packages/ -m "not slow"
 
 build:
 	uv build --package ci-core

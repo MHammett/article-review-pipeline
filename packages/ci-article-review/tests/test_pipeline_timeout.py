@@ -50,10 +50,18 @@ class TestRunReviewsInParallel:
         thread backstop has to be what returns control, not the call itself
         finishing.
         """
+        # The slow call blocks on an event this test releases, rather than on a
+        # fixed sleep. Two reasons, and speed is the lesser one: a `sleep(2)`
+        # made `assert not finished.is_set()` below a statement about timing
+        # (it could pass because 2s had not elapsed yet), where a gate makes it
+        # a statement about fact — the call *cannot* have completed. It also
+        # means the test spends the 0.2s it is measuring instead of the 2s it
+        # was waiting out at the end.
+        release = threading.Event()
         finished = threading.Event()
 
         def _slow():
-            time.sleep(2)
+            release.wait(timeout=5)
             finished.set()
             return {"failed": False}
 
@@ -74,7 +82,8 @@ class TestRunReviewsInParallel:
         # runs on a daemon thread, it cannot hold the interpreter open either
         # (see ci_core.concurrency for the regression test proving that).
         assert not finished.is_set()
-        finished.wait(timeout=5)
+        release.set()
+        assert finished.wait(timeout=5), "the abandoned call never resumed"
 
     def test_one_slow_task_does_not_hold_up_the_batch(self):
         """Shape of the pipeline's parallel block: fast passes are not blocked.

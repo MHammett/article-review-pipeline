@@ -24,6 +24,16 @@ ci-core = { workspace = true }
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 addopts = "--import-mode=importlib"
+markers = [
+    # Tests whose wall-clock cost is inherent, not accidental — currently just
+    # the one that proves a `concurrent.futures` atexit join really does hold
+    # the interpreter open, which can only be shown by waiting one out.
+    #
+    # Not skipped by default: a green run means the whole suite passed. Use
+    # `-m "not slow"` to deselect them while iterating. See README "Running the
+    # tests".
+    "slow: inherently wall-clock-bound; deselect with -m 'not slow'",
+]
 
 # Authoritative mypy config. CI runs `mypy` from the repo root, so this is the
 # config mypy actually reads — per-package [tool.mypy] sections are not consulted
