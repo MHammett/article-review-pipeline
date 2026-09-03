@@ -216,6 +216,44 @@ Readable review (paste into chat): pipeline_history/my-article/run_1_20260809_14
 
 ---
 
+## Authorship markers
+
+Step 4 of the loop above is where machine typography enters the article. The draft goes out to a chat model, comes back revised, and gets pasted into a file — and what comes back is not punctuated like something typed on a keyboard. Measured across `pipeline_history/` and `handoff_templates/`: 2,258 em dashes, 1,782 curly apostrophes, and 376 non-breaking hyphens, a character no one types on purpose. The author's own drafts carry four em dashes and nothing else.
+
+`ci-markers` reports that residue and optionally removes it.
+
+```powershell
+uv run ci-markers revised_draft.md                    # what is in there
+uv run ci-markers revised_draft.md --fix              # remove the invisible residue
+uv run ci-markers revised_draft.md --fix --aggressive # also flatten typography to ASCII
+```
+
+**What this is not.** There is no recoverable watermark in the text this pipeline handles, and this tool does not remove one. The review models never write the article, the revise step rewrites whatever the draft model produced, and a scan of the whole corpus found no zero-width character anywhere. Stripping typography is cosmetic. It also will not fool a classifier, which keys on sentence rhythm and word choice far more than on punctuation — prose style is `banned_phrases` territory in the publication config, not a character-level problem.
+
+**Two tiers, because they are different decisions.** The default `--fix` changes no glyph: it removes characters that render as nothing and normalises the spaces that only pretend to be one. `--aggressive` also flattens em dashes, curly quotes and known lookalike letters, which visibly changes the prose — an author who uses em dashes is entitled to keep using them, so that stays opt-in.
+
+**Built for the marker that does not exist yet.** Detection keys on Unicode *classes*, not a list of bad characters: format characters, private-use and unassigned code points, separators, orphaned variation selectors, and scripts mixed inside a single word. Anything built from those is caught without a change to the code. The one trap worth naming is that variation selectors are category `Mn`, not `Cf` — a scanner that sweeps format characters and stops there misses `U+E0100`–`U+E01EF` entirely, which is the channel currently used to hide bytes in text. For a marker built from none of that, `--inventory` counts every distinct non-ASCII code point and judges nothing; diff it between drafts and a character that was not there last week shows up on its own.
+
+| Flag | Purpose |
+|---|---|
+| `--fix` | Rewrite each file with its markers removed. Without this the tool only reports — it never writes |
+| `--aggressive` | With `--fix`, also flatten typography to ASCII and substitute known confusables. Changes visible text |
+| `--inventory` | Also list every distinct non-ASCII code point, with no verdicts |
+| `--stdin` | Read from stdin, write sanitized text to stdout, report to stderr, so it composes in a pipe |
+| `--json` | Machine-readable output |
+| `--verbose`, `-v` | DEBUG logging |
+
+Findings are grouped by what they mean, and two of the groups are not markers at all:
+
+- **Invisible** — renders as nothing; never innocent in prose. Removed by `--fix`.
+- **Decode damage** — a replacement character or an unassigned code point, meaning bytes were lost upstream. **Reported and never removed**, by either tier: deleting the scar leaves the wound. Finding these is what surfaced a citation fetch storing a PDF's raw binary as a source's content summary.
+- **Mixed-script words** — a Cyrillic `а` inside an otherwise-Latin word. A whole Cyrillic word is a quotation and is left alone.
+- **Lookalike spaces** and **typography** — cosmetic.
+
+The exit code suits a publish gate: `1` when a file contains an invisible character, a mixed-script word, or decode damage; `0` when it is clean or the only findings are cosmetic. An em dash should not fail a build.
+
+---
+
 ## Cross-run analytics
 
 A single run tells you about one article. `ci-history-report` reads every `run_*_report.json` under `pipeline_history/` and reports what only shows up across many runs:
@@ -401,6 +439,8 @@ content-intelligence/
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
 │   │   │   ├── voice_pattern_report.py  recurring voice patterns across articles (ci-voice-patterns)
+│   │   │   ├── markers.py           reports/strips machine-authorship markers in a
+│   │   │   │                        draft (ci-markers); --fix removes, default only reports
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs
@@ -467,6 +507,9 @@ content-intelligence/
 │   │   │   │                     a .env value (python-dotenv's override=False)
 │   │   │   ├── console.py        force_utf8_stdio — every CLI calls it first, so a
 │   │   │   │                     cp1252 Windows console cannot kill a report mid-print
+│   │   │   ├── text_markers.py  detects invisible characters, mixed-script words and
+│   │   │   │                     decode damage in article text, by Unicode class rather
+│   │   │   │                     than a denylist; inventory() censuses the rest
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
 │   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml
 │   │   │   ├── config.py         pydantic settings (no production consumer yet)
