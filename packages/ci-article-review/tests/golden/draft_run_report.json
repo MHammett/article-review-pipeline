@@ -127,12 +127,18 @@
         "total_usd": 0.0045
       }
     ],
+    "discarded_calls": 0,
+    "incurred_usd": 0.0225,
     "pricing_known": false,
+    "replayed_usd": 0.0,
     "total_input_usd": 0.0125,
     "total_output_usd": 0.01,
-    "total_usd": 0.0225
+    "total_usd": 0.0225,
+    "uncosted_calls": 0
   },
   "delta": null,
+  "empty_result_details": [],
+  "empty_results": [],
   "ensemble": {
     "assignments": [
       "gemini:fact_check",
@@ -146,7 +152,7 @@
   },
   "generated": "<volatile>",
   "lt_corrections_applied": [],
-  "lt_failed": true,
+  "lt_failed": false,
   "lt_skipped": true,
   "lt_skipped_reason": "disabled",
   "model_currency": {
@@ -230,6 +236,33 @@
   "publication": "testpub",
   "run_number": 1,
   "section_1_consensus": [
+    {
+      "flags": [
+        {
+          "attack_vector": "Demand the record.",
+          "domain": "red_team",
+          "passage": "Local officials were not consulted.",
+          "risk": "Unsourced negative claim about named parties.",
+          "source_model": "mistral",
+          "type": "highest_credibility_risk"
+        },
+        {
+          "checked": "county board minutes",
+          "claim": "Local officials were not consulted.",
+          "domain": "fact_check",
+          "reason": "no public record found",
+          "source_model": "gemini",
+          "type": "unverifiable"
+        }
+      ],
+      "languagetool_also_flagged": false,
+      "models": [
+        "gemini:fact_check",
+        "mistral:red_team"
+      ],
+      "passage": "Local officials were not consulted.",
+      "weight_sum": 2.6
+    },
     {
       "flags": [
         {

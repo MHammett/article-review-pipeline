@@ -686,3 +686,54 @@ class TestReportedDirectoryMatchesWhatWasWritten:
         """No markdown path (e.g. the save failed) still prints a useful guess."""
         out = self._run(None, capsys)
         assert "data-centers-dont-have" in out
+
+
+class TestTheHardExitStaysOutOfMain:
+    """`os._exit` must sit in `cli()`, never in `main()`.
+
+    `main()` is called in-process by this suite. An unconditional hard exit
+    inside it killed pytest 36% of the way through a run, and because
+    `os._exit(0)` sets a success code the truncated run reported green — a
+    suite that stops early while claiming to pass being considerably worse
+    than the shutdown hang the exit exists to fix.
+    """
+
+    def _source(self, name):
+        import inspect
+
+        from ci_article_review import pipeline
+
+        return inspect.getsource(getattr(pipeline, name))
+
+    def test_main_does_not_hard_exit(self):
+        body = self._source("main")
+        assert "exit_without_waiting_for_foreign_threads" not in body
+        assert "os._exit" not in body
+
+    def test_cli_does(self):
+        assert "exit_without_waiting_for_foreign_threads" in self._source("cli")
+
+    def test_main_returns_rather_than_ending_the_process(self, monkeypatch):
+        """A bad invocation must raise SystemExit for a caller to handle, not
+        take the interpreter with it."""
+        import pytest
+
+        from ci_article_review import pipeline
+
+        monkeypatch.setattr("sys.argv", ["ci-review"])
+        with pytest.raises(SystemExit):
+            pipeline.main()
+
+    def test_the_console_script_points_at_cli(self):
+        from pathlib import Path
+
+        import tomllib
+
+        from ci_article_review import pipeline
+
+        root = Path(pipeline.__file__).parents[2] / "pyproject.toml"
+        scripts = tomllib.loads(root.read_text(encoding="utf-8"))["project"]["scripts"]
+        assert scripts["ci-review"].endswith(":cli"), (
+            "ci-review must enter through cli(), or a real run gets main()'s "
+            "normal shutdown and can hang on a foreign thread pool"
+        )

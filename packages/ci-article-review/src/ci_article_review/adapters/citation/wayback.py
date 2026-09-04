@@ -337,14 +337,10 @@ def check(url, timeout=10, stale_days=None):
 
     ts = closest.get("timestamp", "")
     snapshot_url = closest.get("url", "")
-    snapshot_age_days = None
-
-    if len(ts) >= 8:
-        try:
-            snap_dt = datetime.strptime(ts[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
-            snapshot_age_days = (datetime.now(timezone.utc) - snap_dt).days
-        except ValueError:
-            pass
+    # Was an inline copy of _age_days_from_timestamp, identical down to the
+    # swallowed ValueError. Two implementations of "how old is this snapshot" is
+    # one more than the number of places a fix would have been applied to.
+    snapshot_age_days = _age_days_from_timestamp(ts)
 
     stale_threshold = stale_days if stale_days is not None else _STALE_DAYS
     return {

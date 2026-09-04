@@ -8,7 +8,15 @@ only aggregate counts are printed to the console. This module fills that
 gap, following the SECTION 1-8 structure documented in
 ``handoff_templates/review_report.md`` (section 9, citations, was added to
 the pipeline after that template was written).
+
+The no-dependency rule below is about the *provider adapters* — importing
+``analysis.seo_suggest`` or ``adapters.citation.wayback`` would pull ``requests``
+and the model clients in behind them, so their constants are duplicated here and
+kept in step by a test. ``adapters.citation.disposition`` is exempt because it is
+a leaf: a tuple, a lookup and a pure function, importing nothing itself.
 """
+
+from .adapters.citation.disposition import DISPOSITIONS, disposition
 
 #: Order the SEO METADATA fields render in, matching publication.md's block.
 #: Duplicated from ``analysis.seo_suggest.FIELD_ORDER`` rather than imported so
@@ -95,6 +103,12 @@ def _render_section_1(consensus_flags):
                     "type",
                     "passage",
                     "passage_reference",
+                    # Fact-check findings reach Section 1 now, and their quoted
+                    # text lives in "claim" rather than "passage" — which is
+                    # already the heading directly above, so printing it again
+                    # under every source repeated the passage five or six times
+                    # per entry.
+                    "claim",
                 ),
             ):
                 lines.append(f"  {kv}")
@@ -451,34 +465,17 @@ def _render_archive_pair(citation, indent="  "):
 #: refused (403, 404, DNS), which is a different fact about the claim than never
 #: having had a URL at all — and it is usually actionable, because a publisher
 #: that refuses an automated fetch will often serve the same page to a person.
-_DISPOSITIONS = (
-    ("checksum", "Read, and supports the claim"),
-    ("content_mismatch", "Read, and does NOT support the claim"),
-    ("unverifiable", "Fetched, but could not be read"),
-    ("fetch_failed", "Source URL identified, but the fetch was refused"),
-    ("pointer", "Pointer only — nothing retrieved"),
-    ("no_source", "No source identified"),
-)
+#: Re-exported from the citation adapters so this renderer and the console run
+#: summary classify identically. They used to do it separately and disagreed.
+_DISPOSITIONS = DISPOSITIONS
 
 #: The two dispositions where a document was genuinely retrieved *and* its text
 #: read by the relevance check. "Checked" means these and only these — the
 #: verdict then splits them. Conflating "checked" with "supports" is the same
 #: mistake this section exists to stop a reader making, one level up.
-_READ_DISPOSITIONS = ("checksum", "content_mismatch")
 
 
-def _disposition(citation):
-    """Which ``_DISPOSITIONS`` bucket a citation belongs in.
-
-    Anything that never reached a verification tier is one of the two "nothing
-    was read" buckets, regardless of ``resolved``: ``fetch_failed`` when a URL
-    was identified and the fetch did not succeed, ``no_source`` when there was
-    no URL to try.
-    """
-    tier = citation.get("verification")
-    if tier in {k for k, _ in _DISPOSITIONS}:
-        return tier
-    return "fetch_failed" if citation.get("url") else "no_source"
+_disposition = disposition
 
 
 def _render_section_9(citations):
@@ -1082,7 +1079,16 @@ def render_report_markdown(report):
 
     corrections = report.get("lt_corrections_applied", [])
     if report.get("lt_skipped"):
-        lines.append("LanguageTool: skipped (no credentials configured)")
+        # Name the actual reason. Both skip paths land here, and asserting "no
+        # credentials configured" at a reader who had turned the pass off in
+        # config sends them to fix something that is not broken — the same
+        # wrong-message bug the console summary was already corrected for.
+        why = (
+            "grammar_pass is set to false in the pipeline config"
+            if report.get("lt_skipped_reason") == "disabled"
+            else "no LanguageTool credentials configured"
+        )
+        lines.append(f"LanguageTool: skipped ({why})")
     elif report.get("lt_failed"):
         lines.append("LanguageTool: FAILED — draft not grammar-corrected")
     else:
@@ -1096,6 +1102,15 @@ def render_report_markdown(report):
             "WARNING — truncated model responses (output-token ceiling hit; "
             "some findings were recovered, some were lost): "
             f"{', '.join(report['truncated_results'])}"
+        )
+        lines.append("")
+
+    if report.get("empty_results"):
+        lines.append(
+            "WARNING — model passes that returned a well-formed but completely "
+            "empty result. These did not fail and were not truncated, so the "
+            "sections they feed are simply short a model: "
+            f"{', '.join(report['empty_results'])}"
         )
         lines.append("")
 
