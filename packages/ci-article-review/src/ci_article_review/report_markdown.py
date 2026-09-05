@@ -60,6 +60,43 @@ def _wayback_summary(wb):
     return f"Archived — latest snapshot {age_str}{flag}: {wb.get('snapshot_url', '')}"
 
 
+def _render_alternates(urls, indent="  "):
+    """The other URLs tried for the same claim: a count first, then the list.
+
+    ``_kv_lines`` dumped this as a raw Python list repr, which for a
+    grounded-model citation is two or three 271-character opaque redirect URLs
+    run together on a single line — 546 of the 2,682 characters in the Honda
+    run's one content-mismatch entry, sitting above the line the author acts on.
+
+    The URLs stay, because a reader auditing a tier has to be able to see which
+    sources were tried. What changes is that the count leads, so the fact ("two
+    other sources were checked") is legible without reading 546 characters of
+    tracking URL, and each URL is its own subordinate line rather than part of a
+    wrapped blob with quotes and brackets in it.
+
+    Saying none of *them* supported the claim is safe in both places the
+    resolver sets this field: the checksum branch records the attempts that
+    failed *before* the one that succeeded, and the mismatch branch records
+    every attempt other than the best one. Neither list ever holds a supporting
+    source.
+
+    The wording has to stop there, though. The resolver's own note says "none
+    supported it either", which is true where it is written — under a refuted
+    claim — and false under the five real checksum entries that also carry this
+    field, where the primary source did support the claim. This renderer is
+    shared by every tier, so it says only what is true of the alternates.
+    """
+    urls = [u for u in (urls or []) if u]
+    if not urls:
+        return []
+    lines = [
+        f"{indent}- Alternates checked: {len(urls)} other source(s) cited for "
+        f"this claim were also fetched; none of them supported it."
+    ]
+    lines.extend(f"{indent}  - {u}" for u in urls)
+    return lines
+
+
 def _kv_lines(d, exclude=()):
     """Render remaining key/value pairs of a flag dict as indented bullets."""
     lines = []
@@ -68,6 +105,9 @@ def _kv_lines(d, exclude=()):
             continue
         if key == "wayback" and isinstance(value, dict):
             lines.append(f"  - Wayback: {_wayback_summary(value)}")
+            continue
+        if key == "alternates_checked" and isinstance(value, (list, tuple)):
+            lines.extend(_render_alternates(value))
             continue
         label = key.replace("_", " ").capitalize()
         lines.append(f"  - {label}: {value}")
@@ -513,6 +553,18 @@ _REASK_LEAD = {
     "stand": "maintains the claim and disputes the refutation",
 }
 
+#: Re-ask answers in which the asserting model faulted the *claim* rather than
+#: the citation. Both mean the draft is what has to change: ``correct_claim``
+#: supplies replacement wording, ``withdraw`` says the claim should go.
+#:
+#: The other two deliberately do not belong here. ``different_source`` stands by
+#: the claim and blames the URL, which is precisely the citation problem the
+#: default guidance describes; ``stand`` disputes the refutation outright and
+#: concedes nothing. Reading either as "the claim was wrong" would put words in
+#: the model's mouth in the one block where the section is trying to stop
+#: exactly that kind of substitution.
+_REASK_CONCEDES = frozenset({"correct_claim", "withdraw"})
+
 
 def _render_reask(reask):
     """What the asserting model said when handed its own refutation.
@@ -554,6 +606,58 @@ def _render_reask(reask):
         lines.append(f"    - That proposed source was checked: {outcome}.")
     elif action == "different_source":
         lines.append("    - That proposed source was NOT checked. Treat it as a lead.")
+    return lines
+
+
+def _render_mismatch_entry(citation):
+    """One content-mismatch entry, with the actionable content at the top.
+
+    Fields used to render in whatever order the resolver happened to write them,
+    which put a 546-character ``content_summary``, a 271-character opaque
+    redirect URL and two more of them under ``alternates_checked`` above the one
+    line an author acts on. On the Honda run the re-ask's proposed correction —
+    the draft says "January 1, 2003" where the source says "1998 or 2002" — was
+    the last line of a 2,682-character entry.
+
+    The order is now: what the check found, what to do about it, then the
+    evidence it rests on. The verdict still leads, so ``_render_reask``'s framing
+    survives the move: the reader meets the finding before the asserting model's
+    answer to it, and the answer is never presented as having settled anything.
+
+    Nothing is dropped, because the point of the section is that a reader can
+    audit a tier instead of trusting it — the checksum, the relevance quote, the
+    archive pairing and the alternate URLs all still render. ``note`` is the sole
+    suppression, and only in the specific case where it restates the relevance
+    reason printed two lines above it: the resolver builds it as verdict +
+    reason + alternates count, and all three of those now have their own lines.
+    A ``note`` that says anything else is kept, so the test is on the string
+    rather than on the disposition.
+    """
+    c = citation
+    lines = [f'- "{c.get("claim", "")}"']
+
+    verdict = c.get("relevance_verdict")
+    if verdict:
+        lines.append(f"  - Relevance verdict: {verdict}")
+    reason = c.get("relevance_reason")
+    if reason:
+        lines.append(f"  - Relevance reason: {reason}")
+
+    lines.extend(_render_reask(c.get("reask")))
+    lines.extend(_render_archive_pair(c))
+
+    exclude = [
+        "claim",
+        "resolved",
+        "reask",
+        "url",
+        "final_url",
+        "relevance_verdict",
+        "relevance_reason",
+    ]
+    if reason and reason in (c.get("note") or ""):
+        exclude.append("note")
+    lines.extend(_kv_lines(c, exclude=tuple(exclude)))
     return lines
 
 
@@ -725,16 +829,65 @@ def _render_section_9(citations):
         # wrong or the extraction missed the relevant part — a citation problem,
         # not a factual one. Collapsing them would overstate the first and bury
         # the second.
+        #
+        # "Much more often", though, is not "always", and this guidance used to
+        # be written as though it were: with nothing marked `contradicts` it told
+        # the reader, unconditionally, to go and check the URL. On the Honda run
+        # the single `not_addressed` entry carried a re-ask in which the
+        # asserting model read its own refutation and concluded the *claim* was
+        # wrong — the draft said the clock advanced to "January 1, 2003" where
+        # the source says "1998 or 2002" — and attached the corrected wording.
+        # The header pointed the reader away from the one actionable finding in
+        # the block.
+        #
+        # So the guidance is conditional on what the entries actually contain,
+        # and each sentence is scoped to the entries it is true of. The
+        # all-`not_addressed` wording is kept verbatim for the case it was
+        # written for: on the dc-environment run that was 47 of 49 refutations,
+        # and the advice is right there.
         contradicted = [
             c for c in mismatch if c.get("relevance_verdict") == "contradicts"
         ]
+        # Identity, not equality: two citations can compare equal as dicts, and
+        # `in` on a list of dicts would fold them together and undercount.
+        contradicted_ids = {id(c) for c in contradicted}
+        conceded = [
+            c
+            for c in mismatch
+            if id(c) not in contradicted_ids
+            and (c.get("reask") or {}).get("action") in _REASK_CONCEDES
+        ]
+        remaining = len(mismatch) - len(contradicted) - len(conceded)
         if contradicted:
             lines.append(
                 f"⚠ {len(contradicted)} of these came back `contradicts` — the "
                 "source says something that conflicts with the claim. Treat those "
                 "as a possible factual error, not a citation error."
             )
-        else:
+        if conceded:
+            n = len(conceded)
+            lines.append(
+                f"⚠ The model that asserted the claim was handed its own "
+                f"refutation for {n} of these and concluded the claim — not the "
+                f"citation — was wrong. What it proposes is near the top of "
+                f"{'that entry' if n == 1 else 'those entries'}. Do not read "
+                f"{'it' if n == 1 else 'them'} as "
+                f"{'a citation problem' if n == 1 else 'citation problems'}."
+            )
+        if remaining and (contradicted or conceded):
+            lead = (
+                "The one remaining entry is"
+                if remaining == 1
+                else f"The remaining {remaining} entries are"
+            )
+            lines.append(
+                f"{lead} `not_addressed` or `inconclusive` with no re-ask that "
+                "faulted the claim: the page did not cover it. That usually means "
+                "the wrong URL was checked, or the relevant part of the page did "
+                "not extract — verify the source is the one intended before "
+                "treating it as a problem with the claim."
+            )
+        elif remaining:
             lines.append(
                 "None came back `contradicts`. Every entry here is "
                 "`not_addressed` or `inconclusive`: the page did not cover the "
@@ -744,13 +897,7 @@ def _render_section_9(citations):
             )
         lines.append("")
         for c in mismatch:
-            lines.append(f'- "{c.get("claim", "")}"')
-            lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(
-                c, exclude=("claim", "resolved", "reask", "url", "final_url")
-            ):
-                lines.append(kv)
-            lines.extend(_render_reask(c.get("reask")))
+            lines.extend(_render_mismatch_entry(c))
         lines.append("")
 
     if unverifiable:
