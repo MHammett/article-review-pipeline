@@ -400,6 +400,7 @@ content-intelligence/
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
+│   │   │   ├── passage_match.py       decides when two quoted passages are the same passage
 │   │   │   ├── voice_pattern_report.py  recurring voice patterns across articles (ci-voice-patterns)
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
@@ -415,6 +416,7 @@ content-intelligence/
 │   │   │   │   ├── cms/wordpress.py          WordPress REST API publisher
 │   │   │   │   └── citation/
 │   │   │   │       ├── resolver.py           primary source resolution, checksums, confidence tiers
+│   │   │   │       ├── disposition.py        the one vocabulary for what happened to a citation
 │   │   │   │       ├── draft_citations.py    traces a claim to the citation the draft cites for it
 │   │   │   │       ├── wayback.py            Wayback archive check + Save Page Now submission
 │   │   │   │       ├── topic_match.py        keyword gating for pointer-only adapters

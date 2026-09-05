@@ -92,13 +92,28 @@ def classify_host(url):
         infos = socket.getaddrinfo(host, None)
     except Exception:
         return HOST_UNRESOLVABLE
+
+    checked = 0
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
+        checked += 1
         if not ip.is_global or ip.is_loopback or ip.is_private or ip.is_link_local:
             return HOST_NON_PUBLIC
+
+    # Reaching here having validated nothing is not evidence that the host is
+    # public — it is the absence of evidence either way. Returning HOST_PUBLIC
+    # for it made the guard fail open on precisely the inputs it could not
+    # reason about: an empty ``getaddrinfo`` result, or addresses that do not
+    # parse as IPs. "Unresolvable" is the honest answer and every caller already
+    # handles it — ``safe_get`` turns it into the ConnectionError requests would
+    # have raised anyway, and link validation fails open there deliberately, to
+    # get an accurate DNS message rather than a security refusal it cannot
+    # justify.
+    if not checked:
+        return HOST_UNRESOLVABLE
     return HOST_PUBLIC
 
 

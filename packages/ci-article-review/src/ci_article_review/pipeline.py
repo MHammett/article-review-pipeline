@@ -69,7 +69,10 @@ from ci_core import redact
 from ci_core.config_helpers import normalize_model_configs
 from ci_core import llm
 from . import schemas
-from ci_core.concurrency import run_all_with_timeout
+from ci_core.concurrency import (
+    exit_without_waiting_for_foreign_threads,
+    run_all_with_timeout,
+)
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from . import live_model_check
@@ -82,6 +85,9 @@ from .analysis.webpage import build_handoff_from_url
 from .adapters.citation import draft_citations
 from .adapters.citation import wayback
 from . import ensemble_capture
+from .passage_match import same_passage
+from .adapters.citation.disposition import DISPOSITIONS
+from .adapters.citation.disposition import disposition as citation_disposition
 
 log = logging.getLogger("pipeline")
 
@@ -680,19 +686,22 @@ def _claim_key(claim: str) -> frozenset:
 def _is_duplicate_claim(key: frozenset, seen_keys: list) -> bool:
     """True if ``key`` restates a claim already collected.
 
-    Exact match after normalisation catches the common case — the same sentence
-    with a trailing period, or a leading "The". The Jaccard pass catches the rest:
-    five models independently paraphrasing one fact.
+    Delegates to :func:`ci_article_review.passage_match.same_passage`, the one
+    place that decides whether two quotations point at the same spot in the
+    draft. ``key`` is already a set of content words (see :func:`_claim_key`),
+    so the containment test runs on those rather than on raw tokens.
+
+    The Jaccard-only test this replaces missed the dominant case. Every model is
+    quoting one draft, so the usual duplicate is a nested quotation — a sentence
+    and the paragraph around it — which scores near zero on Jaccard while being
+    the same claim. Of the 45 claims collected on 2026-09-03, 36 pairs had a
+    containment of 1.00 against another claim and every one cleared the 0.9
+    threshold as "distinct", so the run put the same claim through citation
+    resolution several times over.
     """
     if not key:
         return False
-    for other in seen_keys:
-        if key == other:
-            return True
-        union = len(key | other)
-        if union and len(key & other) / union >= _CLAIM_SIMILARITY:
-            return True
-    return False
+    return any(same_passage(key, other) for other in seen_keys)
 
 
 def _record_fact_check_degradation(report: dict, results: dict) -> None:
@@ -1331,7 +1340,13 @@ def run_draft_pipeline(
     if not grammar_enabled:
         log.info("Pass 1: Grammar pass disabled (grammar_pass: false) — skipping.")
         lt_result = {
-            "failed": True,
+            # Not a failure. A skip is a decision — either the config turned the
+            # pass off or there were no credentials to run it with — and marking
+            # it failed put `lt_failed: true` into every report of a run that
+            # had deliberately disabled grammar checking. The console and the
+            # markdown both test `skipped` first so they read correctly; only
+            # anything consuming the JSON was misled.
+            "failed": False,
             "skipped": True,
             # Both skip paths set skipped=True, and the summary used to print the
             # credentials message for either — telling an operator with working
@@ -1346,7 +1361,13 @@ def run_draft_pipeline(
             "Pass 1: No LanguageTool credentials configured — skipping grammar pass."
         )
         lt_result = {
-            "failed": True,
+            # Not a failure. A skip is a decision — either the config turned the
+            # pass off or there were no credentials to run it with — and marking
+            # it failed put `lt_failed: true` into every report of a run that
+            # had deliberately disabled grammar checking. The console and the
+            # markdown both test `skipped` first so they read correctly; only
+            # anything consuming the JSON was misled.
+            "failed": False,
             "skipped": True,
             "skipped_reason": "no_credentials",
             "change_log": [],
@@ -1396,7 +1417,10 @@ def run_draft_pipeline(
     # with no connection and no spend.
     link_check_enabled = pipeline_cfg.get("link_validation", True) and not offline
     if offline:
-        log.info("Offline: skipping link validation, Wayback and citation resolution")
+        log.info(
+            "Offline: skipping link validation, Wayback, citation resolution "
+            "and the SEO model calls"
+        )
     if link_check_enabled:
         from .analysis import links as links_analysis
 
@@ -1429,12 +1453,18 @@ def run_draft_pipeline(
     else:
         pre_analysis["links"] = []
 
-    if seo_suggestions is False:
+    if seo_suggestions is False or offline:
         # CLI override for this run only — does not modify the publication
         # config on disk. Mirrors --cost-preset above. Assigned rather than
         # setdefault'd because a bare `seo_rules:` line in YAML parses to None,
         # not to an empty dict. Covers both SEO model calls: the flag is about
         # not paying for the SEO extras, not about one of the two.
+        #
+        # --offline suppresses these too. Both are live model calls over the
+        # network, and the flag promises "a run that makes no network calls at
+        # all". They were exempt, so `--replay --offline` billed two Mistral
+        # calls on every run while printing "Cost: $0.0000 — replayed from a
+        # capture, no model calls made" (measured 2026-09-03, reproduced twice).
         pub_config["seo_rules"] = {**(pub_config.get("seo_rules") or {})}
         pub_config["seo_rules"]["suggestions"] = False
         pub_config["seo_rules"]["content_review"] = False
@@ -1783,6 +1813,14 @@ def run_draft_pipeline(
             "char_count": char_count,
             "status": status,
         }
+        if result.get("discarded_attempts"):
+            log_entry["discarded_attempts"] = result["discarded_attempts"]
+        if replay_results:
+            # These token counts came out of a capture file — they are the
+            # captured run's spend, not this one's. Marked so the cost summary
+            # can separate history from what this run actually bought; without
+            # it a replay reported the capture's total as its own.
+            log_entry["replayed"] = True
         if (not status_ok or truncated) and result.get("raw"):
             log_entry["raw_excerpt"] = _raw_excerpt(result["raw"])
         if not status_ok and result.get("error_body"):
@@ -1936,6 +1974,22 @@ def run_draft_pipeline(
             api_keys,
             verification_call_log=api_call_log,
             history_root=HISTORY_ROOT,
+            # Who "I" is. A first-person claim cannot be checked against a page
+            # without it. Told nothing, the verifier bound "I" to the first
+            # person it found and offered a stranger's family as evidence; told
+            # only not to guess, it answered not_addressed against a page
+            # carrying the author's own bio. Both measured 2026-09-04 against
+            # fd-ix.com/about/team/, where the author is in fact listed.
+            #
+            # The handoff's own "Author:" line wins, so a guest or co-authored
+            # piece is not attributed to the publication's usual byline; the
+            # publication default covers everything else, including --raw-draft,
+            # which carries no metadata at all.
+            author=(
+                (handoff.get("author") or "").strip()
+                or (pub_config.get("author_name") or "").strip()
+                or None
+            ),
         )
         verified_count = sum(
             1 for r in citation_results if r.get("verification") == "checksum"
@@ -1946,14 +2000,25 @@ def run_draft_pipeline(
         unverifiable_count = sum(
             1 for r in citation_results if r.get("verification") == "unverifiable"
         )
+        # Fetched, read, and found not to support the claim. Counted explicitly
+        # rather than falling into the "unresolved" remainder below, which is
+        # meant to hold claims no adapter could even attempt.
+        refuted_count = sum(
+            1 for r in citation_results if r.get("verification") == "content_mismatch"
+        )
         log.info(
-            "Citations: %d claim(s), %d verified, %d pointer-only, "
-            "%d could not be verified, %d unresolved",
+            "Citations: %d claim(s), %d verified, %d read but NOT supporting "
+            "the claim, %d pointer-only, %d could not be read, %d unresolved",
             len(claims),
             verified_count,
+            refuted_count,
             pointer_count,
             unverifiable_count,
-            len(claims) - verified_count - pointer_count - unverifiable_count,
+            len(claims)
+            - verified_count
+            - pointer_count
+            - unverifiable_count
+            - refuted_count,
         )
     else:
         citation_results = []
@@ -1970,13 +2035,25 @@ def run_draft_pipeline(
     # Cost tracking
     cost_summary = cost_analysis.calculate(api_call_log)
     report["cost_summary"] = cost_summary
-    log.info(
-        "Estimated cost: $%.4f (%s)",
-        cost_summary["total_usd"],
-        "exact"
-        if cost_summary["pricing_known"]
-        else "estimated — some model prices unknown",
-    )
+    if not cost_summary["pricing_known"]:
+        cost_basis = "estimated — some model prices unknown"
+    elif cost_summary.get("uncosted_calls"):
+        # Retried attempts the provider billed for and this run cannot price,
+        # because a stalled stream reports no usage. The number is a floor.
+        cost_basis = (
+            f"at least — {cost_summary['uncosted_calls']} retried attempt(s) "
+            f"were billed by the provider with no usage reported"
+        )
+    else:
+        cost_basis = "exact"
+    log.info("Estimated cost: $%.4f (%s)", cost_summary["total_usd"], cost_basis)
+    if cost_summary.get("discarded_calls"):
+        log.info(
+            "Retries: %d attempt(s) discarded and re-run; %d of them had usage "
+            "the cost above includes.",
+            cost_summary["discarded_calls"],
+            cost_summary["discarded_calls"] - cost_summary.get("uncosted_calls", 0),
+        )
 
     # Attach pre-analysis
     report["pre_analysis"] = pre_analysis
@@ -2293,6 +2370,26 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         else:
             print(f"  {', '.join(report['model_failures'])}")
 
+    if report.get("empty_results"):
+        print(
+            f"\nWARNING: {len(report['empty_results'])} model pass(es) returned "
+            f"nothing:"
+        )
+        for detail in report.get("empty_result_details") or []:
+            tokens = detail.get("completion_tokens")
+            spent = (
+                f" after spending {tokens} completion token(s)"
+                if isinstance(tokens, int)
+                else ""
+            )
+            print(f"  - {detail['pass']} returned an empty result{spent}.")
+            if detail.get("section"):
+                print(f"    {detail['section']} is short one model.")
+        print(
+            "  A well-formed empty response is not the same claim as "
+            "'reviewed and found nothing' — treat these as missing coverage."
+        )
+
     # Knock-on effects of those failures. Printed adjacent to the failure list
     # because the two are only useful together: "perplexity:fact_check failed"
     # and "9 claims verified" are separately unremarkable, and it is the link
@@ -2594,10 +2691,25 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     if cost and report.get("replayed_from"):
         # Say plainly that this number was not spent here. A replay carries the
         # captured run's token counts, so the figure is real history, not a bill.
-        print(
-            f"\nCost: $0.0000 — replayed from a capture, no model calls made."
-            f"\n  (the capture's own run cost ${cost['total_usd']:.4f})"
-        )
+        incurred = cost.get("incurred_usd", 0.0)
+        replayed = cost.get("replayed_usd", cost["total_usd"])
+        if incurred:
+            # A replay skips the ensemble, not necessarily everything. Anything
+            # still live — the SEO passes, citation verification — is real spend,
+            # and saying "no model calls made" over the top of it was simply
+            # untrue (measured 2026-09-03: two billed Mistral calls under a
+            # "$0.0000" line). Use --offline to suppress those too.
+            print(
+                f"\nCost: ${incurred:.4f} — the ensemble was replayed, but this "
+                f"run still made live calls."
+                f"\n  (the replayed capture's own run cost ${replayed:.4f})"
+                f"\n  Add --offline to skip every pass that reaches the network."
+            )
+        else:
+            print(
+                f"\nCost: $0.0000 — replayed from a capture, no model calls made."
+                f"\n  (the capture's own run cost ${replayed:.4f})"
+            )
     elif cost:
         known_flag = (
             ""
@@ -2631,9 +2743,23 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     citations = report.get("section_9_citations", [])
     if citations:
         resolved = [c for c in citations if c.get("resolved")]
-        verified = [c for c in resolved if c.get("verification") == "checksum"]
-        pointer = [c for c in resolved if c.get("verification") == "pointer"]
-        unverifiable = [c for c in resolved if c.get("verification") == "unverifiable"]
+        # Classified by the same function SECTION 9 uses, so the console and the
+        # readable report cannot drift apart again. Doing it separately here was
+        # the bug: "resolved" was treated as the dividing line and the remainder
+        # called "unresolved", which filed the five citations that were fetched,
+        # read, and found NOT to support their claim — they carry resolved=False
+        # — alongside the ones no adapter ever attempted, under a line that in
+        # the same breath reported "0 could not be verified" (2026-09-03).
+        by_disposition = {key: [] for key, _ in DISPOSITIONS}
+        for c in citations:
+            by_disposition[citation_disposition(c)].append(c)
+        verified = by_disposition["checksum"]
+        refuted = by_disposition["content_mismatch"]
+        unverifiable = by_disposition["unverifiable"]
+        pointer = by_disposition["pointer"]
+        # Every citation is in exactly one bucket, so this is a true remainder
+        # and the printed numbers always add up to the total.
+        unresolved = by_disposition["fetch_failed"] + by_disposition["no_source"]
         not_archived = [
             c for c in resolved if c.get("wayback", {}).get("archived") is False
         ]
@@ -2647,10 +2773,17 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         stale = [c for c in resolved if c.get("wayback", {}).get("snapshot_stale")]
         print(
             f"\nSection 9 — Citations: {len(citations)} claim(s) — "
-            f"{len(verified)} verified, {len(pointer)} pointer-only "
-            f"(not independently verified), {len(unverifiable)} could not be verified, "
-            f"{len(citations) - len(resolved)} unresolved"
+            f"{len(verified)} verified, {len(refuted)} read but NOT supporting "
+            f"the claim, {len(pointer)} pointer-only (not independently "
+            f"verified), {len(unverifiable)} could not be read, "
+            f"{len(unresolved)} unresolved"
         )
+        if refuted:
+            print(
+                f"  {len(refuted)} citation(s) were fetched and read, and the "
+                "source does not support the claim it was attached to. These "
+                "are the ones to act on — see Section 9."
+            )
         from_archive = [
             c for c in resolved if c.get("verified_via") == "wayback_fallback"
         ]
@@ -3197,5 +3330,40 @@ def main():
         sys.exit(1)
 
 
+def cli():
+    """Console-script entry point: run, then leave without waiting.
+
+    The hard exit lives here and not at the end of ``main`` because
+    ``os._exit`` takes the whole process with it, and ``main`` is called
+    in-process by the test suite. Putting it inside ``main`` killed pytest
+    itself 36% of the way through a run — and since ``os._exit(0)`` sets a
+    success code, the truncated run reported green. A suite that stops early
+    while claiming to pass is a worse defect than the hang this exists to fix.
+
+    Every output file is written and closed before this runs. What is left is
+    leaving, and leaving is the part that failed: litellm schedules its
+    post-call logging onto its own ThreadPoolExecutor, whose non-daemon workers
+    ``threading._shutdown()`` then waits for. With one wedged in a syscall that
+    never returns, the run finishes and the process does not — measured
+    2026-09-03 at 19 threads and 0% CPU minutes after "REVIEW COMPLETE", and
+    previously at two days. See ci_core.concurrency for why nothing gentler
+    reaches it.
+
+    ``SystemExit`` is caught rather than left to propagate, so a run ending in
+    ``sys.exit(1)`` — a bad config, a missing handoff — takes the same exit
+    path as a successful one and cannot hang either.
+    """
+    code = 0
+    try:
+        main()
+    except SystemExit as exc:
+        if isinstance(exc.code, int):
+            code = exc.code
+        elif exc.code is not None:
+            print(exc.code, file=sys.stderr)
+            code = 1
+    exit_without_waiting_for_foreign_threads(code)
+
+
 if __name__ == "__main__":
-    main()
+    cli()
