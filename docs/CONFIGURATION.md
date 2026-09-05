@@ -548,6 +548,112 @@ ungrounded fact-check pass is still worth more than an empty section. The
 original failure is kept in the results either way, so the report still says
 which model failed.
 
+**A domain that was never assigned a model is repaired too.** The set of domains
+checked for emptiness comes from the thoroughness preset, not from the results.
+Results only exist for domains that were *attempted*, so a domain whose every
+candidate was excluded — no credentials, `enabled: false`, a `prompts:` override,
+or drafting with the one model assigned to it — produces no result to be found
+empty, and used to be the one case this pass could not see. That is the total
+loss, not a partial one.
+
+---
+
+### Ensemble width, and backfilling a narrowed domain
+
+```yaml
+pipeline:
+  backfill_narrowed_domains: true   # default; false keeps the preset's literal lists
+```
+
+A cost preset buys fewer models, and that is the point of it. Two things make
+the trade worse than it needs to be, and both are addressed here.
+
+**The report now states the width.** Every report carries an *Ensemble Width*
+section in its header giving, for the preset actually used: how many domains ran
+on a single model, how many distinct models ran at all, a per-domain table of
+which models ran where, and what that does to Section 1. Previously the only
+record was the API call table, which reads as width only if you already know
+`_THOROUGHNESS_PRESETS` by heart and subtract the models the preset disabled.
+
+Consensus is the part whose meaning changes. Section 1 needs
+`consensus_min_models` (default 2) *distinct* sources on a passage, so:
+
+- Where every domain runs one model, no passage can reach the minimum from
+  inside a single domain — it takes two different domains flagging the same
+  passage. The section says so rather than leaving a thin Section 1 to read as a
+  clean draft.
+- Where the whole voter pool is below the minimum, Section 1 **cannot flag
+  anything at all**, and the report says that in those words. LanguageTool
+  counts toward the pool, since it is an independent source.
+
+`consensus_min_models` is deliberately *not* lowered automatically at thin
+presets. Lowering it would trade the one guarantee Section 1 makes — that
+something more than a single model agreed — for a fuller-looking section, and
+the backfill below recovers the width more honestly. Set it yourself if you want
+the weaker bar; the report prints the value in force.
+
+**Backfill.** A domain left narrower than its own preset entry asked for is
+topped back up from the models still available. Measured 2026-09-05 at
+`economy`, which disables grok and claude: the `standard` map pairs mistral with
+claude in `argument_integrity` and with grok in `red_team`, so disabling those
+two costs *two* domains their second model — and perplexity, which `economy`
+configures as a cheap grounded model, that map never assigns at all. The result
+was five domains on three distinct models, with the cheapest available second
+opinion sitting idle. With backfill it is seven calls across four distinct
+models, and three single-model domains.
+
+The rules are deliberately tight:
+
+- A domain is topped up **only to two models**, and never past what its own
+  preset entry asked for. Two is what corroboration costs — one model flagging
+  a passage is a finding, two is agreement, and `consensus_min_models` will not
+  promote anything to Section 1 below it. Going further buys a third voter for
+  a passage that already had a second: measured at +30% cost on `thorough` with
+  one key missing, for no change in how many domains were left uncorroborated.
+- A run with every configured model available is **untouched** — nothing is
+  short, so nothing is added.
+- Candidates are ordered by which model is carrying the fewest domains already,
+  so the width bought is distinct-model coverage rather than a third and fourth
+  domain piled onto whichever model sorts first.
+- Credential checks, `enabled: false`, `prompts:` overrides and the
+  drafting-model exclusion all apply exactly as in a normal assignment, and
+  `fact_check` still prefers a search-grounded model.
+
+Every backfilled assignment is logged (`Backfilled: ...`) and listed in the
+report's *Ensemble Width* section, naming the preset entry it stands in for.
+Set `backfill_narrowed_domains: false` to keep the preset's literal lists.
+
+**What it costs, per tier.** Measured 2026-09-05 against the real presets and
+`pricing.yaml`, for a ~1,400-word draft. With every provider credentialled only
+`economy` changes at all — the tier that was losing the most, and the only one
+whose preset disables models:
+
+| Preset | Calls | Distinct models | Single-model domains | Review-call cost |
+| --- | --- | --- | --- | --- |
+| `economy` | 5 → 7 | 3 → 4 | 5 → 3 | $0.019 → $0.034 (+81%) |
+| `standard` | 7 → 7 | 5 → 5 | 3 → 3 | unchanged |
+| `balanced` / `thorough` / `maximum` | unchanged | unchanged | unchanged | unchanged |
+
+`economy`'s +81% is the largest relative increase and the smallest absolute one:
+about 1.5 cents. A live run measured $0.0645 all-in, inside the $0.04–$0.10 band
+this file's preset table already documents for that tier.
+
+When a key is missing rather than a preset disabling a model, the two-model cap
+is what keeps the thick tiers cheap: `thorough` without a claude key is 9 → 10
+calls (+9%), where topping up to full preset width would have been 12 (+30%) for
+the same number of uncorroborated domains.
+
+Turn it off with `backfill_narrowed_domains: false` if the preset's literal call
+count is the budget you are holding to. It is also off automatically under
+`--only-model` / `--only-domain`, which exist to price one cell.
+
+**Why not rebalance the preset lists instead?** Splitting the mistral pairing
+would fix `economy` specifically and nothing else. Backfill fixes whichever
+models a given run is actually missing, including combinations nobody
+anticipated — a key that expired, a provider having an outage, a `prompts:`
+override — so the fixed lists stay a statement of intent rather than a table
+that has to encode every degraded configuration.
+
 ---
 
 ### Citation re-ask

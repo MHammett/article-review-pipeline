@@ -1042,6 +1042,155 @@ def _render_section_9(citations):
     return lines
 
 
+#: Domains whose loss costs more than their own section, and what it costs.
+#: fact_check is the only source of claims: nothing reaches citation resolution
+#: without it, so Sections 2 and 9 both go with it.
+_DOMAIN_STAKES = {
+    "fact_check": (
+        "it is the only source of claims, so Section 2 and Section 9 both depend on it"
+    ),
+}
+
+
+def _render_ensemble_width(report):
+    """How wide the ensemble was, in the report the author reads.
+
+    Reduced cost is meant to mean reduced functionality. The defect was that it
+    meant it silently: the only record of how narrow a run had become was the
+    API call table, and reading width off that means knowing
+    `_THOROUGHNESS_PRESETS` by heart and subtracting the models the preset
+    disabled. At `economy` that is five domains on three distinct models, every
+    one of them single-model — a report that reads exactly like a six-model run
+    that happened to agree less.
+
+    Consensus is the part that actually changes meaning. Section 1 needs
+    ``consensus_min_models`` distinct sources, so on a run where every domain
+    has one model, a consensus flag can only come from two domains agreeing —
+    and where the whole voter pool is smaller than the minimum, Section 1 cannot
+    flag anything at all, however much the models agree.
+
+    Returns [] for reports written before the width block existed, so they
+    render exactly as they did before.
+    """
+    ensemble = report.get("ensemble") or {}
+    width = ensemble.get("width")
+    if not width:
+        return []
+
+    models_by_domain = width.get("models_by_domain") or {}
+    if not models_by_domain:
+        return []
+
+    distinct = width.get("distinct_models") or []
+    single = width.get("domains_single_model") or []
+    min_models = width.get("consensus_min_models")
+    total_domains = len(width.get("domains_expected") or models_by_domain)
+
+    preset = ensemble.get("cost_preset")
+    thoroughness = ensemble.get("thoroughness", "standard")
+    preset_line = (
+        f"`{preset}` (thoroughness `{thoroughness}`)"
+        if preset
+        else f"thoroughness `{thoroughness}`"
+    )
+
+    lines = ["## Ensemble Width", ""]
+    lines.append(
+        "_What this run actually bought. A cost preset trades models for money; "
+        "these are the numbers that trade moves, and they change how everything "
+        "below should be read._"
+    )
+    lines.append("")
+    lines.append(f"- **Preset:** {preset_line}")
+    lines.append(
+        f"- **Distinct models that ran:** {len(distinct)}"
+        + (f" — {', '.join(distinct)}" if distinct else "")
+    )
+    lines.append(
+        f"- **Domains run by a single model:** {len(single)} of {total_domains}"
+        + (f" — {', '.join(single)}" if single else "")
+    )
+    lines.append("")
+
+    lines.append("| Domain | Models that ran |")
+    lines.append("| --- | --- |")
+    for domain, models in models_by_domain.items():
+        cell = ", ".join(models) if models else "**none — did not run**"
+        lines.append(f"| {domain} | {cell} |")
+    lines.append("")
+
+    # A single-model domain has no internal corroboration: whatever that one
+    # model missed is missing from the section, and nothing in the section says
+    # so. Worth naming the domains where that costs more than their own section.
+    for domain in single:
+        stake = _DOMAIN_STAKES.get(domain)
+        if stake:
+            lines.append(
+                f"**{domain} ran on one model.** Nothing corroborates it, and "
+                f"{stake}. A single provider failing there empties those "
+                f"sections without failing the run."
+            )
+            lines.append("")
+
+    # A domain nothing reviewed is deliberately NOT narrated here. The
+    # "Domains not reviewed" header block and the per-section note above it
+    # already say so, and say it better: they carry the reason and they sit
+    # directly above the empty section, where the reader meets the problem.
+    # Repeating it inside a block about width would give one fact two voices
+    # that could drift apart.
+
+    lines.extend(_consensus_meaning(width, min_models))
+
+    backfilled = width.get("backfilled") or []
+    if backfilled:
+        lines.append(
+            "**Backfilled for corroboration.** These domains lost a model the "
+            "preset names and were given a second one from what was available, "
+            "so no finding in them rests on a single pass:"
+        )
+        lines.append("")
+        for entry in backfilled:
+            lines.append(f"- {entry}")
+        lines.append("")
+
+    return lines
+
+
+def _consensus_meaning(width, min_models):
+    """State what this ensemble's width does to Section 1, in the report."""
+    if not min_models:
+        return []
+
+    pool = width.get("voter_pool") or 0
+    lt = " (including LanguageTool)" if width.get("languagetool_voted") else ""
+
+    if not width.get("consensus_reachable"):
+        return [
+            f"**SECTION 1 CANNOT FLAG ANYTHING.** Consensus requires "
+            f"{min_models} distinct sources agreeing on a passage, and this run "
+            f"had {pool}{lt}. An empty Section 1 here means the run could not "
+            f"reach consensus, not that the models found nothing to agree on.",
+            "",
+        ]
+
+    if width.get("consensus_needs_cross_domain"):
+        return [
+            f"**Consensus is reachable only across domains.** Section 1 needs "
+            f"{min_models} distinct sources on the same passage, and every "
+            f"domain here ran a single model — so no passage can reach it from "
+            f"within one domain. It takes two different domains flagging the "
+            f"same passage, out of a pool of {pool}{lt}. A thin Section 1 is "
+            f"the expected shape at this width, not a verdict on the draft.",
+            "",
+        ]
+
+    return [
+        f"Section 1 needs {min_models} distinct sources on a passage; this run "
+        f"had a pool of {pool}{lt}.",
+        "",
+    ]
+
+
 def _render_model_currency(report):
     """What is known about the age of the models this run used.
 
@@ -1421,6 +1570,8 @@ def render_report_markdown(report):
     # Run metadata, like the failed-passes block above it — how old the models
     # behind this report are is context for reading it, not a finding about the
     # article, so it sits in the header rather than among the sections.
+    lines.extend(_render_ensemble_width(report))
+
     lines.extend(_render_model_currency(report))
 
     lines.append("---")

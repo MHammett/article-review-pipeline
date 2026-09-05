@@ -937,6 +937,79 @@ def _merge_additional_observations(observations):
 # ---------------------------------------------------------------------------
 
 
+def _ensemble_width(results, ensemble_cfg, lt_voted=False):
+    """How wide the ensemble behind this report actually was.
+
+    A cost preset buys fewer models, and that is the point of it — but until
+    now the only way to find out *how much* narrower a run was than the preset
+    it names was to count rows in the API call table and cross-reference them
+    against `_THOROUGHNESS_PRESETS` in the source. The numbers that change how
+    the sections should be read are: how many domains came down to a single
+    model, how many distinct models ran at all, and whether Section 1 can still
+    reach consensus with that many voters.
+
+    Measured 2026-09-05: at `economy` the `standard` map runs five domains on
+    three distinct models, every one of them single-model, because `economy`
+    disables grok and claude and both of the two-model domains are
+    mistral-paired. The report said none of that.
+
+    Voters are counted per *model*, not per call, because that is what
+    ``_find_consensus`` counts — two findings from one model are one voter, and
+    LanguageTool is a voter in its own right when it flagged anything.
+    """
+    ran = {
+        (model, domain)
+        for (model, domain), r in results.items()
+        if not r.get("failed") and not r.get("skipped")
+    }
+    models_by_domain: dict[str, list[str]] = {}
+    for model, domain in sorted(ran):
+        models_by_domain.setdefault(domain, []).append(model)
+
+    # The preset's domains, not the ones that produced results: a domain whose
+    # every model was excluded has no result to be counted and would otherwise
+    # vanish from a report about coverage.
+    expected = list(ensemble_cfg.get("preset_domains") or sorted(models_by_domain))
+    for domain in models_by_domain:
+        if domain not in expected:
+            expected.append(domain)
+
+    distinct_models = sorted({model for model, _ in ran})
+    min_models = int(
+        ensemble_cfg.get("consensus_min_models", _DEFAULT_CONSENSUS_MIN_MODELS)
+    )
+    # LanguageTool is an independent source and counts toward the minimum, so a
+    # run's true voter pool is the models plus LT when LT flagged something.
+    voter_pool = len(distinct_models) + (1 if lt_voted else 0)
+    multi_model_domains = [d for d in expected if len(models_by_domain.get(d, [])) > 1]
+
+    return {
+        "models_by_domain": {d: models_by_domain.get(d, []) for d in expected},
+        "distinct_models": distinct_models,
+        "domains_single_model": [
+            d for d in expected if len(models_by_domain.get(d, [])) == 1
+        ],
+        # Which domains nothing reviewed, and why, is reported at the top level
+        # as ``domains_not_run`` — with a reason, and with a note above the
+        # affected section. Not repeated here: one fact, one place.
+        "domains_expected": expected,
+        "consensus_min_models": min_models,
+        "voter_pool": voter_pool,
+        "languagetool_voted": bool(lt_voted),
+        # Can Section 1 flag anything at all? With fewer distinct sources than
+        # the minimum, no passage can clear it however many findings agree.
+        "consensus_reachable": voter_pool >= min_models,
+        # Every domain single-model means no passage can reach the minimum from
+        # within one domain — agreement has to come from two domains at once,
+        # which is a much narrower path than the same threshold implies at a
+        # preset where domains carry two models each.
+        "consensus_needs_cross_domain": (
+            min_models > 1 and not multi_model_domains and bool(distinct_models)
+        ),
+        "backfilled": list(ensemble_cfg.get("backfilled_assignments") or []),
+    }
+
+
 def build_report(
     article_title,
     publication_name,
@@ -1129,10 +1202,14 @@ def build_report(
         "empty_result_details": empty_result_details,
         "ensemble": {
             "thoroughness": ensemble_cfg.get("thoroughness", "standard"),
+            "cost_preset": ensemble_cfg.get("cost_preset"),
             "consensus_threshold": float(
                 ensemble_cfg.get("consensus_threshold", _DEFAULT_CONSENSUS_THRESHOLD)
             ),
             "assignments": assignments,
+            "width": _ensemble_width(
+                results, ensemble_cfg, lt_voted=bool(lt_flagged_passages)
+            ),
         },
     }
 

@@ -101,19 +101,51 @@ class TestAssignments:
         assert ("claude", "voice_style") not in pairs
         assert ("claude", "red_team") in pairs
 
-    def test_warns_when_exclusion_leaves_voice_style_unreviewed(self, caplog):
-        """At `standard`, voice_style is one model. If it drafted, nobody runs it.
+    def test_backfill_covers_voice_style_when_its_only_model_drafted(self, caplog):
+        """At `standard` voice_style is one model; if it drafted, backfill covers it.
 
-        The warning is the earliest signal, fired at assignment time before any
-        call is made. It is no longer the only one: substitution repairs the
-        domain when a candidate exists, and the report names it as not reviewed
-        when nothing did — see TestTheUnreviewedDomainReachesTheReport.
+        The domain now has three layers of cover, and this test pins the first.
+        Backfill assigns a reviewer at assignment time, before any call is made:
+        every other configured model is eligible for voice_style and the preset
+        asked for one model on it. If backfill cannot find a candidate the
+        warning still fires (below), substitution repairs the domain after the
+        fact when a provider is available, and the report names it as not
+        reviewed when nothing did — see TestTheUnreviewedDomainReachesTheReport.
+        An empty voice section that reads as "found nothing" is the failure all
+        three exist to prevent.
         """
         with caplog.at_level(logging.WARNING):
             pairs = _build_assignments("standard", ALL_ENABLED, ALL_KEYS, "openai")
+
+        reviewers = {m for m, d in pairs if d == "voice_style"}
+        assert reviewers, "voice_style was left with no reviewer"
+        assert "openai" not in reviewers, "the drafter must not review its own prose"
+        assert "No model is reviewing" not in caplog.text
+
+    def test_still_warns_when_nothing_can_cover_voice_style(self, caplog):
+        """The warning is not obsolete — it is the case backfill cannot fix.
+
+        With the drafter the only credentialled model there is no substitute to
+        assign, so the domain really does go unreviewed and the run has to say
+        so. Kept as its own test because the backfill above would otherwise hide
+        the gap this warning exists for.
+        """
+        keys = {"openai": {"api_key": "k"}}
+        with caplog.at_level(logging.WARNING):
+            pairs = _build_assignments("standard", ALL_ENABLED, keys, "openai")
+
         assert not [p for p in pairs if p[1] == "voice_style"]
         assert "voice_style" in caplog.text
         assert "never ran" in caplog.text or "not because" in caplog.text
+
+    def test_backfill_can_be_turned_off(self, caplog):
+        """`backfill=False` restores the un-topped-up assignment exactly."""
+        with caplog.at_level(logging.WARNING):
+            pairs = _build_assignments(
+                "standard", ALL_ENABLED, ALL_KEYS, "openai", backfill=False
+            )
+        assert not [p for p in pairs if p[1] == "voice_style"]
+        assert "voice_style" in caplog.text
 
     def test_no_warning_when_another_model_covers_it(self, caplog):
         with caplog.at_level(logging.WARNING):
@@ -147,19 +179,30 @@ class TestHandoffParsing:
 class TestTheUnreviewedDomainReachesTheReport:
     """An empty section says whether anything reviewed it.
 
-    The exclusion can leave a domain with no reviewer, and substitution repairs
-    that whenever another provider is configured and reachable. When it cannot
-    — `substitute_failed_domains: false`, a replay, or no other model able to
-    take the domain — the section still has to say so. Measured 2026-09-05
-    before this was added: the never-ran and the clean render were byte-
-    identical, both `_No flags._`.
+    The exclusion can leave a domain with no reviewer, and two passes repair
+    that whenever another provider is configured and reachable: backfill at
+    assignment time, and substitution after the calls. When neither can —
+    `backfill_narrowed_domains: false`, `substitute_failed_domains: false`, a
+    replay, or no other model able to take the domain — the section still has
+    to say so. Measured 2026-09-05 before this was added: the never-ran and the
+    clean render were byte-identical, both `_No flags._`.
     """
 
     STANDARD_DOMAINS = set(_THOROUGHNESS_PRESETS["standard"])
 
     def _results(self, drafter):
-        """Results for a real `standard` run, keyed as consolidation keys them."""
-        pairs = _build_assignments("standard", ALL_ENABLED, ALL_KEYS, drafter)
+        """Results for a real `standard` run, keyed as consolidation keys them.
+
+        Backfill is off here on purpose. With it on, every other configured
+        model is eligible for `voice_style`, so the drafter exclusion no longer
+        produces an unreviewed domain at all — which is the good outcome, and
+        which would leave this class with nothing to test. The unrepairable
+        state has to be constructed deliberately now, and that is exactly the
+        state the class is about.
+        """
+        pairs = _build_assignments(
+            "standard", ALL_ENABLED, ALL_KEYS, drafter, backfill=False
+        )
         return {(m, d): {"failed": False, "data": {"flags": []}} for m, d in pairs}
 
     def test_the_excluded_domain_is_named_with_its_reason(self):
