@@ -508,6 +508,85 @@ Providers cache on an exact *leading* prefix. The per-domain instruction normall
 
 ---
 
+### Substituting a provider for an empty domain
+
+```yaml
+pipeline:
+  substitute_failed_domains: true   # default; false disables the pass
+```
+
+When every model assigned to a domain fails, one different provider is tried for
+that domain. It runs after the recovery pass, adds nothing to a clean run, and
+tries exactly one substitute — a provider having an outage should not buy call
+after call.
+
+**Why recovery is not enough.** `recovery_passes` retries the model that failed,
+which is right for a flake and useless for an outage. Measured 2026-09-05 on
+`dc-environment-v26` at `--cost-preset standard`: `gemini:fact_check` returned
+"stream stalled before the first chunk: nothing received for 160.0s", recovery
+retried the same model and it stalled identically, and the run exited 0 having
+spent $0.64.
+
+**Why `fact_check` in particular.** At `standard` thoroughness it is a single
+model *and* the only source of claims, so losing it empties Section 2, leaves
+nothing for citation resolution, and empties Section 9 as well. Losing one of
+two models in another domain costs coverage; losing this one costs both sections
+that justify the run.
+
+Substitutes are drawn from the `maximum` preset's list for the domain, minus
+whatever was already tried, and honour the same credential checks, `prompts:`
+overrides and drafting-model exclusion as a normal assignment. For `fact_check`
+the search-grounded models are preferred first — grounding is the reason gemini
+is in that ensemble at all — falling back to an ungrounded model only because an
+ungrounded fact-check pass is still worth more than an empty section. The
+original failure is kept in the results either way, so the report still says
+which model failed.
+
+---
+
+### Citation re-ask
+
+```yaml
+pipeline:
+  citation_reask: true          # default; false disables the pass entirely
+  citation_reask_limit: 12      # default; refutations re-asked per run
+```
+
+When a citation is fetched, read, and found not to support the claim it was
+cited for, the claim is handed back to the model that asserted it. The model is
+shown its own claim, the URL, the verdict, and the sentence the relevance check
+relied on, and answers with one of four actions: correct the claim, propose a
+different source, withdraw it, or stand by it. The answer is rendered under the
+refutation in Section 9.
+
+**Why it is worth a call.** In the run this was built against, 2 of 49
+refutations came back `contradicts`, and both were repairable rather than wrong:
+a claim of "17 billion gallons" against a page reading "66 billion liters" —
+which is ≈17.4 billion gallons — and a compound claim whose page supported one
+half. In both the correct figure was already on the page the pipeline had
+fetched, and the report said only that the citation failed.
+
+**What it cannot do.** The model being asked is the one whose assertion just
+failed, and the question invites it to defend itself. So a re-ask never changes
+`verification`: a refuted citation stays refuted, and the answer is advisory
+text beside it. A proposed alternative URL is not reported as a source either —
+it goes back through the same fetch, checksum, relevance check and
+grounded-quote requirement as any other citation, and what the report shows is
+what that check found. A model answering with a plausible-looking URL gets it
+checked, not printed.
+
+`stand` is a first-class answer for the same reason: a model with no way to
+disagree picks the nearest available action instead, and a fabricated
+`different_source` costs a fetch to disprove.
+
+**Cost.** One call per refutation, bounded by `citation_reask_limit`; live web
+search is disabled for these calls. Refutations past the limit are logged rather
+than dropped silently. The pass does not run with `--offline`. A claim traced to
+the draft's own citation block was asserted by the author rather than by a
+model, so there is nobody to hand it back to and it is skipped.
+
+---
+
 ### Cost presets
 
 The `cost_preset` setting is the easiest way to control quality vs cost. It sets model variants, reasoning flags, and thoroughness level as a bundle. You set one value instead of configuring six providers separately.

@@ -107,7 +107,14 @@ _DOMAIN_DATA = {
                 "observation": "Borderline stock phrase.",
             }
         ],
-        "additional_observations": [],
+        "additional_observations": [
+            {
+                "passage": "Local officials were not consulted.",
+                "category": "red_team",
+                "observation": "The claim names an omission without evidence of it.",
+                "confidence": "high",
+            }
+        ],
     },
     "completeness": {
         "flags": [
@@ -119,7 +126,14 @@ _DOMAIN_DATA = {
             }
         ],
         "low_confidence": [],
-        "additional_observations": [],
+        "additional_observations": [
+            {
+                "passage": "The grid served 41 percent of load from nuclear.",
+                "category": "fact_check",
+                "observation": "No source given for the 41 percent figure.",
+                "confidence": "low",
+            }
+        ],
     },
     "argument_integrity": {
         "flags": [
@@ -131,7 +145,14 @@ _DOMAIN_DATA = {
             }
         ],
         "low_confidence": [],
-        "additional_observations": [],
+        "additional_observations": [
+            {
+                "passage": "Local officials were not consulted.",
+                "category": "red_team",
+                "observation": "Naming who was not consulted invites a response.",
+                "confidence": "medium",
+            }
+        ],
     },
     "red_team": {
         "most_vulnerable_claim": {

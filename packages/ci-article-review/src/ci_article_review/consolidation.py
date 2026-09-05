@@ -407,15 +407,142 @@ def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
     return consensus, single_source
 
 
-# ---------------------------------------------------------------------------
-# Domain section builders
-# ---------------------------------------------------------------------------
+#: The fact-check lists whose items carry per-claim source attribution.
+#: `additional_observations` is deliberately absent: it is tagged separately by
+#: `_collect_additional_observations`, which sets `source_domain` too.
+_FACT_CHECK_ITEM_KEYS = (
+    "confirmed",
+    "outdated",
+    "contradicted",
+    "unverifiable",
+    "primary_source_needed",
+)
+
+
+#: Source strings that name no document — the draft itself, or the model's own
+#: reasoning. Compared against the whole source (normalised), not searched
+#: within it, so "Manual Calculation" fails and "Furuno GT-8031 calculation
+#: notes" does not.
+#:
+#: Measured 2026-09-05 on the Honda draft: 4 of 19 `confirmed` findings cited no
+#: document at all. One named "Draft Article" — the pipeline confirming the
+#: draft against itself — and three named "Manual Calculation", where the model
+#: did the arithmetic and reported the result as a confirmed fact. All four had
+#: `source_url: "N/A"`.
+#:
+#: The arithmetic may well be right; that is not the point. `confirmed` is the
+#: strongest thing Section 2 says and the tier Section 9 counts as backed by a
+#: document. A model reasoning its way to a conclusion is what the other buckets
+#: already exist to represent.
+_SELF_REFERENTIAL_SOURCES = frozenset(
+    {
+        "draft",
+        "the draft",
+        "draft article",
+        "the draft article",
+        "article",
+        "the article",
+        "this article",
+        "manual calculation",
+        "calculation",
+        "own calculation",
+        "computed",
+        "derived",
+        "inference",
+        "deduction",
+        "own analysis",
+        "author",
+        "the author",
+        "internal consistency",
+        "common knowledge",
+        "n/a",
+        "na",
+        "none",
+        "unknown",
+    }
+)
+
+#: A URL field the model filled in to mean "there isn't one".
+_EMPTY_URL_VALUES = frozenset({"", "n/a", "na", "none", "null", "-"})
+
+
+def _normalise_source(text):
+    """Lowercase, strip punctuation, collapse whitespace."""
+    kept = [c if (c.isalnum() or c in " /") else " " for c in str(text or "").lower()]
+    return " ".join("".join(kept).split())
+
+
+def _names_a_document(part):
+    key = _normalise_source(part)
+    return bool(key) and key not in _SELF_REFERENTIAL_SOURCES
+
+
+def _has_external_source(item):
+    """Whether a `confirmed` finding points at anything outside the draft.
+
+    A URL settles it. Without one, the free-text source has to name something
+    that is not the draft or the model's own reasoning — an unlinked "Honda
+    ServiceNews B18010I" is a real document and stays confirmed. Models list
+    several sources separated by semicolons, and one real document among them
+    is enough.
+    """
+    url = str(item.get("source_url", "") or "").strip().lower()
+    if url and url not in _EMPTY_URL_VALUES:
+        return True
+    return any(
+        _names_a_document(part) for part in str(item.get("source", "")).split(";")
+    )
+
+
+def _demote_unsourced_confirmations(data):
+    """Move `confirmed` findings with no external source into `unverifiable`.
+
+    Returns a new data dict; the input is left alone. The claim is not dropped —
+    it moves to the bucket that means "nothing was found to check this against",
+    which is what actually happened, and keeps its original source text so a
+    reader can see what the model offered instead.
+    """
+    confirmed = data.get("confirmed") or []
+    if not confirmed:
+        return data
+
+    kept, demoted = [], []
+    for item in confirmed:
+        if _has_external_source(item):
+            kept.append(item)
+            continue
+        demoted.append(
+            {
+                "claim": item.get("claim", ""),
+                "checked": item.get("source", "") or "nothing external",
+                "sources_checked": [],
+                "reason": (
+                    "Reported as confirmed with no external source: "
+                    f"{item.get('source') or 'none given'}. A claim the model "
+                    "reasoned its way to is not a claim a document backs, so it "
+                    "is reported here rather than as confirmed."
+                ),
+            }
+        )
+    if not demoted:
+        return data
+
+    log.info(
+        "Fact check: %d confirmed finding(s) cited no external source and were "
+        "moved to unverifiable.",
+        len(demoted),
+    )
+    return {
+        **data,
+        "confirmed": kept,
+        "unverifiable": list(data.get("unverifiable") or []) + demoted,
+    }
 
 
 def _build_fact_check(results, ensemble_cfg):
     """Merge fact_check results from all models that ran the domain."""
     domain_results = [
-        (model, r)
+        (model, {**r, "data": _demote_unsourced_confirmations(r["data"])})
         for (model, d), r in results.items()
         if d == "fact_check" and not r.get("failed") and r.get("data")
     ]
@@ -423,22 +550,27 @@ def _build_fact_check(results, ensemble_cfg):
         return {}
     if len(domain_results) == 1:
         model_name, r = domain_results[0]
-        # Single source — return as-is but tag with source metadata
+        grounding = bool(r.get("grounding_available"))
+        weight = _get_weight(model_name, "fact_check", ensemble_cfg, grounded=grounding)
+        tag = {
+            "source_model": model_name,
+            "source_weight": round(weight, 2),
+            "grounding": grounding,
+        }
+        # Individual items are tagged here exactly as the merge branch below
+        # tags them. This used to tag only `_sources`, so which model asserted a
+        # given claim was recorded when several models ran the domain and lost
+        # when one did — and `standard` thoroughness runs one. Anything keyed on
+        # the asserting model was therefore dead on precisely the cheaper preset:
+        # the citation re-ask had nobody to hand a refutation back to.
         return {
             **r["data"],
+            **{
+                key: [{**item, **tag} for item in (r["data"].get(key) or [])]
+                for key in _FACT_CHECK_ITEM_KEYS
+            },
             "_sources": {
-                model_name: {
-                    "weight": round(
-                        _get_weight(
-                            model_name,
-                            "fact_check",
-                            ensemble_cfg,
-                            grounded=bool(r.get("grounding_available")),
-                        ),
-                        2,
-                    ),
-                    "grounding": r.get("grounding_available", False),
-                }
+                model_name: {"weight": round(weight, 2), "grounding": grounding}
             },
         }
 
@@ -743,6 +875,63 @@ def _collect_additional_observations(results):
     return out
 
 
+#: Stated confidence, strongest first. Used only to order Section 8, and only
+#: as the tiebreaker *under* corroboration.
+#:
+#: `_DEFAULT_CONFIDENCE_MULTIPLIERS` stays inert for the reason recorded there:
+#: self-reported confidence is not calibrated and is not comparable across
+#: providers. That argument is about using the level as a weight in a sum, and
+#: it holds. It does not reach ordering, and it does not reach the question this
+#: section actually needs answered - which of 55 observations to read first.
+#:
+#: The weighting was also never able to fire. It reads `confidence` off flags on
+#: their way into consensus, and the schema puts `confidence` on
+#: `additional_observations[]` plus three `fact_check` buckets, of which
+#: consensus reads two. Measured on the 2026-09-04 maximum run: 0 of 119
+#: consensus-bound findings carried a confidence, against 55 that did and never
+#: reached consensus at all. The signal was collected in one place and looked
+#: for in another.
+_CONFIDENCE_ORDER = {"high": 3, "medium": 2, "low": 1}
+
+
+def _confidence_rank(observation):
+    """Ordering rank for a stated confidence; 0 when absent or unrecognised."""
+    level = str(observation.get("confidence", "")).strip().lower()
+    return _CONFIDENCE_ORDER.get(level, 0)
+
+
+def _merge_additional_observations(observations):
+    """Group Section 8 by passage, then rank by corroboration and confidence.
+
+    Two models independently making the same observation is the strongest thing
+    this section can tell you, and it was invisible: observations were appended
+    in dict-iteration order, so an agreeing pair rendered as two unrelated
+    bullets somewhere in a list of 55 (measured on the 2026-09-04 maximum run).
+    Section 1 has grouped by passage since the identical problem was found
+    there; this is that same :func:`group_passages` pass applied to the section
+    that never received it.
+
+    Merged entries keep the fields of the most confident observation in the
+    group, so every existing consumer still reads what it read before, and gain
+    ``models`` and ``model_count``. Ranking is corroboration first, stated
+    confidence second - which also stops :mod:`voice_pattern_report` counting
+    one article's voice problem twice because two models both noticed it.
+    """
+    if not observations:
+        return []
+
+    merged = []
+    for passage, group in group_passages(observations, lambda o: o.get("passage", "")):
+        models = sorted({o.get("source_model", "?") for o in group})
+        best = max(group, key=_confidence_rank)
+        merged.append(
+            {**best, "passage": passage, "models": models, "model_count": len(models)}
+        )
+
+    merged.sort(key=lambda o: (o["model_count"], _confidence_rank(o)), reverse=True)
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -799,7 +988,9 @@ def build_report(
     section_7_low_confidence = _collect_low_confidence(results)
 
     # Section 8 — Cross-domain additional observations
-    section_8_additional = _collect_additional_observations(results)
+    section_8_additional = _merge_additional_observations(
+        _collect_additional_observations(results)
+    )
 
     # Cross-model contradictions — claims confirmed by one model, challenged by another
     contradictions = find_contradictions(results)

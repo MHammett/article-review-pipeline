@@ -358,7 +358,10 @@
       {
         "claim": "The grid served 41 percent of load from nuclear.",
         "confidence": "high",
-        "source": "EIA State Profile, https://example.org/eia-profile"
+        "grounding": true,
+        "source": "EIA State Profile, https://example.org/eia-profile",
+        "source_model": "gemini",
+        "source_weight": 1.5
       }
     ],
     "contradicted": [],
@@ -367,20 +370,29 @@
         "claim": "The 2019 figure was 33 percent.",
         "confidence": "medium",
         "current_value": "38 percent as of 2025",
-        "source": "https://example.org/updated-table"
+        "grounding": true,
+        "source": "https://example.org/updated-table",
+        "source_model": "gemini",
+        "source_weight": 1.5
       }
     ],
     "primary_source_needed": [
       {
         "best_candidate_source": "https://example.org/water-report",
-        "claim": "Cooling draws 3 million gallons annually."
+        "claim": "Cooling draws 3 million gallons annually.",
+        "grounding": true,
+        "source_model": "gemini",
+        "source_weight": 1.5
       }
     ],
     "unverifiable": [
       {
         "checked": "county board minutes",
         "claim": "Local officials were not consulted.",
-        "reason": "no public record found"
+        "grounding": true,
+        "reason": "no public record found",
+        "source_model": "gemini",
+        "source_weight": 1.5
       }
     ]
   },
@@ -437,13 +449,42 @@
       "source_model": "openai"
     }
   ],
-  "section_8_additional": [],
+  "section_8_additional": [
+    {
+      "category": "fact_check",
+      "confidence": "low",
+      "in_domain": false,
+      "model_count": 1,
+      "models": [
+        "openai"
+      ],
+      "observation": "No source given for the 41 percent figure.",
+      "passage": "The grid served 41 percent of load from nuclear.",
+      "source_domain": "completeness",
+      "source_model": "openai"
+    },
+    {
+      "category": "red_team",
+      "confidence": "high",
+      "in_domain": false,
+      "model_count": 2,
+      "models": [
+        "mistral",
+        "openai"
+      ],
+      "observation": "The claim names an omission without evidence of it.",
+      "passage": "Local officials were not consulted.",
+      "source_domain": "voice_style",
+      "source_model": "openai"
+    }
+  ],
   "section_9_citations": [
     {
       "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
       "checksum_basis": "extracted_text",
       "claim": "Cooling draws 3 million gallons annually.",
       "resolved": true,
+      "source_model": "gemini",
       "source_name": "fact-check model",
       "url": "https://example.org/resolved",
       "verification": "checksum",
@@ -457,6 +498,7 @@
       "checksum_basis": "extracted_text",
       "claim": "Local officials were not consulted.",
       "resolved": true,
+      "source_model": "gemini",
       "source_name": "fact-check model",
       "url": "https://example.org/resolved",
       "verification": "checksum",
@@ -470,6 +512,7 @@
       "checksum_basis": "extracted_text",
       "claim": "The 2019 figure was 33 percent.",
       "resolved": true,
+      "source_model": "gemini",
       "source_name": "fact-check model",
       "url": "https://example.org/resolved",
       "verification": "checksum",
@@ -483,6 +526,7 @@
       "checksum_basis": "extracted_text",
       "claim": "The grid served 41 percent of load from nuclear.",
       "resolved": true,
+      "source_model": "gemini",
       "source_name": "fact-check model",
       "url": "https://example.org/resolved",
       "verification": "checksum",

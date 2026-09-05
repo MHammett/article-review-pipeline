@@ -587,7 +587,78 @@ def _web_search_enabled(setting, domain: str) -> bool:
     return bool(setting)
 
 
-def _build_user_prompt(draft: str, handoff: dict) -> str:
+#: Most persistent prior findings to replay to the models, and how much of each
+#: passage to quote. A cap because this rides on every one of the run's calls.
+_PRIOR_FINDINGS_SHOWN = 8
+_PRIOR_PASSAGE_CHARS = 160
+
+
+def _build_review_context(pre_analysis: dict, prior_report: dict | None) -> str:
+    """What the pipeline already measured, in a form the review models can use.
+
+    Everything here was computed before the ensemble ran and then withheld from
+    it. Link validation knows which cited sources are dead; readability has
+    measured the prose; the prior run knows which passages were flagged and
+    survived the author's revision. Six models were asked to review the draft
+    while the process holding all three said nothing.
+
+    The concrete cost of that: on the 2026-09-04 test draft the link checker
+    reported a confirmed 404 and a timeout, then fact_check was asked to verify
+    claims resting on those sources with no mention that one was gone. And a
+    run 20 of an article opened as cold as run 1, so a passage flagged by four
+    models three runs running looked new every time.
+
+    Labelled as measurement rather than opinion, because it is: these are
+    observations about the artefact, not another reviewer's findings, and a
+    model that treats them as a verdict to agree with would be double-counting.
+    """
+    lines: list[str] = []
+
+    broken = [r for r in (pre_analysis.get("links") or []) if not r.get("ok")]
+    if broken:
+        lines.append(
+            f"- Link check: {len(broken)} of {len(pre_analysis['links'])} cited "
+            f"URLs could not be read. A claim resting on one of these has no "
+            f"working source behind it right now:"
+        )
+        for r in broken[:6]:
+            why = r.get("status") or r.get("error") or "unreachable"
+            lines.append(f"    {r.get('url', '')} — {why}")
+
+    read = pre_analysis.get("readability") or {}
+    if read:
+        lines.append(
+            f"- Readability (measured): {read.get('word_count')} words, "
+            f"Flesch-Kincaid grade {read.get('flesch_kincaid_grade')} "
+            f"({read.get('reading_level')}), average sentence "
+            f"{read.get('avg_sentence_length')} words, longest paragraph "
+            f"{read.get('longest_paragraph_words')} words."
+        )
+
+    if prior_report:
+        prior = prior_report.get("section_1_consensus") or []
+        run = prior_report.get("run_number")
+        if prior:
+            lines.append(
+                f"- Prior run ({'run ' + str(run) if run else 'previous'}) "
+                f"reached consensus on {len(prior)} passage(s). These were "
+                f"raised before; judge the current draft on its own terms, but "
+                f"say so if a flagged problem is still present:"
+            )
+            for entry in prior[:_PRIOR_FINDINGS_SHOWN]:
+                passage = (entry.get("passage") or "")[:_PRIOR_PASSAGE_CHARS]
+                models = len({m.split(":")[0] for m in entry.get("models") or []})
+                lines.append(f'    "{passage}" — flagged by {models} model(s)')
+
+    if not lines:
+        return ""
+    return (
+        "PIPELINE OBSERVATIONS (measured by this pipeline before the review, "
+        "not written by the author):\n" + "\n".join(lines) + "\n"
+    )
+
+
+def _build_user_prompt(draft: str, handoff: dict, review_context: str = "") -> str:
     parts = [f"ARTICLE TITLE: {handoff['title']}\n"]
     if handoff.get("target_audience"):
         parts.append(f"TARGET AUDIENCE: {handoff['target_audience']}\n")
@@ -610,6 +681,8 @@ def _build_user_prompt(draft: str, handoff: dict) -> str:
         )
     if handoff.get("additional_context"):
         parts.append(f"ADDITIONAL CONTEXT:\n{handoff['additional_context']}\n")
+    if review_context:
+        parts.append(review_context)
     parts.append(f"\nDRAFT:\n{draft}")
     return "\n".join(parts)
 
@@ -751,6 +824,32 @@ def _record_fact_check_degradation(report: dict, results: dict) -> None:
     )
 
 
+def _claim_level_urls(item: dict) -> list[str]:
+    """URLs the model attributed to *this* claim, from the no-verdict buckets.
+
+    ``unverifiable.sources_checked`` is the list of pages it actually opened;
+    ``primary_source_needed.best_candidate_url`` is the primary source it found
+    but could not use to settle the claim. Both are per-claim, which is what
+    makes them safe to resolve — unlike a provider's response-level citation
+    list, where nothing says which claim a given URL was for.
+
+    Filtered to http(s) because models fill these with prose when they have no
+    URL: measured before the fields existed, ``best_candidate_source`` came back
+    as "the publication's own post archive or sitemap.xml" and ``checked`` as
+    "Google Search". Neither is fetchable, and passing them on would turn a
+    model's shrug into a broken-link finding.
+    """
+    out: list[str] = []
+    for value in (
+        *(item.get("sources_checked") or []),
+        item.get("best_candidate_url"),
+    ):
+        url = _extract_source_url(str(value or ""))
+        if url and url not in out:
+            out.append(url)
+    return out
+
+
 def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
     """Build the Pass 3 claim list from consolidated fact-check output.
 
@@ -816,11 +915,33 @@ def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
             )
             if own and own not in known_urls:
                 known_urls = known_urls + [own]
+
+            # Claim-level URLs from the two buckets that reach no verdict.
+            #
+            # These are the claims most worth resolving — the model looked and
+            # could not settle it — and until the schema gained these fields
+            # they were the only ones carrying no URL at all: 50 `unverifiable`
+            # findings in the 2026-09-04 run, one of them from a perplexity pass
+            # holding 15 freshly retrieved citations with nowhere to put them.
+            #
+            # This is what separates it from the response-level fallback
+            # described above, which guessed the mapping and stamped one energy
+            # report onto 44 claims. Here the model states which pages it opened
+            # for *this* claim, and the resolver's relevance check still has to
+            # agree before any of it is reported as support.
+            for extra in _claim_level_urls(item):
+                if extra not in known_urls:
+                    known_urls = known_urls + [extra]
+
             claims.append(
                 {
                     "claim": claim,
                     "known_urls": known_urls,
                     "fact_check_bucket": bucket,
+                    # Which model asserted this. `_build_fact_check` tags every
+                    # merged item with it; it was being dropped here, which is
+                    # why a refuted claim had no one to hand back to.
+                    "source_model": item.get("source_model", ""),
                 }
             )
     log.info(
@@ -858,6 +979,7 @@ def _run_domain(
     pipeline_cfg: dict,
     model_configs: dict,
     prompt_str: str | None = None,
+    review_context: str = "",
 ) -> dict:
     """Call one model on one domain and return the adapter result dict.
 
@@ -883,7 +1005,7 @@ def _run_domain(
         primary_claim=handoff.get("primary_claim", ""),
         pre_draft_analysis=handoff.get("pre_draft_analysis", ""),
     )
-    user = _build_user_prompt(draft, handoff)
+    user = _build_user_prompt(draft, handoff, review_context)
 
     # Off by default: it relocates the domain instruction from before the
     # article to after it, and this pipeline's output is the product. Turn it
@@ -1108,6 +1230,17 @@ def _run_reviews_in_parallel(runners, pipeline_cfg, model_configs, task_timeout)
 _PERMANENT_FAILURE_MARKERS = (
     "invalid api key",
     "invalid_api_key",
+    # Gemini says it the other way round, in both the prose and the reason
+    # code, so neither spelling above matched and a dead key was retried after
+    # the full recovery delay. Measured 2026-09-05: "API key not valid. Please
+    # pass a valid API key." with reason "API_KEY_INVALID".
+    "api key not valid",
+    "api_key_invalid",
+    # litellm normalises auth failures across providers to this exception, so
+    # the class name catches phrasings no one has written down yet. The entry
+    # below it has an underscore and matches the provider error *code*; this
+    # one matches the exception litellm raises.
+    "authenticationerror",
     "unauthorized",
     "not_authorized",
     "archived",
@@ -1188,6 +1321,137 @@ def _recover_failed_calls(
         len(still_failed),
         len(originally_failed),
     )
+    return raw_results
+
+
+#: Models whose fact_check answers come from a live search rather than training
+#: recall. The preset comment at `thorough` limits fact_check to these "for
+#: quality", and a substitute should honour the same preference before falling
+#: back to one that cannot search.
+_SEARCH_GROUNDED_MODELS = ("gemini", "perplexity")
+
+
+def _domains_with_nothing_usable(raw_results, expected_domains=None):
+    """Domains the run should have covered and got no usable result from.
+
+    A domain with two models loses coverage when one fails. A domain with one
+    model loses the domain, and `fact_check` losing the domain loses the two
+    sections that justify the run: it is the only source of claims, so Section 2
+    is empty, no claim reaches citation resolution, and Section 9 is empty too.
+    Measured 2026-09-05: `gemini:fact_check` stalled before its first chunk,
+    the recovery pass retried the same model and it stalled again, and the run
+    exited 0 having spent $0.64 with both sections blank.
+
+    ``expected_domains`` is what the preset asked for. Without it this saw only
+    domains that were *attempted*, which misses the other way a domain ends up
+    empty: its only model was never assigned. Draft with openai at ``economy``
+    and ``voice_style`` has no reviewer at all — the edge case documented under
+    "Drafting model" in docs/CONFIGURATION.md — so there is no result key, and
+    the domain was invisible to the pass meant to repair exactly that.
+    """
+    covered: dict[str, bool] = {d: False for d in (expected_domains or ())}
+    for name, result in raw_results.items():
+        _model, _, domain = name.partition(":")
+        usable = bool(not result.get("failed") and result.get("data"))
+        covered[domain] = covered.get(domain, False) or usable
+    return sorted(domain for domain, usable in covered.items() if not usable)
+
+
+def _substitute_candidates(domain, tried, model_configs, api_keys, drafting_model):
+    """Configured models that could stand in for ``domain``, best first.
+
+    Drawn from the `maximum` preset, which lists every model, so this stays in
+    step with the presets rather than keeping a second ordering of its own.
+    Anything already tried for this domain is excluded — the point is a
+    *different* provider, since retrying the failed one is what the recovery
+    pass already did.
+    """
+    pool = _THOROUGHNESS_PRESETS["maximum"].get(domain, [])
+    if domain == "fact_check":
+        pool = [m for m in pool if m in _SEARCH_GROUNDED_MODELS] + [
+            m for m in pool if m not in _SEARCH_GROUNDED_MODELS
+        ]
+    out = []
+    for model_name in pool:
+        if model_name in tried:
+            continue
+        if _model_blocked_reason(
+            model_name, model_configs.get(model_name, {}), api_keys
+        ):
+            continue
+        allowed = _prompt_override(model_configs.get(model_name, {}))
+        if allowed is not None and domain not in allowed:
+            continue
+        if _drafter_is_excluded(model_name, domain, drafting_model):
+            continue
+        out.append(model_name)
+    return out
+
+
+def _substitute_for_empty_domains(
+    raw_results,
+    make_runner,
+    pipeline_cfg,
+    model_configs,
+    api_keys,
+    task_timeout,
+    drafting_model=None,
+    expected_domains=None,
+):
+    """Run a different provider for any domain that came back empty.
+
+    Only ever adds calls that would not otherwise have run, and only after
+    recovery has already retried the original model — so a clean run pays
+    nothing for this, and a run that would have produced an empty Section 2
+    pays for one substitute call instead of being re-run whole.
+
+    One substitute per domain. If that one also fails the domain stays empty
+    and the report says so: the alternative is a run that keeps buying calls
+    while a provider is having an outage.
+    """
+    if not pipeline_cfg.get("substitute_failed_domains", True):
+        return raw_results
+
+    empty = _domains_with_nothing_usable(raw_results, expected_domains)
+    if not empty:
+        return raw_results
+
+    for domain in empty:
+        tried = {
+            name.partition(":")[0]
+            for name in raw_results
+            if name.endswith(f":{domain}")
+        }
+        candidates = _substitute_candidates(
+            domain, tried, model_configs, api_keys, drafting_model
+        )
+        if not candidates:
+            log.warning(
+                "Domain %s produced nothing and no other configured model can "
+                "stand in for it — the report will show it as not run.",
+                domain,
+            )
+            continue
+        substitute = candidates[0]
+        log.info(
+            "Domain %s produced nothing from %s; substituting %s.",
+            domain,
+            ", ".join(sorted(tried)) or "no model",
+            substitute,
+        )
+        name, fn = make_runner(substitute, domain)
+        raw_results.update(
+            _run_reviews_for_names(
+                [name], [(name, fn)], pipeline_cfg, model_configs, task_timeout
+            )
+        )
+        if raw_results.get(name, {}).get("failed"):
+            log.warning(
+                "Substitute %s also failed for %s; leaving the domain empty.",
+                substitute,
+                domain,
+            )
+
     return raw_results
 
 
@@ -1453,7 +1717,12 @@ def run_draft_pipeline(
     else:
         pre_analysis["links"] = []
 
-    if seo_suggestions is False or offline:
+    # A calibration run is scoped to one model or domain on purpose and should
+    # not pay for the two SEO calls it did not ask for. Cheap (~$0.0006 on the
+    # 2026-09-05 runs) but billed, logged and printed, which makes a deliberately
+    # narrowed run's output and cost harder to read than it needs to be. Routed
+    # through the existing flag rather than a second suppression path.
+    if seo_suggestions is False or offline or only_model or only_domain:
         # CLI override for this run only — does not modify the publication
         # config on disk. Mirrors --cost-preset above. Assigned rather than
         # setdefault'd because a bare `seo_rules:` line in YAML parses to None,
@@ -1635,6 +1904,20 @@ def run_draft_pipeline(
     if only_domain:
         assignments = [a for a in assignments if a[1] == only_domain]
         custom_assignments = [a for a in custom_assignments if a[1] == only_domain]
+    # What the run should have covered, for the substitution pass below.
+    #
+    # Normally that is everything the preset asked for, so a domain whose only
+    # model was never assigned — the drafter-exclusion case — is repairable and
+    # not merely invisible. Under a calibration filter it is what actually got
+    # assigned: `--only-domain fact_check` deliberately skips the other four,
+    # and substituting for them would defeat the flag.
+    if only_model or only_domain:
+        expected_domains = {d for _m, d in assignments + custom_assignments}
+    else:
+        expected_domains = set(
+            _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
+        )
+
     if (only_model or only_domain) and not (assignments or custom_assignments):
         log.error(
             "No assignments match the calibration filters (--only-model=%r --only-domain=%r). "
@@ -1657,9 +1940,32 @@ def run_draft_pipeline(
     for skip_line in assignment_skips:
         log.info(f"  Skipped: {skip_line}")
 
-    # Build runner list — custom domains pass their prompt string directly
-    runners = [
-        (
+    # Loaded here rather than after the ensemble, which is where it used to sit.
+    # It is only a file read, and having it beforehand is what lets the review
+    # models be told which passages were already flagged and survived a
+    # revision — otherwise run 20 of an article opens exactly as cold as run 1.
+    prior_report, prior_report_path = hist.load_prior_report(
+        HISTORY_ROOT, _history_key(handoff), before_ts=run_start_ts
+    )
+
+    # Everything the pipeline measured before this point, handed to the models
+    # that are about to review the draft. Withholding it meant six models were
+    # asked to fact-check claims whose sources this process already knew were
+    # dead.
+    review_context = _build_review_context(pre_analysis, prior_report)
+    if review_context:
+        log.info(
+            "Review context: passing %d line(s) of pipeline observations to the "
+            "review models (link check, readability, prior findings).",
+            review_context.count("\n") - 1,
+        )
+
+    # Build runner list — custom domains pass their prompt string directly.
+    # Factored into a maker so a substitute call (below) is built exactly the
+    # same way as the calls the preset asked for, rather than by a second
+    # construction that could drift from this one.
+    def _make_runner(model_name, domain):
+        return (
             f"{model_name}:{domain}",
             lambda m=model_name, d=domain, ps=custom_prompts.get(domain): _run_domain(
                 m,
@@ -1671,9 +1977,12 @@ def run_draft_pipeline(
                 pipeline_cfg,
                 model_configs,
                 prompt_str=ps,
+                review_context=review_context,
             ),
         )
-        for model_name, domain in all_assignments
+
+    runners = [
+        _make_runner(model_name, domain) for model_name, domain in all_assignments
     ]
 
     raw_results: dict[str, dict] = {}
@@ -1741,6 +2050,24 @@ def run_draft_pipeline(
     if not replay_results and pipeline_cfg.get("recovery_passes", 1) > 0:
         raw_results = _recover_failed_calls(
             raw_results, runners, pipeline_cfg, model_configs, task_timeout
+        )
+
+    # Recovery retries the model that failed. When that model is the only one
+    # assigned to a domain and it is failing rather than flaking, retrying it
+    # cannot bring the domain back — so a domain still empty at this point gets
+    # a different provider instead. Skipped on replay, which makes no calls.
+    if not replay_results:
+        raw_results = _substitute_for_empty_domains(
+            raw_results,
+            _make_runner,
+            pipeline_cfg,
+            model_configs,
+            api_keys,
+            task_timeout,
+            drafting_model=drafting_model,
+            # What the preset asked for, so a domain whose only model was never
+            # assigned is repairable too, not just one whose model failed.
+            expected_domains=expected_domains,
         )
 
     # Hold the raw ensemble output for capture. Written next to the report once
@@ -1879,9 +2206,6 @@ def run_draft_pipeline(
         log.error("All review model calls failed. Aborting.")
         sys.exit(1)
 
-    prior_report, prior_report_path = hist.load_prior_report(
-        HISTORY_ROOT, _history_key(handoff), before_ts=run_start_ts
-    )
     if prior_report is None and run_number > 1:
         log.warning(
             f"No earlier report found for '{article_title}', but the handoff declares "
@@ -1953,6 +2277,7 @@ def run_draft_pipeline(
         len(citation_sources),
     )
     from .adapters.citation.resolver import resolve_citations
+    from .adapters.citation import reask as citation_reask
 
     fact_check = report.get("section_2_fact_check") or {}
     _record_fact_check_degradation(report, results)
@@ -1967,6 +2292,11 @@ def run_draft_pipeline(
             len(claims),
         )
         claims = []
+    citation_author = (
+        (handoff.get("author") or "").strip()
+        or (pub_config.get("author_name") or "").strip()
+        or None
+    )
     if claims:
         citation_results = resolve_citations(
             claims,
@@ -1985,11 +2315,7 @@ def run_draft_pipeline(
             # piece is not attributed to the publication's usual byline; the
             # publication default covers everything else, including --raw-draft,
             # which carries no metadata at all.
-            author=(
-                (handoff.get("author") or "").strip()
-                or (pub_config.get("author_name") or "").strip()
-                or None
-            ),
+            author=citation_author,
         )
         verified_count = sum(
             1 for r in citation_results if r.get("verification") == "checksum"
@@ -2020,6 +2346,56 @@ def run_draft_pipeline(
             - unverifiable_count
             - refuted_count,
         )
+
+        # Pass 3b — hand each refutation back to the model that asserted it.
+        #
+        # `resolve_citations` returns results in claim order, so the asserting
+        # model is joined on here rather than threaded through the resolver's
+        # normalise/parallel path, which takes a claim string and knows nothing
+        # about who produced it.
+        for _claim, _result in zip(claims, citation_results):
+            if not _result.get("source_model"):
+                _result["source_model"] = _claim.get("source_model", "")
+
+        if not offline and pipeline_cfg.get("citation_reask", True):
+            asked = citation_reask.reask_refuted(
+                citation_results,
+                api_keys=api_keys,
+                model_configs=model_configs,
+                call_log=api_call_log,
+                limit=int(
+                    pipeline_cfg.get(
+                        "citation_reask_limit", citation_reask.DEFAULT_REASK_LIMIT
+                    )
+                ),
+                author=citation_author,
+            )
+            if asked:
+                # An alternative source the model proposed is a suggestion, not
+                # a citation. It goes back through the same resolution the
+                # original URL failed, so what reaches the report is what the
+                # page was found to say rather than what the model said it says.
+                pending = citation_reask.proposed_source_claims(citation_results)
+                if pending:
+                    log.info(
+                        "Citations: re-checking %d model-proposed source(s)",
+                        len(pending),
+                    )
+                    checked = resolve_citations(
+                        [entry for _r, entry in pending],
+                        citation_sources,
+                        api_keys,
+                        verification_call_log=api_call_log,
+                        history_root=HISTORY_ROOT,
+                        author=citation_author,
+                    )
+                    citation_reask.attach_source_checks(pending, checked)
+                log.info(
+                    "Citations: %d refuted claim(s) handed back to the asserting "
+                    "model, %d proposed a different source",
+                    asked,
+                    len(pending),
+                )
     else:
         citation_results = []
         log.info("Citations: no actionable claims to resolve")

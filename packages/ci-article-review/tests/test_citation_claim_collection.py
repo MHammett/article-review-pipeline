@@ -444,3 +444,87 @@ class TestFactCheckFailureIsReportedAsADegradation:
         report = {}
         pipeline._record_fact_check_degradation(report, self._results(True))
         assert report["degradations"][0]["detail"]
+
+
+class TestClaimLevelUrlsFromTheNoVerdictBuckets:
+    """The two buckets that reach no verdict had nowhere to record a URL.
+
+    The schema asked for `source_url` only in confirmed/outdated/contradicted —
+    the buckets where the model had already decided the source supports the
+    claim — and asked for prose in `unverifiable` and `primary_source_needed`,
+    which are precisely the claims SECTION 9 could still go and resolve.
+
+    Measured 2026-09-04: perplexity filled `source_url` on 3 of 3 `confirmed`
+    findings and 0 of 14 in these two buckets, while holding 15 citations it had
+    just retrieved. Across six models, 50 `unverifiable` findings carried no URL
+    at all — gemini's `checked` read "Google Search".
+
+    This is claim-level attribution from the model itself, which is what makes
+    it safe. An earlier attempt took the first entry of a provider's
+    response-level citation list and attached it to every claim in the response,
+    stamping one energy report onto 44 unrelated claims.
+    """
+
+    def _urls(self, item):
+        from ci_article_review.pipeline import _claim_level_urls
+
+        return _claim_level_urls(item)
+
+    def test_pages_the_model_opened_are_collected(self):
+        assert self._urls(
+            {"sources_checked": ["https://eia.gov/a", "https://ferc.gov/b"]}
+        ) == ["https://eia.gov/a", "https://ferc.gov/b"]
+
+    def test_a_named_primary_source_url_is_collected(self):
+        assert self._urls({"best_candidate_url": "https://eia.gov/z"}) == [
+            "https://eia.gov/z"
+        ]
+
+    def test_the_same_url_from_both_fields_appears_once(self):
+        assert self._urls(
+            {
+                "sources_checked": ["https://eia.gov/a"],
+                "best_candidate_url": "https://eia.gov/a",
+            }
+        ) == ["https://eia.gov/a"]
+
+    def test_prose_is_rejected_rather_than_fetched(self):
+        """Models fill these with descriptions when they have no URL. Passing
+        one on would turn a model's shrug into a broken-link finding."""
+        assert self._urls({"sources_checked": ["Google Search"]}) == []
+        assert (
+            self._urls(
+                {"best_candidate_url": "the publication's own post archive or sitemap"}
+            )
+            == []
+        )
+
+    def test_null_and_absent_are_handled(self):
+        assert self._urls({"best_candidate_url": None}) == []
+        assert self._urls({}) == []
+
+    def test_a_url_embedded_in_prose_is_still_recovered(self):
+        assert self._urls(
+            {"best_candidate_url": "see https://eia.gov/report for the table"}
+        ) == ["https://eia.gov/report"]
+
+    def test_the_schema_offers_the_fields(self):
+        from ci_article_review import schemas
+
+        fc = schemas.FACT_CHECK["properties"]
+        assert "sources_checked" in fc["unverifiable"]["items"]["properties"]
+        assert (
+            "best_candidate_url" in fc["primary_source_needed"]["items"]["properties"]
+        )
+
+    def test_the_prompt_asks_for_them(self):
+        from pathlib import Path
+
+        from ci_article_review import pipeline
+
+        text = (
+            Path(pipeline.__file__).parent / "prompts" / "fact_check.txt"
+        ).read_text(encoding="utf-8")
+        assert "sources_checked" in text
+        assert "best_candidate_url" in text
+        assert "Do not invent a URL" in text

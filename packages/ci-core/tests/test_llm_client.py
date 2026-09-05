@@ -1750,3 +1750,52 @@ class TestOpenAINeverReceivesTemperature:
         """The fix must not strip temperature from the providers that want it."""
         for provider in ("gemini", "mistral", "grok", "perplexity"):
             assert provider in client._SENDS_TEMPERATURE, provider
+
+
+class TestClaudeOutputCeiling:
+    """`claude` had a flat 4096-token cap that config could not raise.
+
+    Measured 2026-09-05 on a standard-preset run (135514 chars, effort=none):
+    `claude:argument_integrity` stopped at exactly 4096 output tokens and came
+    back PARTIAL, salvage keeping the complete findings and discarding the rest,
+    while every other provider finished. `cfg["max_tokens"]` was ignored on all
+    three branches, so there was no way to raise it without editing the client.
+    """
+
+    def _seen(self, **provider_config):
+        seen = {}
+
+        def _capture(**kwargs):
+            seen.update(kwargs)
+            return _completion_stream()
+
+        with patch.object(client.litellm, "completion", side_effect=_capture):
+            _call("claude", provider_config=provider_config)
+        return seen
+
+    def test_the_no_effort_default_clears_the_measured_truncation(self):
+        assert self._seen()["max_tokens"] == 8000
+
+    def test_high_effort_keeps_its_larger_budget(self):
+        assert self._seen(effort="high")["max_tokens"] == 16000
+
+    def test_a_thinking_budget_still_leaves_room_for_the_answer(self):
+        """The budget is spent before the response starts, so the ceiling has to
+        exceed it or the model thinks and then has nothing left to answer with."""
+        seen = self._seen(thinking_budget=10000)
+        assert seen["max_tokens"] == 14096
+        assert seen["thinking"]["budget_tokens"] == 10000
+
+    def test_config_can_raise_the_ceiling_on_every_branch(self):
+        """The point of the fix: a domain that still truncates is now a config
+        change rather than a client edit."""
+        assert self._seen(max_tokens=32000)["max_tokens"] == 32000
+        assert self._seen(effort="high", max_tokens=32000)["max_tokens"] == 32000
+        assert (
+            self._seen(thinking_budget=10000, max_tokens=32000)["max_tokens"] == 32000
+        )
+
+    def test_the_default_stays_well_under_the_provider_ceiling(self):
+        """claude-haiku-4-5 reports max_output_tokens 64000. Raising the default
+        to the ceiling would trade one silent failure for a cost surprise."""
+        assert self._seen()["max_tokens"] <= 16000
