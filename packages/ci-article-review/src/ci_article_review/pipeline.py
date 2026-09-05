@@ -55,6 +55,7 @@ from .config_loader import (
     load_publication_config,
     merge_configs,
     parse_api_key_overrides,
+    preset_names,
     validate_publication_name,
 )
 from .handoff_parser import (
@@ -3723,7 +3724,8 @@ def build_parser():
     )
     parser.add_argument(
         "--cost-preset",
-        choices=["economy", "standard", "balanced", "thorough", "maximum"],
+        # From presets.yaml, not a list repeated here — see preset_names().
+        choices=preset_names(),
         help="Override cost_preset from user.yaml for this run only (useful for calibration sweeps)",
     )
     parser.add_argument(

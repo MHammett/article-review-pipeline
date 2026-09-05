@@ -341,6 +341,19 @@ def _load_presets_from_yaml(config_dir=None):
         ) from exc
 
 
+def preset_names(config_dir=None):
+    """Every cost preset defined in the packaged presets.yaml, in file order.
+
+    The CLI's ``--cost-preset`` choices come from here rather than a list
+    repeated in the argument parser. That duplicate meant a preset added to
+    presets.yaml — the file whose own header says to edit it — loaded, resolved
+    and applied correctly, then got rejected by argparse as an invalid choice.
+    File order is preserved because it runs cheapest to most expensive, which is
+    the order the ``--help`` output should show.
+    """
+    return list(_load_presets_from_yaml(config_dir))
+
+
 def _apply_cost_preset(pipeline_cfg, models_raw, user_set=None):
     """Apply a cost_preset to pipeline and models config.
 
