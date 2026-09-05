@@ -407,6 +407,18 @@ def _find_consensus(results, lt_flagged_passages, ensemble_cfg):
     return consensus, single_source
 
 
+#: The fact-check lists whose items carry per-claim source attribution.
+#: `additional_observations` is deliberately absent: it is tagged separately by
+#: `_collect_additional_observations`, which sets `source_domain` too.
+_FACT_CHECK_ITEM_KEYS = (
+    "confirmed",
+    "outdated",
+    "contradicted",
+    "unverifiable",
+    "primary_source_needed",
+)
+
+
 def _build_fact_check(results, ensemble_cfg):
     """Merge fact_check results from all models that ran the domain."""
     domain_results = [
@@ -418,22 +430,27 @@ def _build_fact_check(results, ensemble_cfg):
         return {}
     if len(domain_results) == 1:
         model_name, r = domain_results[0]
-        # Single source — return as-is but tag with source metadata
+        grounding = bool(r.get("grounding_available"))
+        weight = _get_weight(model_name, "fact_check", ensemble_cfg, grounded=grounding)
+        tag = {
+            "source_model": model_name,
+            "source_weight": round(weight, 2),
+            "grounding": grounding,
+        }
+        # Individual items are tagged here exactly as the merge branch below
+        # tags them. This used to tag only `_sources`, so which model asserted a
+        # given claim was recorded when several models ran the domain and lost
+        # when one did — and `standard` thoroughness runs one. Anything keyed on
+        # the asserting model was therefore dead on precisely the cheaper preset:
+        # the citation re-ask had nobody to hand a refutation back to.
         return {
             **r["data"],
+            **{
+                key: [{**item, **tag} for item in (r["data"].get(key) or [])]
+                for key in _FACT_CHECK_ITEM_KEYS
+            },
             "_sources": {
-                model_name: {
-                    "weight": round(
-                        _get_weight(
-                            model_name,
-                            "fact_check",
-                            ensemble_cfg,
-                            grounded=bool(r.get("grounding_available")),
-                        ),
-                        2,
-                    ),
-                    "grounding": r.get("grounding_available", False),
-                }
+                model_name: {"weight": round(weight, 2), "grounding": grounding}
             },
         }
 

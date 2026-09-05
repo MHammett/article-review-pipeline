@@ -938,6 +938,10 @@ def _collect_citation_claims(fact_check: dict, draft: str) -> list[dict]:
                     "claim": claim,
                     "known_urls": known_urls,
                     "fact_check_bucket": bucket,
+                    # Which model asserted this. `_build_fact_check` tags every
+                    # merged item with it; it was being dropped here, which is
+                    # why a refuted claim had no one to hand back to.
+                    "source_model": item.get("source_model", ""),
                 }
             )
     log.info(
@@ -2089,6 +2093,7 @@ def run_draft_pipeline(
         len(citation_sources),
     )
     from .adapters.citation.resolver import resolve_citations
+    from .adapters.citation import reask as citation_reask
 
     fact_check = report.get("section_2_fact_check") or {}
     _record_fact_check_degradation(report, results)
@@ -2103,6 +2108,11 @@ def run_draft_pipeline(
             len(claims),
         )
         claims = []
+    citation_author = (
+        (handoff.get("author") or "").strip()
+        or (pub_config.get("author_name") or "").strip()
+        or None
+    )
     if claims:
         citation_results = resolve_citations(
             claims,
@@ -2121,11 +2131,7 @@ def run_draft_pipeline(
             # piece is not attributed to the publication's usual byline; the
             # publication default covers everything else, including --raw-draft,
             # which carries no metadata at all.
-            author=(
-                (handoff.get("author") or "").strip()
-                or (pub_config.get("author_name") or "").strip()
-                or None
-            ),
+            author=citation_author,
         )
         verified_count = sum(
             1 for r in citation_results if r.get("verification") == "checksum"
@@ -2156,6 +2162,56 @@ def run_draft_pipeline(
             - unverifiable_count
             - refuted_count,
         )
+
+        # Pass 3b — hand each refutation back to the model that asserted it.
+        #
+        # `resolve_citations` returns results in claim order, so the asserting
+        # model is joined on here rather than threaded through the resolver's
+        # normalise/parallel path, which takes a claim string and knows nothing
+        # about who produced it.
+        for _claim, _result in zip(claims, citation_results):
+            if not _result.get("source_model"):
+                _result["source_model"] = _claim.get("source_model", "")
+
+        if not offline and pipeline_cfg.get("citation_reask", True):
+            asked = citation_reask.reask_refuted(
+                citation_results,
+                api_keys=api_keys,
+                model_configs=model_configs,
+                call_log=api_call_log,
+                limit=int(
+                    pipeline_cfg.get(
+                        "citation_reask_limit", citation_reask.DEFAULT_REASK_LIMIT
+                    )
+                ),
+                author=citation_author,
+            )
+            if asked:
+                # An alternative source the model proposed is a suggestion, not
+                # a citation. It goes back through the same resolution the
+                # original URL failed, so what reaches the report is what the
+                # page was found to say rather than what the model said it says.
+                pending = citation_reask.proposed_source_claims(citation_results)
+                if pending:
+                    log.info(
+                        "Citations: re-checking %d model-proposed source(s)",
+                        len(pending),
+                    )
+                    checked = resolve_citations(
+                        [entry for _r, entry in pending],
+                        citation_sources,
+                        api_keys,
+                        verification_call_log=api_call_log,
+                        history_root=HISTORY_ROOT,
+                        author=citation_author,
+                    )
+                    citation_reask.attach_source_checks(pending, checked)
+                log.info(
+                    "Citations: %d refuted claim(s) handed back to the asserting "
+                    "model, %d proposed a different source",
+                    asked,
+                    len(pending),
+                )
     else:
         citation_results = []
         log.info("Citations: no actionable claims to resolve")
