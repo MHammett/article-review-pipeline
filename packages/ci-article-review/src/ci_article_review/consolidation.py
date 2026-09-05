@@ -419,10 +419,130 @@ _FACT_CHECK_ITEM_KEYS = (
 )
 
 
+#: Source strings that name no document — the draft itself, or the model's own
+#: reasoning. Compared against the whole source (normalised), not searched
+#: within it, so "Manual Calculation" fails and "Furuno GT-8031 calculation
+#: notes" does not.
+#:
+#: Measured 2026-09-05 on the Honda draft: 4 of 19 `confirmed` findings cited no
+#: document at all. One named "Draft Article" — the pipeline confirming the
+#: draft against itself — and three named "Manual Calculation", where the model
+#: did the arithmetic and reported the result as a confirmed fact. All four had
+#: `source_url: "N/A"`.
+#:
+#: The arithmetic may well be right; that is not the point. `confirmed` is the
+#: strongest thing Section 2 says and the tier Section 9 counts as backed by a
+#: document. A model reasoning its way to a conclusion is what the other buckets
+#: already exist to represent.
+_SELF_REFERENTIAL_SOURCES = frozenset(
+    {
+        "draft",
+        "the draft",
+        "draft article",
+        "the draft article",
+        "article",
+        "the article",
+        "this article",
+        "manual calculation",
+        "calculation",
+        "own calculation",
+        "computed",
+        "derived",
+        "inference",
+        "deduction",
+        "own analysis",
+        "author",
+        "the author",
+        "internal consistency",
+        "common knowledge",
+        "n/a",
+        "na",
+        "none",
+        "unknown",
+    }
+)
+
+#: A URL field the model filled in to mean "there isn't one".
+_EMPTY_URL_VALUES = frozenset({"", "n/a", "na", "none", "null", "-"})
+
+
+def _normalise_source(text):
+    """Lowercase, strip punctuation, collapse whitespace."""
+    kept = [c if (c.isalnum() or c in " /") else " " for c in str(text or "").lower()]
+    return " ".join("".join(kept).split())
+
+
+def _names_a_document(part):
+    key = _normalise_source(part)
+    return bool(key) and key not in _SELF_REFERENTIAL_SOURCES
+
+
+def _has_external_source(item):
+    """Whether a `confirmed` finding points at anything outside the draft.
+
+    A URL settles it. Without one, the free-text source has to name something
+    that is not the draft or the model's own reasoning — an unlinked "Honda
+    ServiceNews B18010I" is a real document and stays confirmed. Models list
+    several sources separated by semicolons, and one real document among them
+    is enough.
+    """
+    url = str(item.get("source_url", "") or "").strip().lower()
+    if url and url not in _EMPTY_URL_VALUES:
+        return True
+    return any(
+        _names_a_document(part) for part in str(item.get("source", "")).split(";")
+    )
+
+
+def _demote_unsourced_confirmations(data):
+    """Move `confirmed` findings with no external source into `unverifiable`.
+
+    Returns a new data dict; the input is left alone. The claim is not dropped —
+    it moves to the bucket that means "nothing was found to check this against",
+    which is what actually happened, and keeps its original source text so a
+    reader can see what the model offered instead.
+    """
+    confirmed = data.get("confirmed") or []
+    if not confirmed:
+        return data
+
+    kept, demoted = [], []
+    for item in confirmed:
+        if _has_external_source(item):
+            kept.append(item)
+            continue
+        demoted.append(
+            {
+                "claim": item.get("claim", ""),
+                "checked": item.get("source", "") or "nothing external",
+                "sources_checked": [],
+                "reason": (
+                    "Reported as confirmed with no external source: "
+                    f"{item.get('source') or 'none given'}. A claim the model "
+                    "reasoned its way to is not a claim a document backs, so it "
+                    "is reported here rather than as confirmed."
+                ),
+            }
+        )
+    if not demoted:
+        return data
+
+    log.info(
+        "Fact check: %d confirmed finding(s) cited no external source and were "
+        "moved to unverifiable.",
+        len(demoted),
+    )
+    return {
+        **data,
+        "confirmed": kept,
+        "unverifiable": list(data.get("unverifiable") or []) + demoted,
+    }
+
+
 def _build_fact_check(results, ensemble_cfg):
     """Merge fact_check results from all models that ran the domain."""
     domain_results = [
-        (model, r)
+        (model, {**r, "data": _demote_unsourced_confirmations(r["data"])})
         for (model, d), r in results.items()
         if d == "fact_check" and not r.get("failed") and r.get("data")
     ]
