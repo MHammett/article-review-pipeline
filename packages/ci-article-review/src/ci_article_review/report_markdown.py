@@ -389,7 +389,13 @@ def _citation_pair(citation):
     Returns ``(live_url, archive_url_or_None)``.
     """
     wayback = citation.get("wayback") or {}
-    return citation.get("url", ""), wayback.get("snapshot_url")
+    # The resolved URL when the citation came in through a redirector. A
+    # grounded model cites as `vertexaisearch.cloud.google.com/
+    # grounding-api-redirect/AUZIY...` — 271 opaque characters that name no
+    # publication, and that the reader is being asked to go and check. The page
+    # behind it was fetched and read by this pass, so its address is known.
+    live = citation.get("final_url") or citation.get("url", "")
+    return live, wayback.get("snapshot_url")
 
 
 def _render_archive_pair(citation, indent="  "):
@@ -740,7 +746,9 @@ def _render_section_9(citations):
         for c in mismatch:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved", "reask")):
+            for kv in _kv_lines(
+                c, exclude=("claim", "resolved", "reask", "url", "final_url")
+            ):
                 lines.append(kv)
             lines.extend(_render_reask(c.get("reask")))
         lines.append("")
@@ -760,7 +768,7 @@ def _render_section_9(citations):
         for c in unverifiable:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
                 lines.append(kv)
         lines.append("")
 
@@ -787,7 +795,7 @@ def _render_section_9(citations):
         for c in fetch_failed:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
                 lines.append(kv)
         lines.append("")
 
@@ -804,7 +812,7 @@ def _render_section_9(citations):
         for c in pointer:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
                 lines.append(kv)
         lines.append("")
 
@@ -823,7 +831,7 @@ def _render_section_9(citations):
         lines.append("")
         for c in no_source:
             lines.append(f'- "{c.get("claim", "")}"')
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
                 lines.append(kv)
         lines.append("")
 

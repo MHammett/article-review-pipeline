@@ -1865,3 +1865,112 @@ class TestWaybackRateLimitHandling:
             with patch.object(wayback.time, "sleep"):
                 wayback._get_availability("https://example.org", 10)
         assert wayback._rate_limited_lookups == 3
+
+
+class TestResolvedUrlIsRecorded:
+    """Where the fetch actually landed, for citations that arrive via a redirector.
+
+    A grounded model cites through one: a gemini-sourced citation arrives as a
+    271-character `vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIY...`
+    that names no publication and is not durable. `safe_get` follows redirects a
+    validated hop at a time and returns the last hop's response, so the resolved
+    address was already in hand and was being dropped. Measured 2026-09-05 on the
+    Honda run: opaque redirect URLs were 817 of the 2,682 characters in one
+    Section 9 entry, while the page behind them was a Jalopnik article this pass
+    had already fetched, read and checksummed.
+    """
+
+    _REDIRECTOR = "https://redirector.example/grounding-api-redirect/AUZIYabc123"
+    _REAL = "https://www.jalopnik.com/honda-clocks-stuck"
+
+    def _fetch(self, final_url):
+        resp = MagicMock()
+        resp.url = final_url
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "text/html"}
+        resp.text = (
+            "<html><body><article><p>" + ("word " * 80) + "</p></article></body></html>"
+        )
+        resp.content = resp.text.encode()
+        resp.encoding = "utf-8"
+        resp.apparent_encoding = "utf-8"
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def _resolve(self, final_url):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                return_value=self._fetch(final_url),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": False},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver._verify_relevance",
+                return_value=({"checked": False, "reason": "no key"}, None),
+            ),
+        ):
+            return resolver.resolve_citations(
+                [{"claim": "c", "known_urls": [self._REDIRECTOR]}], []
+            )[0]
+
+    def test_the_resolved_url_is_recorded_when_it_differs(self):
+        assert self._resolve(self._REAL)["final_url"] == self._REAL
+
+    def test_the_requested_url_is_still_recorded(self):
+        """The citation as given still has to be reportable — it is what the
+        model actually produced."""
+        assert self._resolve(self._REAL)["url"] == self._REDIRECTOR
+
+    def test_an_ordinary_citation_gains_no_extra_field(self):
+        assert "final_url" not in self._resolve(self._REDIRECTOR)
+
+    def test_the_wayback_fallback_path_does_not_raise(self):
+        """`final_url` is assigned inside the try that the fallback skips.
+        Leaving it unbound turned every fallback into an unresolved citation --
+        caught here rather than by the fallback tests noticing collateral damage.
+        """
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=requests.exceptions.ConnectionError("dns"),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": False},
+            ),
+        ):
+            result = resolver.resolve_citations(
+                [{"claim": "c", "known_urls": [self._REDIRECTOR]}], []
+            )[0]
+        assert "final_url" not in result
+        assert isinstance(result, dict)
+
+
+class TestResolvedUrlIsWhatTheReaderSees:
+    def test_the_report_links_the_resolved_url_not_the_redirector(self):
+        from ci_article_review.report_markdown import _render_archive_pair
+
+        out = "\n".join(
+            _render_archive_pair(
+                {
+                    "url": "https://redirector.example/grounding-api-redirect/AUZIYabc",
+                    "final_url": "https://www.jalopnik.com/honda-clocks-stuck",
+                    "wayback": {"archived": False},
+                }
+            )
+        )
+        assert "jalopnik.com" in out
+        assert "grounding-api-redirect" not in out
+
+    def test_it_falls_back_to_the_requested_url(self):
+        from ci_article_review.report_markdown import _render_archive_pair
+
+        out = "\n".join(
+            _render_archive_pair(
+                {"url": "https://example.org/a", "wayback": {"archived": False}}
+            )
+        )
+        assert "https://example.org/a" in out
