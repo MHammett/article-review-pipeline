@@ -314,3 +314,80 @@ class TestPermanentFailureDetection:
             "insufficient_quota",
         ):
             assert pipeline._looks_permanent(error), error
+
+
+class TestDomainsNeverAssignedAreRepairable:
+    """A domain can end up empty two ways: its model failed, or it never ran.
+
+    The second is the drafter-exclusion case documented under "Drafting model"
+    in docs/CONFIGURATION.md -- at `standard` thoroughness `voice_style` is a
+    single model, so naming that model as the drafter leaves the domain with no
+    reviewer and no result key at all. Deriving the empty set from `raw_results`
+    alone made that invisible to the pass built to repair it.
+    """
+
+    def test_a_domain_with_no_result_at_all_is_flagged(self):
+        raw = {"gemini:fact_check": _ok("gemini", "fact_check")}
+        assert pipeline._domains_with_nothing_usable(raw) == []
+        assert pipeline._domains_with_nothing_usable(
+            raw, {"fact_check", "voice_style"}
+        ) == ["voice_style"]
+
+    def test_a_covered_domain_is_not_flagged(self):
+        raw = {"openai:voice_style": _ok("openai", "voice_style")}
+        assert pipeline._domains_with_nothing_usable(raw, {"voice_style"}) == []
+
+    def test_a_failed_domain_is_still_flagged(self):
+        raw = {"gemini:fact_check": _failed("gemini", "fact_check")}
+        assert pipeline._domains_with_nothing_usable(raw, {"fact_check"}) == [
+            "fact_check"
+        ]
+
+    def test_the_expected_set_does_not_have_to_be_given(self):
+        """Callers that only care about attempted domains keep working."""
+        raw = {"gemini:fact_check": _failed("gemini", "fact_check")}
+        assert pipeline._domains_with_nothing_usable(raw) == ["fact_check"]
+
+
+class TestCalibrationFiltersAreRespected:
+    """`--only-domain fact_check` deliberately skips four domains.
+
+    Treating the whole preset as expected would have made every skipped domain
+    look empty and bought a substitute call for each -- defeating the flag and
+    costing four model calls on a run whose entire purpose is to be narrow.
+    """
+
+    def test_only_domain_does_not_substitute_for_the_skipped_domains(self, tmp_path):
+        from .test_pipeline_end_to_end import _fake_run_domain, _stubbed_run
+
+        attempted = []
+
+        def _stub(model_name, domain, *a, **kw):
+            attempted.append(f"{model_name}:{domain}")
+            return _fake_run_domain(model_name, domain, *a, **kw)
+
+        with _stubbed_run(
+            tmp_path,
+            extra_patches=[
+                patch("ci_article_review.pipeline._run_domain", side_effect=_stub)
+            ],
+            only_domain="fact_check",
+        ):
+            pass
+
+        assert attempted, "the filtered domain should still run"
+        assert all(a.endswith(":fact_check") for a in attempted), (
+            f"a skipped domain was run or substituted for: {attempted}"
+        )
+
+    def test_a_calibration_run_does_not_pay_for_the_seo_passes(self, tmp_path):
+        from .test_pipeline_end_to_end import _stubbed_run
+
+        with (
+            patch("ci_article_review.analysis.seo_suggest.generate") as suggest,
+            patch("ci_article_review.analysis.seo_content.review") as content,
+        ):
+            with _stubbed_run(tmp_path, only_domain="fact_check"):
+                pass
+        assert not suggest.called
+        assert not content.called

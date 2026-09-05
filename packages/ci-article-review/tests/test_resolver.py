@@ -1974,3 +1974,74 @@ class TestResolvedUrlIsWhatTheReaderSees:
             )
         )
         assert "https://example.org/a" in out
+
+
+class TestSourceAdaptersIdentifyThemselves:
+    """Every adapter fetch sends a User-Agent that says who we are.
+
+    Measured 2026-09-05: census, eia and fred called `requests.get` with no
+    headers at all, so they identified as `python-requests/2.x` to the
+    government APIs that are the most authoritative sources this pipeline has.
+    An anonymous agent is what gets blocked -- the Overpass 406 recorded in this
+    project's notes was a User-Agent block, not a rate limit -- and being
+    identifiable is what lets an operator allowlist us instead of guessing.
+
+    Asserted against the source rather than by driving each adapter, because the
+    thing worth catching is a NEW adapter written with a bare `requests.get`.
+    Each has its own entry point, key requirement and claim-matching, so a
+    behavioural test would cover whichever ones the fixture happened to reach.
+
+    fhwa, epa, pjm, icc, ferc and ilga make no HTTP calls -- they are
+    pointer-only adapters -- so they have nothing to identify.
+    """
+
+    def _calls_without_headers(self, text):
+        out = []
+        for verb in ("requests.get(", "requests.post("):
+            start = 0
+            while True:
+                i = text.find(verb, start)
+                if i == -1:
+                    break
+                depth, j = 0, i + len(verb) - 1
+                while j < len(text):
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j += 1
+                call = text[i : j + 1]
+                if "headers=" not in call:
+                    out.append(call.splitlines()[0][:70])
+                start = j + 1
+        return out
+
+    def test_no_adapter_fetches_anonymously(self):
+        from pathlib import Path
+
+        sources = Path(
+            "packages/ci-article-review/src/ci_article_review/adapters/citation/sources"
+        )
+        if not sources.is_dir():  # pytest invoked from elsewhere
+            import ci_article_review.adapters.citation.sources as pkg
+
+            sources = Path(pkg.__file__).parent
+
+        offenders = {}
+        for path in sorted(sources.glob("*.py")):
+            bare = self._calls_without_headers(path.read_text(encoding="utf-8"))
+            if bare:
+                offenders[path.name] = bare
+        assert not offenders, (
+            "these adapters fetch without a User-Agent, so they identify as "
+            f"python-requests to the source: {offenders}"
+        )
+
+    def test_the_guard_would_catch_a_bare_call(self):
+        """The scan is the test; make sure it is not vacuously passing."""
+        assert self._calls_without_headers("resp = requests.get(url, timeout=15)")
+        assert not self._calls_without_headers(
+            "resp = requests.get(url, timeout=15, headers=DEFAULT_HEADERS)"
+        )

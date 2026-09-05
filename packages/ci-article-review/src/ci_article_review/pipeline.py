@@ -1331,8 +1331,8 @@ def _recover_failed_calls(
 _SEARCH_GROUNDED_MODELS = ("gemini", "perplexity")
 
 
-def _domains_with_nothing_usable(raw_results):
-    """Domains that were attempted and produced no usable result at all.
+def _domains_with_nothing_usable(raw_results, expected_domains=None):
+    """Domains the run should have covered and got no usable result from.
 
     A domain with two models loses coverage when one fails. A domain with one
     model loses the domain, and `fact_check` losing the domain loses the two
@@ -1341,13 +1341,20 @@ def _domains_with_nothing_usable(raw_results):
     Measured 2026-09-05: `gemini:fact_check` stalled before its first chunk,
     the recovery pass retried the same model and it stalled again, and the run
     exited 0 having spent $0.64 with both sections blank.
+
+    ``expected_domains`` is what the preset asked for. Without it this saw only
+    domains that were *attempted*, which misses the other way a domain ends up
+    empty: its only model was never assigned. Draft with openai at ``economy``
+    and ``voice_style`` has no reviewer at all — the edge case documented under
+    "Drafting model" in docs/CONFIGURATION.md — so there is no result key, and
+    the domain was invisible to the pass meant to repair exactly that.
     """
-    attempted: dict[str, bool] = {}
+    covered: dict[str, bool] = {d: False for d in (expected_domains or ())}
     for name, result in raw_results.items():
         _model, _, domain = name.partition(":")
         usable = bool(not result.get("failed") and result.get("data"))
-        attempted[domain] = attempted.get(domain, False) or usable
-    return sorted(domain for domain, usable in attempted.items() if not usable)
+        covered[domain] = covered.get(domain, False) or usable
+    return sorted(domain for domain, usable in covered.items() if not usable)
 
 
 def _substitute_candidates(domain, tried, model_configs, api_keys, drafting_model):
@@ -1389,6 +1396,7 @@ def _substitute_for_empty_domains(
     api_keys,
     task_timeout,
     drafting_model=None,
+    expected_domains=None,
 ):
     """Run a different provider for any domain that came back empty.
 
@@ -1404,7 +1412,7 @@ def _substitute_for_empty_domains(
     if not pipeline_cfg.get("substitute_failed_domains", True):
         return raw_results
 
-    empty = _domains_with_nothing_usable(raw_results)
+    empty = _domains_with_nothing_usable(raw_results, expected_domains)
     if not empty:
         return raw_results
 
@@ -1709,7 +1717,12 @@ def run_draft_pipeline(
     else:
         pre_analysis["links"] = []
 
-    if seo_suggestions is False or offline:
+    # A calibration run is scoped to one model or domain on purpose and should
+    # not pay for the two SEO calls it did not ask for. Cheap (~$0.0006 on the
+    # 2026-09-05 runs) but billed, logged and printed, which makes a deliberately
+    # narrowed run's output and cost harder to read than it needs to be. Routed
+    # through the existing flag rather than a second suppression path.
+    if seo_suggestions is False or offline or only_model or only_domain:
         # CLI override for this run only — does not modify the publication
         # config on disk. Mirrors --cost-preset above. Assigned rather than
         # setdefault'd because a bare `seo_rules:` line in YAML parses to None,
@@ -1891,6 +1904,20 @@ def run_draft_pipeline(
     if only_domain:
         assignments = [a for a in assignments if a[1] == only_domain]
         custom_assignments = [a for a in custom_assignments if a[1] == only_domain]
+    # What the run should have covered, for the substitution pass below.
+    #
+    # Normally that is everything the preset asked for, so a domain whose only
+    # model was never assigned — the drafter-exclusion case — is repairable and
+    # not merely invisible. Under a calibration filter it is what actually got
+    # assigned: `--only-domain fact_check` deliberately skips the other four,
+    # and substituting for them would defeat the flag.
+    if only_model or only_domain:
+        expected_domains = {d for _m, d in assignments + custom_assignments}
+    else:
+        expected_domains = set(
+            _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
+        )
+
     if (only_model or only_domain) and not (assignments or custom_assignments):
         log.error(
             "No assignments match the calibration filters (--only-model=%r --only-domain=%r). "
@@ -2038,6 +2065,9 @@ def run_draft_pipeline(
             api_keys,
             task_timeout,
             drafting_model=drafting_model,
+            # What the preset asked for, so a domain whose only model was never
+            # assigned is repairable too, not just one whose model failed.
+            expected_domains=expected_domains,
         )
 
     # Hold the raw ensemble output for capture. Written next to the report once
