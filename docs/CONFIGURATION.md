@@ -508,6 +508,42 @@ Providers cache on an exact *leading* prefix. The per-domain instruction normall
 
 ---
 
+### Substituting a provider for an empty domain
+
+```yaml
+pipeline:
+  substitute_failed_domains: true   # default; false disables the pass
+```
+
+When every model assigned to a domain fails, one different provider is tried for
+that domain. It runs after the recovery pass, adds nothing to a clean run, and
+tries exactly one substitute — a provider having an outage should not buy call
+after call.
+
+**Why recovery is not enough.** `recovery_passes` retries the model that failed,
+which is right for a flake and useless for an outage. Measured 2026-09-05 on
+`dc-environment-v26` at `--cost-preset standard`: `gemini:fact_check` returned
+"stream stalled before the first chunk: nothing received for 160.0s", recovery
+retried the same model and it stalled identically, and the run exited 0 having
+spent $0.64.
+
+**Why `fact_check` in particular.** At `standard` thoroughness it is a single
+model *and* the only source of claims, so losing it empties Section 2, leaves
+nothing for citation resolution, and empties Section 9 as well. Losing one of
+two models in another domain costs coverage; losing this one costs both sections
+that justify the run.
+
+Substitutes are drawn from the `maximum` preset's list for the domain, minus
+whatever was already tried, and honour the same credential checks, `prompts:`
+overrides and drafting-model exclusion as a normal assignment. For `fact_check`
+the search-grounded models are preferred first — grounding is the reason gemini
+is in that ensemble at all — falling back to an ungrounded model only because an
+ungrounded fact-check pass is still worth more than an empty section. The
+original failure is kept in the results either way, so the report still says
+which model failed.
+
+---
+
 ### Citation re-ask
 
 ```yaml

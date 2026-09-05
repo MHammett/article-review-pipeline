@@ -444,12 +444,25 @@ def _provider_params(provider, cfg, response_schema=None):
         effort = cfg.get("effort")
         if budget is not None:
             params["thinking"] = {"type": "enabled", "budget_tokens": int(budget)}
-            params["max_tokens"] = int(budget) + 4096
+            # Room for the answer on top of the thinking allowance, which is
+            # spent before the response begins.
+            default_max_tokens = int(budget) + 4096
         elif effort:
             params["reasoning_effort"] = effort
-            params["max_tokens"] = 16000
+            default_max_tokens = 16000
         else:
-            params["max_tokens"] = 4096
+            # Was a flat 4096, and `cfg["max_tokens"]` was ignored on all three
+            # branches, so there was no way to raise it from config either.
+            # Measured 2026-09-05 on a standard-preset run (135514 chars,
+            # effort=none): claude:argument_integrity stopped at exactly 4096
+            # output tokens and came back PARTIAL — salvage kept the complete
+            # findings and discarded the rest. Every other provider finished.
+            #
+            # 8000 matches the default mistral's no-effort path already uses,
+            # and claude-haiku-4-5's real max_output_tokens is 64000, so this
+            # is still 8x below the provider's ceiling rather than near it.
+            default_max_tokens = 8000
+        params["max_tokens"] = int(cfg.get("max_tokens", default_max_tokens))
         # No temperature — see _SENDS_TEMPERATURE.
 
     elif provider in ("mistral", "grok", "perplexity"):
