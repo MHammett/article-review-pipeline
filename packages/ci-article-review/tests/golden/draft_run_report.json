@@ -437,7 +437,35 @@
       "source_model": "openai"
     }
   ],
-  "section_8_additional": [],
+  "section_8_additional": [
+    {
+      "category": "fact_check",
+      "confidence": "low",
+      "in_domain": false,
+      "model_count": 1,
+      "models": [
+        "openai"
+      ],
+      "observation": "No source given for the 41 percent figure.",
+      "passage": "The grid served 41 percent of load from nuclear.",
+      "source_domain": "completeness",
+      "source_model": "openai"
+    },
+    {
+      "category": "red_team",
+      "confidence": "high",
+      "in_domain": false,
+      "model_count": 2,
+      "models": [
+        "mistral",
+        "openai"
+      ],
+      "observation": "The claim names an omission without evidence of it.",
+      "passage": "Local officials were not consulted.",
+      "source_domain": "voice_style",
+      "source_model": "openai"
+    }
+  ],
   "section_9_citations": [
     {
       "checksum": "0000000000000000000000000000000000000000000000000000000000000000",

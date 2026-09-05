@@ -341,14 +341,35 @@ def _render_section_8(additional):
     if not additional:
         lines.append("_None._")
         return lines
+    lines.append(
+        "_Most-corroborated first, then by the flagging model's stated "
+        "confidence. Confidence is self-reported and not comparable between "
+        "providers, so it only breaks ties between observations no other model "
+        "raised._"
+    )
+    lines.append("")
     for obs in additional:
         passage = obs.get("passage", "")
         category = obs.get("category", "?")
-        source = obs.get("source_model", "?")
+        models = obs.get("models") or [obs.get("source_model", "?")]
         domain = obs.get("source_domain", "?")
-        lines.append(f'- [{category}] "{passage}" — flagged by {source}:{domain}')
+        if len(models) > 1:
+            who = f"{', '.join(models)} — {len(models)} models agree"
+        else:
+            who = f"{models[0]}:{domain}"
+        lines.append(f'- [{category}] "{passage}" — flagged by {who}')
         for kv in _kv_lines(
-            obs, exclude=("passage", "category", "source_model", "source_domain")
+            obs,
+            exclude=(
+                "passage",
+                "category",
+                "source_model",
+                "source_domain",
+                # Rendered in the bullet above; repeating them reads as data the
+                # model supplied rather than as bookkeeping this pass added.
+                "models",
+                "model_count",
+            ),
         ):
             lines.append(kv)
     lines.append("")
