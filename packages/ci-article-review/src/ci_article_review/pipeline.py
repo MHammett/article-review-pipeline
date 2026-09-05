@@ -1230,6 +1230,17 @@ def _run_reviews_in_parallel(runners, pipeline_cfg, model_configs, task_timeout)
 _PERMANENT_FAILURE_MARKERS = (
     "invalid api key",
     "invalid_api_key",
+    # Gemini says it the other way round, in both the prose and the reason
+    # code, so neither spelling above matched and a dead key was retried after
+    # the full recovery delay. Measured 2026-09-05: "API key not valid. Please
+    # pass a valid API key." with reason "API_KEY_INVALID".
+    "api key not valid",
+    "api_key_invalid",
+    # litellm normalises auth failures across providers to this exception, so
+    # the class name catches phrasings no one has written down yet. The entry
+    # below it has an underscore and matches the provider error *code*; this
+    # one matches the exception litellm raises.
+    "authenticationerror",
     "unauthorized",
     "not_authorized",
     "archived",
@@ -1310,6 +1321,137 @@ def _recover_failed_calls(
         len(still_failed),
         len(originally_failed),
     )
+    return raw_results
+
+
+#: Models whose fact_check answers come from a live search rather than training
+#: recall. The preset comment at `thorough` limits fact_check to these "for
+#: quality", and a substitute should honour the same preference before falling
+#: back to one that cannot search.
+_SEARCH_GROUNDED_MODELS = ("gemini", "perplexity")
+
+
+def _domains_with_nothing_usable(raw_results, expected_domains=None):
+    """Domains the run should have covered and got no usable result from.
+
+    A domain with two models loses coverage when one fails. A domain with one
+    model loses the domain, and `fact_check` losing the domain loses the two
+    sections that justify the run: it is the only source of claims, so Section 2
+    is empty, no claim reaches citation resolution, and Section 9 is empty too.
+    Measured 2026-09-05: `gemini:fact_check` stalled before its first chunk,
+    the recovery pass retried the same model and it stalled again, and the run
+    exited 0 having spent $0.64 with both sections blank.
+
+    ``expected_domains`` is what the preset asked for. Without it this saw only
+    domains that were *attempted*, which misses the other way a domain ends up
+    empty: its only model was never assigned. Draft with openai at ``economy``
+    and ``voice_style`` has no reviewer at all — the edge case documented under
+    "Drafting model" in docs/CONFIGURATION.md — so there is no result key, and
+    the domain was invisible to the pass meant to repair exactly that.
+    """
+    covered: dict[str, bool] = {d: False for d in (expected_domains or ())}
+    for name, result in raw_results.items():
+        _model, _, domain = name.partition(":")
+        usable = bool(not result.get("failed") and result.get("data"))
+        covered[domain] = covered.get(domain, False) or usable
+    return sorted(domain for domain, usable in covered.items() if not usable)
+
+
+def _substitute_candidates(domain, tried, model_configs, api_keys, drafting_model):
+    """Configured models that could stand in for ``domain``, best first.
+
+    Drawn from the `maximum` preset, which lists every model, so this stays in
+    step with the presets rather than keeping a second ordering of its own.
+    Anything already tried for this domain is excluded — the point is a
+    *different* provider, since retrying the failed one is what the recovery
+    pass already did.
+    """
+    pool = _THOROUGHNESS_PRESETS["maximum"].get(domain, [])
+    if domain == "fact_check":
+        pool = [m for m in pool if m in _SEARCH_GROUNDED_MODELS] + [
+            m for m in pool if m not in _SEARCH_GROUNDED_MODELS
+        ]
+    out = []
+    for model_name in pool:
+        if model_name in tried:
+            continue
+        if _model_blocked_reason(
+            model_name, model_configs.get(model_name, {}), api_keys
+        ):
+            continue
+        allowed = _prompt_override(model_configs.get(model_name, {}))
+        if allowed is not None and domain not in allowed:
+            continue
+        if _drafter_is_excluded(model_name, domain, drafting_model):
+            continue
+        out.append(model_name)
+    return out
+
+
+def _substitute_for_empty_domains(
+    raw_results,
+    make_runner,
+    pipeline_cfg,
+    model_configs,
+    api_keys,
+    task_timeout,
+    drafting_model=None,
+    expected_domains=None,
+):
+    """Run a different provider for any domain that came back empty.
+
+    Only ever adds calls that would not otherwise have run, and only after
+    recovery has already retried the original model — so a clean run pays
+    nothing for this, and a run that would have produced an empty Section 2
+    pays for one substitute call instead of being re-run whole.
+
+    One substitute per domain. If that one also fails the domain stays empty
+    and the report says so: the alternative is a run that keeps buying calls
+    while a provider is having an outage.
+    """
+    if not pipeline_cfg.get("substitute_failed_domains", True):
+        return raw_results
+
+    empty = _domains_with_nothing_usable(raw_results, expected_domains)
+    if not empty:
+        return raw_results
+
+    for domain in empty:
+        tried = {
+            name.partition(":")[0]
+            for name in raw_results
+            if name.endswith(f":{domain}")
+        }
+        candidates = _substitute_candidates(
+            domain, tried, model_configs, api_keys, drafting_model
+        )
+        if not candidates:
+            log.warning(
+                "Domain %s produced nothing and no other configured model can "
+                "stand in for it — the report will show it as not run.",
+                domain,
+            )
+            continue
+        substitute = candidates[0]
+        log.info(
+            "Domain %s produced nothing from %s; substituting %s.",
+            domain,
+            ", ".join(sorted(tried)) or "no model",
+            substitute,
+        )
+        name, fn = make_runner(substitute, domain)
+        raw_results.update(
+            _run_reviews_for_names(
+                [name], [(name, fn)], pipeline_cfg, model_configs, task_timeout
+            )
+        )
+        if raw_results.get(name, {}).get("failed"):
+            log.warning(
+                "Substitute %s also failed for %s; leaving the domain empty.",
+                substitute,
+                domain,
+            )
+
     return raw_results
 
 
@@ -1575,7 +1717,12 @@ def run_draft_pipeline(
     else:
         pre_analysis["links"] = []
 
-    if seo_suggestions is False or offline:
+    # A calibration run is scoped to one model or domain on purpose and should
+    # not pay for the two SEO calls it did not ask for. Cheap (~$0.0006 on the
+    # 2026-09-05 runs) but billed, logged and printed, which makes a deliberately
+    # narrowed run's output and cost harder to read than it needs to be. Routed
+    # through the existing flag rather than a second suppression path.
+    if seo_suggestions is False or offline or only_model or only_domain:
         # CLI override for this run only — does not modify the publication
         # config on disk. Mirrors --cost-preset above. Assigned rather than
         # setdefault'd because a bare `seo_rules:` line in YAML parses to None,
@@ -1757,6 +1904,20 @@ def run_draft_pipeline(
     if only_domain:
         assignments = [a for a in assignments if a[1] == only_domain]
         custom_assignments = [a for a in custom_assignments if a[1] == only_domain]
+    # What the run should have covered, for the substitution pass below.
+    #
+    # Normally that is everything the preset asked for, so a domain whose only
+    # model was never assigned — the drafter-exclusion case — is repairable and
+    # not merely invisible. Under a calibration filter it is what actually got
+    # assigned: `--only-domain fact_check` deliberately skips the other four,
+    # and substituting for them would defeat the flag.
+    if only_model or only_domain:
+        expected_domains = {d for _m, d in assignments + custom_assignments}
+    else:
+        expected_domains = set(
+            _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
+        )
+
     if (only_model or only_domain) and not (assignments or custom_assignments):
         log.error(
             "No assignments match the calibration filters (--only-model=%r --only-domain=%r). "
@@ -1799,9 +1960,12 @@ def run_draft_pipeline(
             review_context.count("\n") - 1,
         )
 
-    # Build runner list — custom domains pass their prompt string directly
-    runners = [
-        (
+    # Build runner list — custom domains pass their prompt string directly.
+    # Factored into a maker so a substitute call (below) is built exactly the
+    # same way as the calls the preset asked for, rather than by a second
+    # construction that could drift from this one.
+    def _make_runner(model_name, domain):
+        return (
             f"{model_name}:{domain}",
             lambda m=model_name, d=domain, ps=custom_prompts.get(domain): _run_domain(
                 m,
@@ -1816,7 +1980,9 @@ def run_draft_pipeline(
                 review_context=review_context,
             ),
         )
-        for model_name, domain in all_assignments
+
+    runners = [
+        _make_runner(model_name, domain) for model_name, domain in all_assignments
     ]
 
     raw_results: dict[str, dict] = {}
@@ -1884,6 +2050,24 @@ def run_draft_pipeline(
     if not replay_results and pipeline_cfg.get("recovery_passes", 1) > 0:
         raw_results = _recover_failed_calls(
             raw_results, runners, pipeline_cfg, model_configs, task_timeout
+        )
+
+    # Recovery retries the model that failed. When that model is the only one
+    # assigned to a domain and it is failing rather than flaking, retrying it
+    # cannot bring the domain back — so a domain still empty at this point gets
+    # a different provider instead. Skipped on replay, which makes no calls.
+    if not replay_results:
+        raw_results = _substitute_for_empty_domains(
+            raw_results,
+            _make_runner,
+            pipeline_cfg,
+            model_configs,
+            api_keys,
+            task_timeout,
+            drafting_model=drafting_model,
+            # What the preset asked for, so a domain whose only model was never
+            # assigned is repairable too, not just one whose model failed.
+            expected_domains=expected_domains,
         )
 
     # Hold the raw ensemble output for capture. Written next to the report once

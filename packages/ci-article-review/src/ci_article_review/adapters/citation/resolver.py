@@ -595,10 +595,27 @@ def _resolve_known_url(
     verified_via = "direct"
     fallback_reason = None
     wb = None
+    # Set only on the direct path below. The Wayback fallback reads from
+    # archive.org, whose address already appears under `wayback`, and reporting
+    # a snapshot URL as the citation's resolved location would be wrong.
+    final_url = ""
     try:
         resp = safe_get(known_url, timeout=timeout)
         resp.raise_for_status()
         content, content_kind = _extract_fetched(resp, known_url)
+        # Where the fetch actually landed. `safe_get` follows redirects one
+        # validated hop at a time and returns the last hop's response, so this
+        # is the resolved URL and it was being thrown away.
+        #
+        # It matters because grounded models cite through a redirector: a
+        # gemini-sourced citation arrives as a 271-character
+        # `vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIY...`,
+        # which tells a reader nothing about what they are being asked to check
+        # and is not durable. Measured 2026-09-05 on the Honda run: opaque
+        # redirect URLs were 817 of the 2,682 characters in one Section 9 entry,
+        # while the page behind them was a Jalopnik article the pipeline had
+        # already fetched, read and checksummed.
+        final_url = getattr(resp, "url", "") or ""
     except UnsafeURLError as e:
         # Distinct from a fetch failure, and never eligible for the Wayback
         # fallback: archive.org has no snapshot of an internal host, and asking
@@ -660,6 +677,8 @@ def _resolve_known_url(
         "claim": claim,
         "source_name": "fact-check model",
         "url": known_url,
+        # Only when it differs, so an ordinary citation gains no noise.
+        **({"final_url": final_url} if final_url and final_url != known_url else {}),
         "content_summary": _safe_summary(content),
         "checksum": sha256_checksum(content),
         "resolved": True,
