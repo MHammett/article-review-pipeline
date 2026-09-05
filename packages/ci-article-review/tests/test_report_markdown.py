@@ -33,6 +33,44 @@ def _base_report(**overrides):
     return report
 
 
+def _mismatch_citation(**overrides):
+    """A content-mismatch citation shaped like the ones the resolver emits.
+
+    Modelled on the Honda run's single refutation: a grounded-model citation
+    that fetched and read cleanly, came back ``not_addressed``, and carries a
+    ``note`` the resolver builds by restating the verdict and the reason. The
+    URLs are long on purpose — the opaque redirect ones in that run were 271
+    characters each, and three of them were what buried the actionable line.
+    """
+    citation = {
+        "claim": "the chip advanced to exactly January 1, 2003.",
+        "url": "https://example.test/redirect/" + "A" * 200,
+        "resolved": True,
+        "verification": "content_mismatch",
+        "relevance_verdict": "not_addressed",
+        "relevance_reason": "The page discusses 1998 or 2002, not 2003.",
+        "note": (
+            "Source URL loaded, and its extracted article text was read and "
+            "checked, but content verification found it does not support this "
+            "specific claim (not_addressed): The page discusses 1998 or 2002, "
+            "not 2003."
+        ),
+        "content_summary": "SUMMARY " * 60,
+        "checksum": "451bb861017fe7c4446b7dc274a2d6ce",
+        "alternates_checked": [
+            "https://example.test/alt-one/" + "B" * 200,
+            "https://example.test/alt-two/" + "C" * 200,
+        ],
+        "wayback": {
+            "archived": True,
+            "snapshot_url": "https://web.archive.test/x",
+            "snapshot_age_days": 10,
+        },
+    }
+    citation.update(overrides)
+    return citation
+
+
 class TestFailedModelPassesAreExplained:
     """A failed pass has to say what happened and what it cost the report.
 
@@ -719,6 +757,180 @@ class TestSection9Citations:
         md = render_report_markdown(_base_report(section_9_citations=contradicts))
         assert "1 of these came back `contradicts`" in md
         assert "possible factual error" in md
+
+    def test_a_conceding_reask_changes_the_guidance(self):
+        """Whenever nothing came back `contradicts`, the block told the reader
+        the page simply had not covered the claim and the URL was probably
+        wrong. On the Honda run the one `not_addressed` entry carried a re-ask
+        in which the asserting model read its own refutation, concluded the
+        *claim* was wrong, and proposed the fix — and the guidance steered the
+        reader away from the only actionable finding in the block."""
+        plain = [_mismatch_citation()]
+        md = render_report_markdown(_base_report(section_9_citations=plain))
+        assert "None came back `contradicts`" in md
+        assert "wrong URL was checked" in md
+
+        conceded = [
+            _mismatch_citation(
+                reask={
+                    "action": "correct_claim",
+                    "asked_model": "gemini",
+                    "reason": "The page says 1998 or 2002.",
+                    "corrected_claim": "the chip advanced to January 1, 1998 or 2002.",
+                }
+            )
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=conceded))
+        assert "concluded the claim — not the citation — was wrong" in md
+        # Replaced, not merely appended to: the sentence that contradicted the
+        # finding below it must not survive alongside the correction.
+        assert "None came back `contradicts`" not in md
+        assert "wrong URL was checked" not in md
+
+    def test_a_withdrawing_reask_concedes_the_claim_too(self):
+        """`withdraw` faults the claim as squarely as `correct_claim` does; it
+        just has no replacement wording to offer."""
+        md = render_report_markdown(
+            _base_report(
+                section_9_citations=[
+                    _mismatch_citation(
+                        reask={
+                            "action": "withdraw",
+                            "asked_model": "gemini",
+                            "reason": "Nothing supports it.",
+                        }
+                    )
+                ]
+            )
+        )
+        assert "concluded the claim — not the citation — was wrong" in md
+        assert "wrong URL was checked" not in md
+
+    def test_a_reask_that_blames_the_source_leaves_the_guidance_alone(self):
+        """`different_source` stands by the claim and blames the URL — which is
+        precisely the citation problem the default guidance describes — and
+        `stand` concedes nothing at all. Neither may flip the header."""
+        for action in ("different_source", "stand"):
+            md = render_report_markdown(
+                _base_report(
+                    section_9_citations=[
+                        _mismatch_citation(
+                            reask={
+                                "action": action,
+                                "asked_model": "gemini",
+                                "reason": "r",
+                                "source_url": "https://example.test/proposed",
+                            }
+                        )
+                    ]
+                )
+            )
+            assert "None came back `contradicts`" in md, action
+            assert "not the citation — was wrong" not in md, action
+
+    def test_each_guidance_sentence_is_scoped_to_the_entries_it_covers(self):
+        """With a mix in the block, every sentence has to carry its own count —
+        the reader is deciding what to do per entry, not per section."""
+        citations = [
+            _mismatch_citation(claim="contradicted", relevance_verdict="contradicts"),
+            _mismatch_citation(
+                claim="conceded",
+                reask={
+                    "action": "correct_claim",
+                    "asked_model": "gemini",
+                    "corrected_claim": "fixed wording",
+                },
+            ),
+            _mismatch_citation(claim="plain one"),
+            _mismatch_citation(claim="plain two"),
+        ]
+        md = render_report_markdown(_base_report(section_9_citations=citations))
+        assert "1 of these came back `contradicts`" in md
+        assert "refutation for 1 of these" in md
+        assert "The remaining 2 entries are" in md
+        # The unconditional wording must never appear beside a scoped count.
+        assert "None came back `contradicts`" not in md
+
+    def test_the_proposed_correction_precedes_the_bulk_evidence(self):
+        """The correction was the last line of a 2,682-character entry, below a
+        546-character content summary and three opaque redirect URLs."""
+        md = render_report_markdown(
+            _base_report(
+                section_9_citations=[
+                    _mismatch_citation(
+                        reask={
+                            "action": "correct_claim",
+                            "asked_model": "gemini",
+                            "corrected_claim": "PROPOSED WORDING HERE",
+                        }
+                    )
+                ]
+            )
+        )
+        entry = md.split("### Read, and does NOT support the claim")[1]
+        correction = entry.index("PROPOSED WORDING HERE")
+        for later in ("Content summary:", "Checksum:", "Alternates checked:"):
+            assert correction < entry.index(later), later
+
+    def test_reordering_keeps_every_piece_of_evidence_reachable(self):
+        """The section exists so a reader can audit a tier instead of taking it
+        on trust. Reordering and compacting are fine; dropping evidence is not."""
+        md = render_report_markdown(
+            _base_report(section_9_citations=[_mismatch_citation()])
+        )
+        assert "451bb861017fe7c4446b7dc274a2d6ce" in md
+        assert "The page discusses 1998 or 2002, not 2003." in md
+        assert "https://web.archive.test/x" in md
+        assert "Live: https://example.test/redirect/" in md
+        for alternate in ("alt-one", "alt-two"):
+            assert alternate in md, alternate
+
+    def test_alternates_render_as_a_count_with_the_urls_beneath(self):
+        """Three opaque redirect URLs run together inside a Python list repr
+        were 546 of one entry's 2,682 characters, and the count they add up to
+        was not readable without parsing them."""
+        md = render_report_markdown(
+            _base_report(section_9_citations=[_mismatch_citation()])
+        )
+        assert "Alternates checked: 2 other source(s)" in md
+        assert "['https://example.test/alt-one/" not in md
+
+    def test_alternates_under_a_supported_claim_do_not_impugn_the_primary(self):
+        """`alternates_checked` is set on checksum entries too — five of them in
+        the saved runs — and there the primary source *did* support the claim.
+        The resolver's note says "none supported it either", which is true only
+        where it is written. This renderer is shared, so it may say only what
+        holds of the alternates themselves."""
+        supported = _mismatch_citation(
+            verification="checksum",
+            relevance_verdict="supports",
+            relevance_reason="The page states it directly.",
+            note="",
+        )
+        md = render_report_markdown(_base_report(section_9_citations=[supported]))
+        assert "### Read, and supports the claim (1)" in md
+        assert "Alternates checked: 2 other source(s)" in md
+        assert "none of them supported it." in md
+        assert "either" not in md.split("Alternates checked:")[1].split("\n")[0]
+
+    def test_note_is_dropped_only_when_it_restates_the_reason_above_it(self):
+        """The resolver builds the note as verdict + reason + alternates count,
+        and all three now render as their own lines. A note that says anything
+        else is still evidence, so the test is on the string, not the tier."""
+        md = render_report_markdown(
+            _base_report(section_9_citations=[_mismatch_citation()])
+        )
+        assert "Relevance reason: The page discusses 1998 or 2002, not 2003." in md
+        assert "Note: Source URL loaded" not in md
+
+        md = render_report_markdown(
+            _base_report(
+                section_9_citations=[
+                    _mismatch_citation(note="Publisher issued a correction in 2024.")
+                ]
+            )
+        )
+        assert "Note: Publisher issued a correction in 2024." in md
 
     def test_confirmed_bucket_is_reconciled_against_what_was_retrieved(self):
         """The fact-check pass's "confirmed" verdict and this section's
