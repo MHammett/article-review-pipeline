@@ -218,6 +218,14 @@ def _model_has_credentials(model_name: str, api_keys: dict, model_cfg: dict) -> 
 #: The cost of widening at a cheap preset is that substitute call, not an
 #: empty section.
 #:
+#: Substitution does not reach every run, though: it is skipped on a replay,
+#: skipped when substitute_failed_domains is false, finds nothing when no other
+#: configured model can take the domain, and stops after one substitute that
+#: also fails. There the section really is empty, so _domains_never_attempted
+#: names it in the report — a header block and a note above the section — and
+#: the worst case of widening is a labelled empty section rather than one that
+#: reads as a clean result.
+#:
 #: Caveat, so the next reader weighs this correctly: every draft in
 #: pipeline_history/ was written by claude, so the peer panel is the control
 #: and there is no true cross-review arm. This shows the drafter is
