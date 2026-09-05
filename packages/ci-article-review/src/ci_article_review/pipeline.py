@@ -169,11 +169,62 @@ def _model_has_credentials(model_name: str, api_keys: dict, model_cfg: dict) -> 
 #: skeleton. Asking the model that wrote the draft to find those is asking it
 #: to notice its own defaults, and it under-reports them.
 #:
-#: Deliberately just this one. A model re-reading its own reasoning in
-#: argument_integrity has a similar conflict, but a far weaker one: that prompt
-#: asks whether the logic holds, not whether the prose carries the model's own
-#: fingerprints. Widening this list costs real review coverage, so it should
-#: only grow on evidence that a domain is actually compromised.
+#: Deliberately just this one, and as of 2026-09-05 measured rather than
+#: argued. The re-examination was prompted by the citation re-ask (407b82b),
+#: where every provider asked to reconsider its own refuted assertion defended
+#: it or over-corrected. That result does not transfer here: _build_user_prompt
+#: never passes ``drafted_with`` to anyone, so a reviewer is never told who
+#: wrote the draft. The re-ask measured defensiveness about a claim explicitly
+#: attributed to the model; this asks whether a model shares the blind spot
+#: that produced prose it is not told is its own. Different mechanism, so it
+#: needed its own evidence.
+#:
+#: The three dc-environment runs of 2026-06-22 predate this exclusion, so
+#: claude — which drafts every article here (pipeline.drafting_model) — ran all
+#: five domains on its own draft beside the five other models: same text, same
+#: run, same prompt. Flags emitted, as a ratio to the median of the peers that
+#: ran that domain in that run:
+#:
+#:     voice_style          0.57  0.44  0.50    below parity in all three
+#:     argument_integrity      -  1.67  0.80    at or above parity
+#:     completeness         0.89  1.75  0.83    at or above parity
+#:     red_team             3.00  3.00  3.00    well above parity
+#:
+#: voice_style is the only domain where the drafter trails, and it trails by
+#: about half. In both runs where claude ran both domains, its voice ratio sits
+#: below its argument ratio. The cheap explanations do not hold: claude spent
+#: ~7,500 completion tokens on voice_style, more than gemini, grok, perplexity
+#: or openai spent, and was never truncated, so it is not being terse; its
+#: voice flags average 629 characters against a 410-818 peer range, so it is
+#: not folding many observations into few; and voice_style and
+#: argument_integrity share one schema and one code path
+#: (_build_flags_section), so it is not a counting artifact.
+#:
+#: So the narrow scope stands on evidence now. argument_integrity is not
+#: compromised — the drafter is one of its stronger contributors — and cutting
+#: it would drop an above-parity reviewer to fix something that does not show
+#: up in the data.
+#:
+#: If widening is ever reconsidered, the coverage cost is known: simulated over
+#: every preset × drafter pair, adding argument_integrity leaves that domain
+#: unassigned in exactly one configuration — economy with a mistral drafter,
+#: since economy disables claude and grok and leaves mistral alone on it. The
+#: current list has the same shape already: an openai drafter leaves
+#: voice_style unassigned at economy and standard. Neither is a blank section
+#: any more. _warn_on_domains_left_unreviewed names the domain, and since
+#: 03382fc _domains_with_nothing_usable takes the preset's domain set as what
+#: the run should have covered, so a never-assigned domain is visible to the
+#: substitution pass and buys one call from a provider that is not the drafter.
+#: The cost of widening at a cheap preset is that substitute call, not an
+#: empty section.
+#:
+#: Caveat, so the next reader weighs this correctly: every draft in
+#: pipeline_history/ was written by claude, so the peer panel is the control
+#: and there is no true cross-review arm. This shows the drafter is
+#: domain-specifically low on voice_style against five models reading the same
+#: text; it cannot separate that from claude simply being weaker at the voice
+#: task. The decision is the same either way. n = 3 runs on one draft — the
+#: direction is unanimous, but a second article would strengthen it.
 _DRAFTER_EXCLUDED_DOMAINS: tuple[str, ...] = ("voice_style",)
 
 
