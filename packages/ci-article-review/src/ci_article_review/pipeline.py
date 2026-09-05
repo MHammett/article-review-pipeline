@@ -55,6 +55,8 @@ from .config_loader import (
     load_publication_config,
     merge_configs,
     parse_api_key_overrides,
+    preset_names,
+    retired_preset_names,
     validate_publication_name,
 )
 from .handoff_parser import (
@@ -150,6 +152,34 @@ _THOROUGHNESS_PRESETS: dict[str, dict[str, list[str]]] = {
         "red_team": ["gemini", "perplexity", "openai", "mistral", "grok", "claude"],
     },
 }
+
+
+#: How many models a domain needs before backfill stops topping it up.
+#:
+#: Two, because that is what corroboration costs: one model flagging a passage
+#: is a finding, two is agreement, and consolidation's ``consensus_min_models``
+#: (also 2) will not promote anything to Section 1 below it. Topping a domain
+#: up past this buys a third voter for a passage that already had a second —
+#: measured 2026-09-05 as +30% cost at `thorough` with one key missing, for
+#: zero change in how many domains were left uncorroborated. Restoring the
+#: preset's full width is the more faithful reading of the preset and the more
+#: expensive one; this is the cheaper reading of the same intent.
+_BACKFILL_TARGET_MODELS = 2
+
+
+def _preset_domains(thoroughness: str) -> list[str]:
+    """The built-in domains a thoroughness preset asks for, in preset order.
+
+    The expected set of domains has to come from the preset, not from what the
+    run produced. A domain whose every model was excluded is never assigned, so
+    it never reaches ``raw_results`` and has no result key that could be found
+    empty — which makes the domain that lost *everything* the one case a
+    results-derived set cannot see. ``docs/CONFIGURATION.md`` documents the
+    shape under "Drafting model": at ``standard`` thoroughness ``voice_style``
+    is a single model, and drafting with that model empties the domain.
+    """
+    preset = _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
+    return list(preset)
 
 
 def _model_has_credentials(model_name: str, api_keys: dict, model_cfg: dict) -> bool:
@@ -359,6 +389,8 @@ def _build_assignments(
     api_keys: dict,
     drafting_model: str | None = None,
     skips: list[str] | None = None,
+    backfill: bool = True,
+    backfills: list[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Return list of (model_name, domain) pairs to execute.
 
@@ -375,6 +407,12 @@ def _build_assignments(
        that model only runs those domains regardless of the preset.
     5. Drop the drafting model from the domains it cannot judge.
     6. Deduplicate (model, domain) pairs.
+    7. Backfill any domain left narrower than its own preset entry asked for,
+       from the models that are still available (``backfill=False`` to skip).
+
+    Pass a list as ``backfills`` to find out what step 7 added: one line per
+    substituted-in (model, domain) pair, naming the preset entry it is standing
+    in for.
 
     Pass a list as ``skips`` to find out what steps 2-5 dropped: every model the
     preset (or an explicit ``prompts:`` entry) asked for but that contributes
@@ -439,6 +477,57 @@ def _build_assignments(
             if pair not in seen and domain in _DOMAIN_PROMPTS:
                 seen.add(pair)
                 assignments.append(pair)
+
+    # Backfill — restore the width the preset asked for, from the models that
+    # are actually available.
+    #
+    # A disabled or uncredentialled model does not only remove itself; it can
+    # take a domain's whole second opinion with it. At `economy` (grok and
+    # claude both off) the `standard` map loses argument_integrity's second
+    # model and red_team's second model, because both are mistral-paired — and
+    # perplexity, which economy configures as a cheap grounded model, that map
+    # never assigns anything at all. Five single-model domains and three
+    # distinct models, with the cheapest available second opinion sitting idle.
+    #
+    # A domain is topped up only to _BACKFILL_TARGET_MODELS, and never past
+    # what its own preset entry asked for, so a run with every model available
+    # is untouched and a thick preset pays almost nothing for this.
+    # Rebalancing the fixed lists instead would fix one arrangement of disabled
+    # models; this fixes whichever arrangement a given run actually has.
+    if backfill:
+        for domain, model_list in preset.items():
+            target = min(len(model_list), _BACKFILL_TARGET_MODELS)
+            short = target - len([m for m, d in assignments if d == domain])
+            for _ in range(short):
+                # Recomputed per pick: the previous pick changes both who is
+                # already on this domain and how loaded each candidate is.
+                tried = {m for m, d in assignments if d == domain}
+                load: dict[str, int] = {}
+                for assigned_model, _assigned_domain in assignments:
+                    load[assigned_model] = load.get(assigned_model, 0) + 1
+                pool = _substitute_candidates(
+                    domain, tried, model_configs, api_keys, drafting_model
+                )
+                if not pool:
+                    break
+                # Fewest domains already carried first, so the width bought here
+                # is distinct-model coverage rather than a third and fourth
+                # domain piled onto whichever model happens to sort first. The
+                # sort is stable, so ties keep _substitute_candidates' ordering
+                # — which puts a search-grounded model first for fact_check.
+                pool.sort(key=lambda m: load.get(m, 0))
+                chosen = pool[0]
+                # Named before the pick is recorded, so the line says which of
+                # the preset's own models is being stood in for.
+                absent = [m for m in model_list if (m, domain) not in seen]
+                seen.add((chosen, domain))
+                assignments.append((chosen, domain))
+                if backfills is not None:
+                    backfills.append(
+                        f"{chosen} → {domain} — the preset names "
+                        f"{', '.join(model_list)} here; "
+                        f"{', '.join(absent)} could not run"
+                    )
 
     _warn_on_domains_left_unreviewed(assignments, drafting_model)
 
@@ -1472,6 +1561,10 @@ def _substitute_for_empty_domains(
     One substitute per domain. If that one also fails the domain stays empty
     and the report says so: the alternative is a run that keeps buying calls
     while a provider is having an outage.
+
+    ``expected_domains`` covers the domain that was never assigned a model in
+    the first place, which produces no result to be found empty — see
+    ``_domains_with_nothing_usable``.
     """
     if not pipeline_cfg.get("substitute_failed_domains", True):
         return raw_results
@@ -1968,8 +2061,22 @@ def run_draft_pipeline(
             ", ".join(_DRAFTER_EXCLUDED_DOMAINS),
         )
     assignment_skips: list[str] = []
+    assignment_backfills: list[str] = []
     assignments = _build_assignments(
-        thoroughness, model_configs, api_keys, drafting_model, assignment_skips
+        thoroughness,
+        model_configs,
+        api_keys,
+        drafting_model,
+        assignment_skips,
+        # Off under a calibration filter, on the same reasoning that scopes
+        # the substitution pass below: `--only-model gemini` exists to price one
+        # cell, and topping gemini up to a second and third domain first is the
+        # opposite of what was asked for.
+        backfill=(
+            pipeline_cfg.get("backfill_narrowed_domains", True)
+            and not (only_model or only_domain)
+        ),
+        backfills=assignment_backfills,
     )
 
     # Custom publication-defined domains
@@ -2015,9 +2122,7 @@ def run_draft_pipeline(
     if only_model or only_domain:
         expected_domains = {d for _m, d in assignments + custom_assignments}
     else:
-        expected_domains = set(
-            _THOROUGHNESS_PRESETS.get(thoroughness, _THOROUGHNESS_PRESETS["standard"])
-        )
+        expected_domains = set(_preset_domains(thoroughness))
 
     if (only_model or only_domain) and not (assignments or custom_assignments):
         log.error(
@@ -2040,6 +2145,8 @@ def run_draft_pipeline(
         log.info(f"  Assigned: {model_name} → {domain}")
     for skip_line in assignment_skips:
         log.info(f"  Skipped: {skip_line}")
+    for backfill_line in assignment_backfills:
+        log.info(f"  Backfilled: {backfill_line}")
 
     # Loaded here rather than after the ensemble, which is where it used to sit.
     # It is only a file read, and having it beforehand is what lets the review
@@ -2345,7 +2452,23 @@ def run_draft_pipeline(
             report_baseline_warning = None
 
     # Tag ensemble config with thoroughness for the report
-    ensemble_cfg_tagged = {**ensemble_cfg, "thoroughness": thoroughness}
+    ensemble_cfg_tagged = {
+        **ensemble_cfg,
+        "thoroughness": thoroughness,
+        # The preset the operator actually chose, so the report names the thing
+        # they set rather than only the thoroughness it implies. The two are
+        # not interchangeable: `economy` and `standard` are both thoroughness
+        # `standard`, and they run very different ensembles.
+        "cost_preset": pipeline_cfg.get("cost_preset"),
+        # Preset order first, then anything else that ran (custom domains).
+        # Scoped by the calibration filter above, so `--only-domain fact_check`
+        # reports a one-domain run rather than four domains nobody reviewed.
+        "preset_domains": [
+            d for d in _preset_domains(thoroughness) if d in expected_domains
+        ]
+        + sorted(expected_domains - set(_preset_domains(thoroughness))),
+        "backfilled_assignments": assignment_backfills,
+    }
 
     # What still never ran, after recovery and substitution have both tried.
     # Passed to the report because nothing else in it records the difference
@@ -3602,7 +3725,13 @@ def build_parser():
     )
     parser.add_argument(
         "--cost-preset",
-        choices=["economy", "standard", "balanced", "thorough", "maximum"],
+        # From presets.yaml, not a list repeated here — see preset_names().
+        # Retired names are still accepted, so a saved script or alias does not
+        # break on a naming decision; they resolve (and warn) in
+        # _apply_cost_preset. metavar keeps them out of --help, which should
+        # advertise the tiers that exist rather than the ones that used to.
+        choices=preset_names() + retired_preset_names(),
+        metavar="{" + ",".join(preset_names()) + "}",
         help="Override cost_preset from user.yaml for this run only (useful for calibration sweeps)",
     )
     parser.add_argument(

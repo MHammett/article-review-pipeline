@@ -99,21 +99,31 @@ economy:
     claude:
       enabled: false
 
-standard:
-  thoroughness: standard
+# CANDIDATE B, under evaluation 2026-09-05. Same cheap models as `draft` plus
+# the two `draft` leaves off. Distinct model count, not per-domain width, is what
+# lets a passage reach three voters -- consensus counts models across domains --
+# so a four-model ensemble can corroborate at two and almost never at three.
+wide:
+  thoroughness: thorough
   models:
     openai:
-      model: gpt-5.6-terra   # was gpt-5.4; matching price tier, 2026-08-18 refresh
+      model: gpt-5.6-luna
     gemini:
       model: gemini-2.5-flash
     mistral:
-      model: mistral-large-latest
+      model: mistral-small-latest
     perplexity:
-      model: sonar-pro
+      model: sonar
     grok:
       model: grok-4.3
     claude:
       model: claude-haiku-4-5-20251001
+
+# `standard` was retired 2026-09-05. `wide` above dominated it on every axis
+# measured -- more corroborated consensus, more claims, more findings that
+# survive a rerun, at 55% of the cost -- and a tier that costs more for less is
+# not a rung on a cost/benefit ladder. An existing `cost_preset: standard` still
+# runs (as `wide`) and warns; see _RETIRED_PRESETS in config_loader.py.
 
 balanced:
   thoroughness: thorough

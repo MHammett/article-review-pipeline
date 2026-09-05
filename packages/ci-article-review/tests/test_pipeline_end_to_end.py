@@ -631,9 +631,11 @@ class TestADomainWithNoReviewerReachesTheReport:
 
     `standard` assigns one model to voice_style, so declaring that model as the
     drafter excludes it and leaves the domain with no reviewer — measured
-    2026-09-05 as the only preset/drafter pair that does this. Both repairs run
-    here against the real pipeline, because every other test of them supplies
-    the assignments by hand and so cannot catch the wiring going missing.
+    2026-09-05 as the only preset/drafter pair that does this. Two repairs cover
+    it, backfill at assignment time and substitution after the calls, and the
+    report names the domain when neither could. All three run here against the
+    real pipeline, because every other test of them supplies the assignments by
+    hand and so cannot catch the wiring going missing.
     """
 
     def _config(self, **pipeline_overrides):
@@ -655,9 +657,17 @@ class TestADomainWithNoReviewerReachesTheReport:
             assert not voice[0].startswith("openai:"), "the drafter reviewed itself"
             assert report["domains_not_run"] == []
 
-    def test_with_substitution_off_the_report_says_it_was_not_reviewed(self, tmp_path):
-        """The fallback signal, for the run substitution cannot repair."""
-        cfg = self._config(substitute_failed_domains=False)
+    def test_with_both_repairs_off_the_report_says_it_was_not_reviewed(self, tmp_path):
+        """The fallback signal, for the run neither repair can fix.
+
+        Both are off here, not just substitution. Backfill runs earlier — at
+        assignment time — so leaving it on repairs the domain before
+        substitution is ever consulted, and the unreviewed case this asserts on
+        never arises.
+        """
+        cfg = self._config(
+            substitute_failed_domains=False, backfill_narrowed_domains=False
+        )
         with _stubbed_run(tmp_path, extra_patches=self._patch(cfg)) as report:
             assert not [
                 a

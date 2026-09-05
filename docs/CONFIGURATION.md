@@ -442,7 +442,7 @@ pipeline:
   recovery_delay_seconds: 30    # pause before each recovery pass — deliberately coarser than retry_delay_seconds
   abort_if_all_provider_calls_fail: false
   task_timeout_seconds: 1100    # absolute ceiling for the sliding-scale timeout model; formula clamps to this − 15
-  cost_preset: balanced         # economy | standard | balanced | thorough | maximum
+  cost_preset: balanced         # economy | wide | balanced | thorough | maximum
 
   link_validation: true         # check HTTP status of every URL in the draft
   wayback_link_check: true      # also query the Wayback Machine for each URL
@@ -547,6 +547,112 @@ is in that ensemble at all — falling back to an ungrounded model only because 
 ungrounded fact-check pass is still worth more than an empty section. The
 original failure is kept in the results either way, so the report still says
 which model failed.
+
+**A domain that was never assigned a model is repaired too.** The set of domains
+checked for emptiness comes from the thoroughness preset, not from the results.
+Results only exist for domains that were *attempted*, so a domain whose every
+candidate was excluded — no credentials, `enabled: false`, a `prompts:` override,
+or drafting with the one model assigned to it — produces no result to be found
+empty, and used to be the one case this pass could not see. That is the total
+loss, not a partial one.
+
+---
+
+### Ensemble width, and backfilling a narrowed domain
+
+```yaml
+pipeline:
+  backfill_narrowed_domains: true   # default; false keeps the preset's literal lists
+```
+
+A cost preset buys fewer models, and that is the point of it. Two things make
+the trade worse than it needs to be, and both are addressed here.
+
+**The report now states the width.** Every report carries an *Ensemble Width*
+section in its header giving, for the preset actually used: how many domains ran
+on a single model, how many distinct models ran at all, a per-domain table of
+which models ran where, and what that does to Section 1. Previously the only
+record was the API call table, which reads as width only if you already know
+`_THOROUGHNESS_PRESETS` by heart and subtract the models the preset disabled.
+
+Consensus is the part whose meaning changes. Section 1 needs
+`consensus_min_models` (default 2) *distinct* sources on a passage, so:
+
+- Where every domain runs one model, no passage can reach the minimum from
+  inside a single domain — it takes two different domains flagging the same
+  passage. The section says so rather than leaving a thin Section 1 to read as a
+  clean draft.
+- Where the whole voter pool is below the minimum, Section 1 **cannot flag
+  anything at all**, and the report says that in those words. LanguageTool
+  counts toward the pool, since it is an independent source.
+
+`consensus_min_models` is deliberately *not* lowered automatically at thin
+presets. Lowering it would trade the one guarantee Section 1 makes — that
+something more than a single model agreed — for a fuller-looking section, and
+the backfill below recovers the width more honestly. Set it yourself if you want
+the weaker bar; the report prints the value in force.
+
+**Backfill.** A domain left narrower than its own preset entry asked for is
+topped back up from the models still available. Measured 2026-09-05 at
+`economy`, which disables grok and claude: the `standard` map pairs mistral with
+claude in `argument_integrity` and with grok in `red_team`, so disabling those
+two costs *two* domains their second model — and perplexity, which `economy`
+configures as a cheap grounded model, that map never assigns at all. The result
+was five domains on three distinct models, with the cheapest available second
+opinion sitting idle. With backfill it is seven calls across four distinct
+models, and three single-model domains.
+
+The rules are deliberately tight:
+
+- A domain is topped up **only to two models**, and never past what its own
+  preset entry asked for. Two is what corroboration costs — one model flagging
+  a passage is a finding, two is agreement, and `consensus_min_models` will not
+  promote anything to Section 1 below it. Going further buys a third voter for
+  a passage that already had a second: measured at +30% cost on `thorough` with
+  one key missing, for no change in how many domains were left uncorroborated.
+- A run with every configured model available is **untouched** — nothing is
+  short, so nothing is added.
+- Candidates are ordered by which model is carrying the fewest domains already,
+  so the width bought is distinct-model coverage rather than a third and fourth
+  domain piled onto whichever model sorts first.
+- Credential checks, `enabled: false`, `prompts:` overrides and the
+  drafting-model exclusion all apply exactly as in a normal assignment, and
+  `fact_check` still prefers a search-grounded model.
+
+Every backfilled assignment is logged (`Backfilled: ...`) and listed in the
+report's *Ensemble Width* section, naming the preset entry it stands in for.
+Set `backfill_narrowed_domains: false` to keep the preset's literal lists.
+
+**What it costs, per tier.** Measured 2026-09-05 against the real presets and
+`pricing.yaml`, for a ~1,400-word draft. With every provider credentialled only
+`economy` changes at all — the tier that was losing the most, and the only one
+whose preset disables models:
+
+| Preset | Calls | Distinct models | Single-model domains | Review-call cost |
+| --- | --- | --- | --- | --- |
+| `economy` | 5 → 7 | 3 → 4 | 5 → 3 | $0.019 → $0.034 (+81%) |
+| `standard` | 7 → 7 | 5 → 5 | 3 → 3 | unchanged |
+| `balanced` / `thorough` / `maximum` | unchanged | unchanged | unchanged | unchanged |
+
+`economy`'s +81% is the largest relative increase and the smallest absolute one:
+about 1.5 cents. A live run measured $0.0645 all-in, inside the $0.04–$0.10 band
+this file's preset table already documents for that tier.
+
+When a key is missing rather than a preset disabling a model, the two-model cap
+is what keeps the thick tiers cheap: `thorough` without a claude key is 9 → 10
+calls (+9%), where topping up to full preset width would have been 12 (+30%) for
+the same number of uncorroborated domains.
+
+Turn it off with `backfill_narrowed_domains: false` if the preset's literal call
+count is the budget you are holding to. It is also off automatically under
+`--only-model` / `--only-domain`, which exist to price one cell.
+
+**Why not rebalance the preset lists instead?** Splitting the mistral pairing
+would fix `economy` specifically and nothing else. Backfill fixes whichever
+models a given run is actually missing, including combinations nobody
+anticipated — a key that expired, a provider having an outage, a `prompts:`
+override — so the fixed lists stay a statement of intent rather than a table
+that has to encode every degraded configuration.
 
 ---
 
@@ -745,28 +851,44 @@ LanguageTool adds a partial vote (`lt_weight`) when it independently flagged the
 
 | Model | Default | fact_check | voice_style | completeness | argument_integrity | red_team |
 |---|---|---|---|---|---|---|
-| gemini | 1.0 | **1.5** | 1.0 | 1.0 | 1.0 | 1.0 |
-| perplexity | 1.0 | **1.5** | 1.0 | 1.0 | 1.0 | 1.0 |
+| gemini | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
+| perplexity | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
 | openai | 1.0 | 1.0 | **1.2** | **1.2** | 1.0 | 1.0 |
 | mistral | 1.0 | 1.0 | 1.0 | 1.0 | **1.2** | **1.1** |
 | grok | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | **1.2** |
 | claude | 1.0 | 1.0 | **1.1** | **1.1** | **1.3** | 1.0 |
 
-Gemini and Perplexity receive a 1.5× bonus for fact_check because their responses are grounded in live web sources. Claude receives a 1.3× bonus for argument_integrity based on observed reasoning depth.
+Claude receives a 1.3× bonus for argument_integrity based on observed reasoning depth.
 
-**Consensus threshold logic (default 2.0):**
+Gemini and Perplexity used to carry a flat **1.5×** for fact_check here. That was a guess about which models ground, standing in for whether they actually did — and on 2026-09-03 it was wrong in both directions at once: gemini took the bonus while reporting `grounding_available: False`, and openai ran a real search on the flat 1.0. The bonus is now applied by reading the result rather than the model name:
 
-- Two general models (1.0 + 1.0 = 2.0) → consensus
-- One grounded model alone (1.5 < 2.0) → not consensus; needs corroboration
-- One grounded + one general (1.5 + 1.0 = 2.5) → consensus
-- Two grounded models (1.5 + 1.5 = 3.0) → strong consensus
+```yaml
+ensemble:
+  grounding_bonus: 1.5       # multiplier when a fact_check call actually consulted live sources
+```
+
+**Measured 2026-09-05 — what these weights actually change.** Re-scoring 12 captured ensembles with the default table against a flat 1.0 for every model produced **identical Section 1 membership in all 12**, while changing the *order* in 10 of them. The same held for `grounding_bonus` at 1.5 versus 1.0: no membership change.
+
+The reason is that `consensus_threshold: 2.0` sits below the point where weights discriminate. Two models at 1.0 already reach exactly 2.0, so any passage with two distinct voters clears the bar whatever the weights say, and a bonus can only move something already over the line further over it. Sweeping the threshold, output was identical at 1.0, 1.5 and 2.0, and only began to cut at 2.5.
+
+So today the weights table is a **ranking** control, not a gate, and what actually decides Section 1 membership is `consensus_min_models`. If you want the weights to affect what surfaces rather than the order it surfaces in, raise `consensus_threshold` to 2.5 or above so a bare two-model agreement no longer clears it on its own.
+
+**What reaches Section 1 (defaults: threshold 2.0, min_models 2):**
+
+- One model, however heavily weighted → **not** consensus. `consensus_min_models` blocks it whatever the sum reaches, which is the point: a single model emitting two red_team sub-findings on one passage once totalled 2.2 and published itself as consensus.
+- Two distinct models at 1.0 each → 2.0, meets the threshold → consensus.
+- Anything weighted above 1.0 → also consensus, but it was already over the line at 1.0.
+
+That third case is why the weights do not currently gate anything. LanguageTool counts as one of the distinct sources when it independently flagged the same passage.
 
 **Configuring weights:**
 
 ```yaml
 ensemble:
-  consensus_threshold: 2.0   # lower = more aggressive consensus detection
+  consensus_min_models: 2    # distinct sources required — the actual gate
+  consensus_threshold: 2.0   # weighted sum required alongside that count
   lt_weight: 0.5             # LanguageTool partial vote
+  grounding_bonus: 1.5       # applied when a fact_check call really searched
 
   weights:
     # Override only what you want to change.
@@ -841,9 +963,9 @@ pipeline:
     mistral:
       reasoning_effort: medium  # balanced uses "low"
 
-# Use standard but add Perplexity reasoning (normally standard uses sonar-pro):
+# Use wide but add Perplexity reasoning (normally wide uses sonar):
 pipeline:
-  cost_preset: standard
+  cost_preset: wide
   preset_overrides:
     perplexity:
       model: sonar-reasoning-pro

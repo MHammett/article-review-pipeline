@@ -44,7 +44,7 @@ class TestPresetsAreValid:
         from ci_article_review.config_loader import _load_presets_from_yaml
 
         presets = _load_presets_from_yaml()
-        expected = {"economy", "standard", "balanced", "thorough", "maximum"}
+        expected = {"economy", "wide", "balanced", "thorough", "maximum"}
         assert expected <= set(presets), (
             f"presets.yaml is missing: {sorted(expected - set(presets))}. "
             "These are the choices offered by --cost-preset."
@@ -78,10 +78,10 @@ class TestPresetsAreValid:
 
 
 class TestPresetsStructure:
-    _EXPECTED = {"economy", "standard", "balanced", "thorough", "maximum"}
+    _EXPECTED = {"economy", "wide", "balanced", "thorough", "maximum"}
     _VALID_THOROUGHNESS = {"standard", "thorough", "maximum"}
 
-    def test_all_five_presets_present(self):
+    def test_all_live_presets_present(self):
         data = _load("presets.yaml")
         assert self._EXPECTED.issubset(set(data.keys()))
 
@@ -211,10 +211,14 @@ class TestCostPresetSetsThoroughness:
         "preset,expected",
         [
             ("economy", "standard"),
-            ("standard", "standard"),
+            ("wide", "thorough"),
             ("balanced", "thorough"),
             ("thorough", "thorough"),
             ("maximum", "maximum"),
+            # Retired, and therefore carrying its replacement's thoroughness
+            # rather than its own former `standard`. This pair is the whole
+            # behaviour change the retirement warning exists to announce.
+            ("standard", "thorough"),
         ],
     )
     def test_each_preset_brings_its_own_thoroughness(self, preset, expected):
@@ -248,3 +252,86 @@ class TestCostPresetSetsThoroughness:
             f"maximum scheduled {len(assignments)} calls, not 30 — the preset's "
             f"thoroughness is not reaching the assignment builder"
         )
+
+
+class TestRetiredPresets:
+    """A retired preset name keeps working, loudly.
+
+    `standard` was retired 2026-09-05: `wide` beat it on every axis measured
+    over three isolated runs each, at 55% of the cost. Deleting the name outright
+    would turn a `cost_preset: standard` that had been working for months into a
+    crash at config-load, so it maps to its replacement instead -- and warns,
+    because six models over twelve calls is not what `standard` used to do.
+    """
+
+    def test_the_retired_name_is_gone_from_the_live_tiers(self):
+        from ci_article_review.config_loader import preset_names
+
+        assert "standard" not in preset_names()
+        assert "wide" in preset_names()
+
+    def test_it_resolves_to_its_replacement(self):
+        from ci_article_review.config_loader import resolve_preset_name
+
+        name, note = resolve_preset_name("standard")
+        assert name == "wide"
+        assert note and "retired" in note
+
+    def test_a_live_preset_resolves_to_itself_without_a_note(self):
+        from ci_article_review.config_loader import resolve_preset_name
+
+        assert resolve_preset_name("wide") == ("wide", None)
+
+    def test_an_existing_config_still_runs_and_warns(self, caplog):
+        import logging
+
+        from ci_article_review.config_loader import _apply_cost_preset
+
+        models = {m: {"model": "x"} for m in ("openai", "gemini", "mistral")}
+        with caplog.at_level(logging.WARNING):
+            pipe, resolved = _apply_cost_preset(
+                {"cost_preset": "standard"}, models, user_set={}
+            )
+
+        assert "retired" in caplog.text
+        assert "wide" in caplog.text
+        # The models really are wide's, not a no-op pass-through.
+        assert resolved["openai"]["model"] == "gpt-5.6-luna"
+        assert pipe["thoroughness"] == "thorough"
+
+    def test_the_report_names_the_preset_that_actually_ran(self):
+        """Otherwise Ensemble Width would print a tier whose models are absent."""
+        from ci_article_review.config_loader import _apply_cost_preset
+
+        pipe, _models = _apply_cost_preset(
+            {"cost_preset": "standard"}, {"openai": {"model": "x"}}, user_set={}
+        )
+        assert pipe["cost_preset"] == "wide"
+
+    def test_a_genuinely_unknown_preset_still_raises(self):
+        import pytest
+
+        from ci_article_review.config_loader import _apply_cost_preset
+
+        with pytest.raises(ValueError, match="Unknown cost_preset"):
+            _apply_cost_preset({"cost_preset": "nonsense"}, {}, user_set={})
+
+    def test_the_cli_still_accepts_the_retired_name(self):
+        """A saved script or shell alias must not break on a naming decision."""
+        from ci_article_review.pipeline import build_parser
+
+        args = build_parser().parse_args(
+            ["--draft", "d.md", "--publication", "p", "--cost-preset", "standard"]
+        )
+        assert args.cost_preset == "standard"
+
+    def test_the_cli_help_advertises_only_live_tiers(self):
+        from ci_article_review.pipeline import build_parser
+
+        for action in build_parser()._actions:
+            if action.dest == "cost_preset":
+                assert "standard" not in (action.metavar or "")
+                assert "wide" in (action.metavar or "")
+                break
+        else:
+            raise AssertionError("no --cost-preset argument found")
