@@ -239,6 +239,32 @@ def _render_model_failures(report):
     return lines
 
 
+def _render_domains_not_run(report):
+    """Header block naming domains no model reviewed, or [].
+
+    Sits beside the failed-passes block rather than inside it because the two
+    say different things about how to read the report. A failed pass narrows
+    the pool a section was built from. This removes the section's basis
+    entirely, and it is the one a reader is least equipped to notice on their
+    own — there is no error, no warning count, and no missing model name
+    anywhere in the report to prompt the question.
+    """
+    details = report.get("domains_not_run") or []
+    if not details:
+        return []
+
+    lines = [f"## ⚠ Domains not reviewed ({len(details)})", ""]
+    for detail in details:
+        section = detail.get("section") or detail.get("domain")
+        lines.append(
+            f"- **{detail.get('domain')}** — {detail.get('reason')}. "
+            f"{section} is empty because nothing ran, not because the draft "
+            f"is clean."
+        )
+    lines.append("")
+    return lines
+
+
 def _missing_models_note(report, domain):
     """One line naming the models that failed on ``domain``, or []."""
     missing = [
@@ -256,9 +282,40 @@ def _missing_models_note(report, domain):
     ]
 
 
+def _not_run_note(report, domain):
+    """One line saying ``domain`` had no reviewer at all, or [].
+
+    The empty section is the whole problem. "_No flags._" under a heading reads
+    as a clean result, and for a domain nothing ran it is the opposite — an
+    absence of evidence presented in the same words the report uses for
+    evidence of absence. Measured 2026-09-05: rendering the never-ran case and
+    the clean case produced byte-identical markdown.
+    """
+    for detail in report.get("domains_not_run") or []:
+        if detail.get("domain") != domain:
+            continue
+        return [
+            f"> **Not reviewed this run** — {detail.get('reason')}. This "
+            f"section is empty because nothing ran, not because the draft is "
+            f"clean.",
+            "",
+        ]
+    return []
+
+
+def _domain_notes(report, domain):
+    """Every caveat that belongs above ``domain``'s section.
+
+    One call site per section so a new caveat reaches all of them at once, and
+    so the two cases cannot both be claimed: a domain with a failed pass has a
+    result entry, which is exactly what keeps it out of ``domains_not_run``.
+    """
+    return _missing_models_note(report, domain) + _not_run_note(report, domain)
+
+
 def _render_section_2(fact_check, report=None):
     lines = ["## SECTION 2: Factual Verification", ""]
-    lines.extend(_missing_models_note(report or {}, "fact_check"))
+    lines.extend(_domain_notes(report or {}, "fact_check"))
     if not fact_check:
         lines.append("_No fact-check results._")
         return lines
@@ -1325,6 +1382,7 @@ def render_report_markdown(report):
     lines.append("")
 
     lines.extend(_render_model_failures(report))
+    lines.extend(_render_domains_not_run(report))
 
     if report.get("truncated_results"):
         lines.append(
@@ -1374,14 +1432,14 @@ def render_report_markdown(report):
         _render_flags_section(
             "SECTION 3: Voice and AI-Speak",
             report.get("section_3_voice", []),
-            note=_missing_models_note(report, "voice_style"),
+            note=_domain_notes(report, "voice_style"),
         )
     )
     lines.extend(
         _render_flags_section(
             "SECTION 4: Argument Integrity",
             report.get("section_4_argument", []),
-            note=_missing_models_note(report, "argument_integrity"),
+            note=_domain_notes(report, "argument_integrity"),
         )
     )
     lines.extend(
@@ -1389,13 +1447,13 @@ def render_report_markdown(report):
             "SECTION 5: Completeness and Framing",
             report.get("section_5_completeness", []),
             passage_key="passage_reference",
-            note=_missing_models_note(report, "completeness"),
+            note=_domain_notes(report, "completeness"),
         )
     )
     lines.extend(
         _render_section_6(
             report.get("section_6_red_team", {}),
-            note=_missing_models_note(report, "red_team"),
+            note=_domain_notes(report, "red_team"),
         )
     )
     lines.extend(_render_section_7(report.get("section_7_low_confidence", [])))

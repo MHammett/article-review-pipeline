@@ -487,7 +487,13 @@ Accepted names are the model keys: `claude`, `openai`, `gemini`, `mistral`, `gro
 
 Only `voice_style` is affected. A model re-reading its own reasoning in `argument_integrity` has a similar conflict but a much weaker one — that prompt asks whether the logic holds, not whether the prose carries the model's fingerprints — and widening the exclusion costs real review coverage.
 
-Watch for one edge case: at `standard` thoroughness `voice_style` is a single model, so declaring that model as the drafter leaves the domain with no reviewer. The pipeline logs a warning when that happens, because an empty voice section then means "never ran", which looks identical in the report to "found nothing". At `thorough` or `maximum` there are always other models covering it.
+Watch for one edge case: at `standard` thoroughness `voice_style` is a single model, so declaring that model as the drafter leaves the domain with no reviewer. Drafting with `openai` at `standard` is the only preset/drafter combination that does this — at `thorough` or `maximum` there are always other models covering it.
+
+Three things happen when it does, because an empty voice section otherwise reads exactly like a clean one:
+
+1. **A warning at assignment time**, before any call is made, naming the domain and the drafter — the only signal that arrives while the run can still be stopped.
+2. **A substitute provider runs the domain**, via the same pass that covers a domain whose models all failed (see *Substituting a provider for an empty domain* below). This is the normal outcome: any other configured, credentialed model can take `voice_style`.
+3. **The report says the domain was not reviewed** — a *Domains not reviewed* block in the header and a note above the section itself — for when substitution cannot help: `substitute_failed_domains: false`, a replay (which makes no calls), or no other model available to take the domain.
 
 ---
 

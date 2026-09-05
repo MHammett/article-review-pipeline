@@ -949,6 +949,7 @@ def build_report(
     prior_report=None,
     primary_claim="",
     prior_report_path=None,
+    domains_not_run=None,
 ):
     """Merge ensemble results into a structured report.
 
@@ -959,6 +960,12 @@ def build_report(
         Each result dict has at minimum: failed, data, model, tokens, elapsed_seconds.
     ensemble_cfg:
         The ``ensemble`` section from user.yaml (may be empty dict for defaults).
+    domains_not_run:
+        ``{domain: reason}`` for domains the run should have covered but made no
+        call for. Supplied by the pipeline, which is what knows the presets and
+        the drafter exclusion; it cannot be recovered here, because every other
+        record in this report is derived from ``results`` and a domain that was
+        never attempted has no entry there to derive from.
     """
     now = datetime.now(timezone.utc).isoformat()
 
@@ -1017,6 +1024,19 @@ def build_report(
         }
         for (model, domain), r in results.items()
         if r.get("failed") and not r.get("skipped")
+    ]
+
+    # Domains that made no call at all. Kept separate from the failures above
+    # because the reader's question is different: a failed pass means the
+    # section is short a model, while this means the section has no model
+    # behind it and its emptiness carries no information about the draft.
+    domains_not_run_details = [
+        {
+            "domain": domain,
+            "section": _DOMAIN_SECTIONS.get(domain),
+            "reason": reason,
+        }
+        for domain, reason in sorted((domains_not_run or {}).items())
     ]
 
     # Calls that succeeded but had to be salvaged from a truncated response —
@@ -1103,6 +1123,7 @@ def build_report(
         "contradictions": contradictions,
         "model_failures": model_failures,
         "model_failure_details": model_failure_details,
+        "domains_not_run": domains_not_run_details,
         "truncated_results": truncated_results,
         "empty_results": empty_results,
         "empty_result_details": empty_result_details,
