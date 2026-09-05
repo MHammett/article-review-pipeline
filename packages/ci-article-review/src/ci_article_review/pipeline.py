@@ -293,10 +293,15 @@ def _warn_on_domains_left_unreviewed(assignments, drafting_model: str | None) ->
 
     At ``maximum`` thoroughness every model runs every domain, so this cannot
     happen. At ``standard`` it can: voice_style is one model, and if that model
-    drafted the article the domain empties. Silently shipping a report whose
-    voice section is empty because nobody ran it — indistinguishable, in the
-    output, from nobody finding anything — is the failure worth being loud
-    about.
+    drafted the article the domain empties.
+
+    The earliest of three signals, and the only one that fires before any money
+    is spent — it runs at assignment time, so a misconfiguration is visible
+    while the run can still be stopped. ``_substitute_for_empty_domains`` then
+    repairs the domain if another provider can take it, and
+    ``_domains_never_attempted`` puts it in the report if nothing did. A log
+    line alone was not enough: the report is what gets read, and there an empty
+    voice section is otherwise indistinguishable from nobody finding anything.
     """
     if drafting_model is None:
         return
@@ -1506,6 +1511,43 @@ def _substitute_for_empty_domains(
     return raw_results
 
 
+def _domains_never_attempted(results, expected_domains, drafting_model=None):
+    """Expected domains that made no model call at all, mapped to why.
+
+    Distinct from a domain whose models *failed*. A failure leaves a result
+    entry, so it reaches ``model_failure_details`` and the report says which
+    section was built short a model. A domain that was never attempted leaves
+    no entry anywhere — not in the results, not in the failure list, and not in
+    ``ensemble.assignments``, which consolidation derives from the results —
+    so its section renders exactly like one where every model ran and found
+    nothing.
+
+    Called after recovery and substitution have both had their chance, so what
+    it returns is what genuinely never ran: substitution repairs this case
+    whenever a candidate provider exists, and the domains left here are the
+    ones it could not reach — ``substitute_failed_domains: false``, a replay
+    (which makes no calls), or no other configured model able to take the
+    domain.
+    """
+    attempted = {domain for _model, domain in results}
+    not_run: dict[str, str] = {}
+    for domain in sorted(expected_domains or ()):
+        if domain in attempted:
+            continue
+        if drafting_model and domain in _DRAFTER_EXCLUDED_DOMAINS:
+            not_run[domain] = (
+                f"{drafting_model} drafted this article and is excluded from "
+                f"{domain}, and no other model was assigned"
+            )
+        else:
+            not_run[domain] = (
+                "every model the preset assigned to it was unavailable — "
+                "disabled, missing credentials, or narrowed out by a "
+                "prompts: override"
+            )
+    return not_run
+
+
 def _merge_recovered_results(prior_results, retried_results):
     """Combine a ``--retry-failed`` capture with the calls just re-attempted.
 
@@ -2297,6 +2339,14 @@ def run_draft_pipeline(
     # Tag ensemble config with thoroughness for the report
     ensemble_cfg_tagged = {**ensemble_cfg, "thoroughness": thoroughness}
 
+    # What still never ran, after recovery and substitution have both tried.
+    # Passed to the report because nothing else in it records the difference
+    # between "no model reviewed this" and "every model reviewed it and the
+    # draft was clean" — both render as an empty section.
+    domains_not_run = _domains_never_attempted(
+        results, expected_domains, drafting_model
+    )
+
     log.info("Consolidating review report")
     report = consolidation.build_report(
         article_title=article_title,
@@ -2310,6 +2360,7 @@ def run_draft_pipeline(
         prior_report=prior_report,
         prior_report_path=prior_report_path,
         primary_claim=handoff.get("primary_claim", ""),
+        domains_not_run=domains_not_run,
     )
 
     # Pass 3: Citation resolution — extract factual claims from fact-check results

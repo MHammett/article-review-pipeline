@@ -137,6 +137,7 @@
     "uncosted_calls": 0
   },
   "delta": null,
+  "domains_not_run": [],
   "empty_result_details": [],
   "empty_results": [],
   "ensemble": {
