@@ -442,7 +442,7 @@ pipeline:
   recovery_delay_seconds: 30    # pause before each recovery pass — deliberately coarser than retry_delay_seconds
   abort_if_all_provider_calls_fail: false
   task_timeout_seconds: 1100    # absolute ceiling for the sliding-scale timeout model; formula clamps to this − 15
-  cost_preset: balanced         # economy | standard | balanced | thorough | maximum
+  cost_preset: balanced         # economy | wide | balanced | thorough | maximum
 
   link_validation: true         # check HTTP status of every URL in the draft
   wayback_link_check: true      # also query the Wayback Machine for each URL
@@ -947,9 +947,9 @@ pipeline:
     mistral:
       reasoning_effort: medium  # balanced uses "low"
 
-# Use standard but add Perplexity reasoning (normally standard uses sonar-pro):
+# Use wide but add Perplexity reasoning (normally wide uses sonar):
 pipeline:
-  cost_preset: standard
+  cost_preset: wide
   preset_overrides:
     perplexity:
       model: sonar-reasoning-pro

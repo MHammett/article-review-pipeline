@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
@@ -16,6 +17,8 @@ from ci_core.env_provenance import (
     snapshot as _snapshot_dotenv,
 )
 from ci_core.redact import mask_secret
+
+log = logging.getLogger("config_loader")
 
 # Resolved once so the snapshot below and the actual load agree on exactly
 # which file (if any) is in play -- see ci_core.env_provenance for why this
@@ -341,6 +344,47 @@ def _load_presets_from_yaml(config_dir=None):
         ) from exc
 
 
+#: Cost presets that no longer exist, and what now runs in their place.
+#:
+#: `standard` was retired 2026-09-05 because `wide` dominated it on every axis
+#: measured over three isolated runs each: 33% more strongly-corroborated
+#: consensus flags, 74% more fact-check claims, findings that survive a rerun
+#: 67% of the time against 50%, and all of it at 55% of the cost. Keeping a tier
+#: that costs more for less is worse than the churn of retiring it.
+#:
+#: Mapped rather than deleted. A hard removal turns an existing
+#: `cost_preset: standard` into a crash at config-load, and a config that has
+#: been working for months is the worst place to discover a naming decision.
+#: The substitution is not silent: it is a real behaviour change (six models
+#: instead of five, twelve calls instead of seven, roughly half the cost), so it
+#: warns every run until the config is updated.
+_RETIRED_PRESETS = {"standard": "wide"}
+
+
+def resolve_preset_name(preset_name):
+    """Map a retired preset name to its replacement.
+
+    Returns ``(name, note)`` — ``note`` is None for a live preset, or the
+    deprecation message to warn with when the name has been retired.
+    """
+    replacement = _RETIRED_PRESETS.get(preset_name)
+    if not replacement:
+        return preset_name, None
+    return replacement, (
+        f"cost_preset {preset_name!r} has been retired and is running as "
+        f"{replacement!r}. That is a real change, not a rename: {replacement!r} "
+        f"runs six models over twelve calls where {preset_name!r} ran five over "
+        f"seven, and costs roughly half as much. Measured 2026-09-05 — see "
+        f"configs/presets.yaml. Update cost_preset to {replacement!r} to silence "
+        f"this."
+    )
+
+
+def retired_preset_names():
+    """Preset names that still parse but no longer name a tier of their own."""
+    return list(_RETIRED_PRESETS)
+
+
 def preset_names(config_dir=None):
     """Every cost preset defined in the packaged presets.yaml, in file order.
 
@@ -364,6 +408,10 @@ def _apply_cost_preset(pipeline_cfg, models_raw, user_set=None):
     if not preset_name:
         return pipeline_cfg, models_raw
 
+    preset_name, retired_note = resolve_preset_name(preset_name)
+    if retired_note:
+        log.warning(retired_note)
+
     presets = _load_presets_from_yaml()
     preset = presets.get(preset_name)
     if not preset:
@@ -371,6 +419,9 @@ def _apply_cost_preset(pipeline_cfg, models_raw, user_set=None):
         raise ValueError(f"Unknown cost_preset {preset_name!r}. Valid values: {valid}")
 
     new_pipeline = dict(pipeline_cfg)
+    # The name that actually ran, so the report's Ensemble Width block names the
+    # preset whose models are in the call log rather than the retired alias.
+    new_pipeline["cost_preset"] = preset_name
     # Set thoroughness from the preset unless the user asked for one by name.
     #
     # "Did the user set it" cannot be answered from ``pipeline_cfg``, because by

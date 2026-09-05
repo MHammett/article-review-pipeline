@@ -289,7 +289,7 @@ Exactly one of `--draft`, `--raw-draft`, `--url`, or `--publish` is required —
 | `--publication NAME` | Publication config to use (`configs/NAME.yaml`) — **required** |
 | `--publish-live` | Publish live instead of as a WordPress draft |
 | `--config-dir DIR` | Config directory (default `configs`) |
-| `--cost-preset PRESET` | Override `cost_preset` for this run: `economy` / `standard` / `balanced` / `thorough` / `maximum`. Doesn't modify `user.yaml`. |
+| `--cost-preset PRESET` | Override `cost_preset` for this run: `economy` / `wide` / `balanced` / `thorough` / `maximum`. Doesn't modify `user.yaml`. (`standard` was retired 2026-09-05; it still runs, as `wide`, with a warning.) |
 | `--api-key PROVIDER[.FIELD]=VALUE` | Override one credential field for this run only — highest tier of the credential precedence (CLI > publication config > `.env`/`user.yaml` > OS environment variable). Repeatable. `PROVIDER=VALUE` is shorthand for `api_key` (`openai`, `gemini`, `mistral`, `grok`, `perplexity`, `claude`); multi-field credentials need `PROVIDER.FIELD` (`languagetool.username`, `archive_org.secret_key`, etc.). See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#api-key-precedence). |
 | `--wp-user USERNAME` | Override the WordPress username for this run only (`--publish` mode) — same precedence idea as `--api-key`, applied to `publication.wordpress`. |
 | `--wp-password APPLICATION_PASSWORD` | Override the WordPress application password for this run only (`--publish` mode). |

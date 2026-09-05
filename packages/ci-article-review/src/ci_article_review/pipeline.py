@@ -56,6 +56,7 @@ from .config_loader import (
     merge_configs,
     parse_api_key_overrides,
     preset_names,
+    retired_preset_names,
     validate_publication_name,
 )
 from .handoff_parser import (
@@ -3725,7 +3726,12 @@ def build_parser():
     parser.add_argument(
         "--cost-preset",
         # From presets.yaml, not a list repeated here — see preset_names().
-        choices=preset_names(),
+        # Retired names are still accepted, so a saved script or alias does not
+        # break on a naming decision; they resolve (and warn) in
+        # _apply_cost_preset. metavar keeps them out of --help, which should
+        # advertise the tiers that exist rather than the ones that used to.
+        choices=preset_names() + retired_preset_names(),
+        metavar="{" + ",".join(preset_names()) + "}",
         help="Override cost_preset from user.yaml for this run only (useful for calibration sweeps)",
     )
     parser.add_argument(

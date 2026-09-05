@@ -201,7 +201,7 @@ class TestArgumentParsing:
         assert [p for p, _ in seen] == ["maximum"]
 
     def test_a_single_provider_can_be_chosen(self, monkeypatch):
-        seen, _ = self._run(["claude", "--preset", "standard"], monkeypatch)
+        seen, _ = self._run(["claude", "--preset", "wide"], monkeypatch)
         assert seen[0][1] == ("claude",)
 
     def test_an_unknown_provider_is_rejected(self, monkeypatch):
@@ -215,7 +215,7 @@ class TestArgumentParsing:
 
     def test_a_failing_probe_exits_nonzero(self, monkeypatch):
         monkeypatch.setattr(probe, "probe_preset", lambda *a: False)
-        monkeypatch.setattr("sys.argv", ["ci-probe", "--preset", "standard"])
+        monkeypatch.setattr("sys.argv", ["ci-probe", "--preset", "wide"])
         with pytest.raises(SystemExit) as exc:
             probe.main()
         assert exc.value.code == 1
