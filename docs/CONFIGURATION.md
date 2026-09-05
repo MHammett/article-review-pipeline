@@ -851,28 +851,44 @@ LanguageTool adds a partial vote (`lt_weight`) when it independently flagged the
 
 | Model | Default | fact_check | voice_style | completeness | argument_integrity | red_team |
 |---|---|---|---|---|---|---|
-| gemini | 1.0 | **1.5** | 1.0 | 1.0 | 1.0 | 1.0 |
-| perplexity | 1.0 | **1.5** | 1.0 | 1.0 | 1.0 | 1.0 |
+| gemini | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
+| perplexity | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
 | openai | 1.0 | 1.0 | **1.2** | **1.2** | 1.0 | 1.0 |
 | mistral | 1.0 | 1.0 | 1.0 | 1.0 | **1.2** | **1.1** |
 | grok | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 | **1.2** |
 | claude | 1.0 | 1.0 | **1.1** | **1.1** | **1.3** | 1.0 |
 
-Gemini and Perplexity receive a 1.5× bonus for fact_check because their responses are grounded in live web sources. Claude receives a 1.3× bonus for argument_integrity based on observed reasoning depth.
+Claude receives a 1.3× bonus for argument_integrity based on observed reasoning depth.
 
-**Consensus threshold logic (default 2.0):**
+Gemini and Perplexity used to carry a flat **1.5×** for fact_check here. That was a guess about which models ground, standing in for whether they actually did — and on 2026-09-03 it was wrong in both directions at once: gemini took the bonus while reporting `grounding_available: False`, and openai ran a real search on the flat 1.0. The bonus is now applied by reading the result rather than the model name:
 
-- Two general models (1.0 + 1.0 = 2.0) → consensus
-- One grounded model alone (1.5 < 2.0) → not consensus; needs corroboration
-- One grounded + one general (1.5 + 1.0 = 2.5) → consensus
-- Two grounded models (1.5 + 1.5 = 3.0) → strong consensus
+```yaml
+ensemble:
+  grounding_bonus: 1.5       # multiplier when a fact_check call actually consulted live sources
+```
+
+**Measured 2026-09-05 — what these weights actually change.** Re-scoring 12 captured ensembles with the default table against a flat 1.0 for every model produced **identical Section 1 membership in all 12**, while changing the *order* in 10 of them. The same held for `grounding_bonus` at 1.5 versus 1.0: no membership change.
+
+The reason is that `consensus_threshold: 2.0` sits below the point where weights discriminate. Two models at 1.0 already reach exactly 2.0, so any passage with two distinct voters clears the bar whatever the weights say, and a bonus can only move something already over the line further over it. Sweeping the threshold, output was identical at 1.0, 1.5 and 2.0, and only began to cut at 2.5.
+
+So today the weights table is a **ranking** control, not a gate, and what actually decides Section 1 membership is `consensus_min_models`. If you want the weights to affect what surfaces rather than the order it surfaces in, raise `consensus_threshold` to 2.5 or above so a bare two-model agreement no longer clears it on its own.
+
+**What reaches Section 1 (defaults: threshold 2.0, min_models 2):**
+
+- One model, however heavily weighted → **not** consensus. `consensus_min_models` blocks it whatever the sum reaches, which is the point: a single model emitting two red_team sub-findings on one passage once totalled 2.2 and published itself as consensus.
+- Two distinct models at 1.0 each → 2.0, meets the threshold → consensus.
+- Anything weighted above 1.0 → also consensus, but it was already over the line at 1.0.
+
+That third case is why the weights do not currently gate anything. LanguageTool counts as one of the distinct sources when it independently flagged the same passage.
 
 **Configuring weights:**
 
 ```yaml
 ensemble:
-  consensus_threshold: 2.0   # lower = more aggressive consensus detection
+  consensus_min_models: 2    # distinct sources required — the actual gate
+  consensus_threshold: 2.0   # weighted sum required alongside that count
   lt_weight: 0.5             # LanguageTool partial vote
+  grounding_bonus: 1.5       # applied when a fact_check call really searched
 
   weights:
     # Override only what you want to change.
