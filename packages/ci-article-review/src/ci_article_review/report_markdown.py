@@ -341,14 +341,35 @@ def _render_section_8(additional):
     if not additional:
         lines.append("_None._")
         return lines
+    lines.append(
+        "_Most-corroborated first, then by the flagging model's stated "
+        "confidence. Confidence is self-reported and not comparable between "
+        "providers, so it only breaks ties between observations no other model "
+        "raised._"
+    )
+    lines.append("")
     for obs in additional:
         passage = obs.get("passage", "")
         category = obs.get("category", "?")
-        source = obs.get("source_model", "?")
+        models = obs.get("models") or [obs.get("source_model", "?")]
         domain = obs.get("source_domain", "?")
-        lines.append(f'- [{category}] "{passage}" — flagged by {source}:{domain}')
+        if len(models) > 1:
+            who = f"{', '.join(models)} — {len(models)} models agree"
+        else:
+            who = f"{models[0]}:{domain}"
+        lines.append(f'- [{category}] "{passage}" — flagged by {who}')
         for kv in _kv_lines(
-            obs, exclude=("passage", "category", "source_model", "source_domain")
+            obs,
+            exclude=(
+                "passage",
+                "category",
+                "source_model",
+                "source_domain",
+                # Rendered in the bullet above; repeating them reads as data the
+                # model supplied rather than as bookkeeping this pass added.
+                "models",
+                "model_count",
+            ),
         ):
             lines.append(kv)
     lines.append("")
@@ -476,6 +497,58 @@ _DISPOSITIONS = DISPOSITIONS
 
 
 _disposition = disposition
+
+
+#: How each re-ask answer reads to someone deciding what to do about the claim.
+_REASK_LEAD = {
+    "correct_claim": "says the source is right and the claim was wrong",
+    "different_source": "stands by the claim and proposes a different source",
+    "withdraw": "withdraws the claim",
+    "stand": "maintains the claim and disputes the refutation",
+}
+
+
+def _render_reask(reask):
+    """What the asserting model said when handed its own refutation.
+
+    Rendered as the model's answer, never as a resolution. The verdict above it
+    is unchanged and stays unchanged: this is the author being told what the
+    model would do about it, and a ``stand`` is reported as plainly as a
+    ``withdraw`` so that "the model disagrees" is visible rather than absorbed.
+    """
+    if not reask:
+        return []
+    action = reask.get("action", "")
+    who = reask.get("asked_model", "the asserting model")
+    lead = _REASK_LEAD.get(action, "responded")
+    lines = [f"  - **Asked {who} again** — {lead}."]
+    if reask.get("reason"):
+        lines.append(f"    - Its reason: {reask['reason']}")
+    if action == "correct_claim" and reask.get("corrected_claim"):
+        lines.append(f'    - Proposed wording: "{reask["corrected_claim"]}"')
+    if action == "different_source" and reask.get("source_url"):
+        lines.append(f"    - Proposed source: {reask['source_url']}")
+
+    check = reask.get("source_check")
+    if check:
+        # The proposal was put through the same resolution the original URL
+        # failed. Reporting the proposal without this would hand the author a
+        # URL on the strength of the model having named it, which is the tier
+        # confusion the whole section exists to prevent.
+        verification = check.get("verification")
+        if verification == "checksum":
+            outcome = "fetched, read, and it does support the claim"
+        elif verification == "content_mismatch":
+            verdict = check.get("relevance_verdict") or "does not support"
+            outcome = f"fetched and read, and it does NOT support the claim ({verdict})"
+        elif verification == "unverifiable":
+            outcome = "fetched, but its content could not be read or assessed"
+        else:
+            outcome = "could not be resolved"
+        lines.append(f"    - That proposed source was checked: {outcome}.")
+    elif action == "different_source":
+        lines.append("    - That proposed source was NOT checked. Treat it as a lead.")
+    return lines
 
 
 def _render_section_9(citations):
@@ -667,8 +740,9 @@ def _render_section_9(citations):
         for c in mismatch:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved")):
+            for kv in _kv_lines(c, exclude=("claim", "resolved", "reask")):
                 lines.append(kv)
+            lines.extend(_render_reask(c.get("reask")))
         lines.append("")
 
     if unverifiable:

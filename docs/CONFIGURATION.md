@@ -508,6 +508,49 @@ Providers cache on an exact *leading* prefix. The per-domain instruction normall
 
 ---
 
+### Citation re-ask
+
+```yaml
+pipeline:
+  citation_reask: true          # default; false disables the pass entirely
+  citation_reask_limit: 12      # default; refutations re-asked per run
+```
+
+When a citation is fetched, read, and found not to support the claim it was
+cited for, the claim is handed back to the model that asserted it. The model is
+shown its own claim, the URL, the verdict, and the sentence the relevance check
+relied on, and answers with one of four actions: correct the claim, propose a
+different source, withdraw it, or stand by it. The answer is rendered under the
+refutation in Section 9.
+
+**Why it is worth a call.** In the run this was built against, 2 of 49
+refutations came back `contradicts`, and both were repairable rather than wrong:
+a claim of "17 billion gallons" against a page reading "66 billion liters" —
+which is ≈17.4 billion gallons — and a compound claim whose page supported one
+half. In both the correct figure was already on the page the pipeline had
+fetched, and the report said only that the citation failed.
+
+**What it cannot do.** The model being asked is the one whose assertion just
+failed, and the question invites it to defend itself. So a re-ask never changes
+`verification`: a refuted citation stays refuted, and the answer is advisory
+text beside it. A proposed alternative URL is not reported as a source either —
+it goes back through the same fetch, checksum, relevance check and
+grounded-quote requirement as any other citation, and what the report shows is
+what that check found. A model answering with a plausible-looking URL gets it
+checked, not printed.
+
+`stand` is a first-class answer for the same reason: a model with no way to
+disagree picks the nearest available action instead, and a fabricated
+`different_source` costs a fetch to disprove.
+
+**Cost.** One call per refutation, bounded by `citation_reask_limit`; live web
+search is disabled for these calls. Refutations past the limit are logged rather
+than dropped silently. The pass does not run with `--offline`. A claim traced to
+the draft's own citation block was asserted by the author rather than by a
+model, so there is nobody to hand it back to and it is skipped.
+
+---
+
 ### Cost presets
 
 The `cost_preset` setting is the easiest way to control quality vs cost. It sets model variants, reasoning flags, and thoroughness level as a bundle. You set one value instead of configuring six providers separately.
