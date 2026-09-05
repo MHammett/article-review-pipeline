@@ -271,6 +271,39 @@ It is a suggestion report only. Nothing is written to `pipeline_history/` or to 
 
 ---
 
+## Authorship provenance
+
+Since August 2026, Anthropic embeds a statistical watermark in Claude's text output. It is applied at the model level, so it is present worldwide rather than only in the EU, and it covers the API and Claude Code, not just claude.ai. Google ships SynthID-Text across the Gemini consumer products.
+
+That mark lives in word choice, not in characters, and **nothing in this repo can detect it**. Detection means re-running a keyed pseudorandom function over the token stream; without the provider's secret key, marked and unmarked text are statistically indistinguishable — that is the scheme's design guarantee, not a gap in the tooling. A heuristic pretending otherwise would be unfalsifiable, wrong in ways nobody here could measure.
+
+So the report states provenance rather than pretending to detect. You already declare the drafting model with `Drafted with:` in the handoff, where the pipeline uses it to keep a model from reviewing its own prose. That same declaration now reaches `report.json` and the `review.md` header:
+
+```
+## Authorship Provenance
+
+- Drafted with: **claude**
+- This provider embeds a statistical watermark in generated text, since 2026-08-02.
+- Scope: API, Claude Code, and consumer surfaces; applied at model level, worldwide
+- Basis: declared in the handoff, not measured from the text. Nothing in this
+  pipeline can detect a statistical watermark — that needs the provider's key.
+```
+
+The block is silent when the declared provider does not mark text, and silent when nothing was declared. A line that says nothing trains people to skip the section.
+
+Which providers mark text is a dated table in `packages/ci-core/src/ci_core/configs/watermarking.yaml`, following the same pattern as `model_registry.yaml`: bump `registry_date` when you re-check it against provider documentation, and the report starts warning once the table goes stale. It *will* go stale — every signatory to the EU Code of Practice is still shipping changes.
+
+Two rules in that table are deliberate:
+
+- **An unlisted or unverified provider records as `unknown`, never as `no`.** Reporting an unverified provider as clean is the one error worth engineering against, so absence of evidence is recorded as absence of evidence.
+- **`partial` counts as marked.** A provider that marks on some surfaces but not confirmably on its API — Gemini, at the time of writing — is a reason to assume the mark is present, not a reason to assume it is absent.
+
+Recording this in `report.json` matters more than printing it. By the time anyone asks whether a piece published months ago carries a mark, the chat thread that produced it is long gone.
+
+If you need actual detection rather than bookkeeping, Anthropic runs a third-party detection API — in private preview at the time of writing, with media and fact-checkers among the eligible categories.
+
+---
+
 ## Command-line options
 
 ```powershell
@@ -456,7 +489,9 @@ content-intelligence/
 │   │   │   │   │                      {prompt, completion, cached}
 │   │   │   │   ├── cost.py            token-based cost estimation, incl. cache hits
 │   │   │   │   ├── timeout_model.py   sliding-scale timeout from size × model × effort
-│   │   │   │   └── model_registry.py  current/superseded model detection
+│   │   │   │   ├── model_registry.py  current/superseded model detection
+│   │   │   │   └── watermarking.py    which providers mark generated text;
+│   │   │   │                          provenance bookkeeping, not detection
 │   │   │   ├── extract.py        HTML/PDF -> readable text, claim-centred excerpts
 │   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
 │   │   │   ├── concurrency.py    run_with_timeout — the wall-clock backstop both
@@ -468,7 +503,8 @@ content-intelligence/
 │   │   │   ├── console.py        force_utf8_stdio — every CLI calls it first, so a
 │   │   │   │                     cp1252 Windows console cannot kill a report mid-print
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
-│   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml
+│   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml,
+│   │   │   │                     watermarking.yaml
 │   │   │   ├── config.py         pydantic settings (no production consumer yet)
 │   │   │   ├── db.py             async SQLAlchemy engine/session (no production consumer yet)
 │   │   │   ├── models.py         ORM models (no production consumer yet)

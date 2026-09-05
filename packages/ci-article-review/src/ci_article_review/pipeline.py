@@ -190,6 +190,22 @@ def _history_key(handoff: dict) -> str:
     return (handoff.get("history_key") or "").strip() or handoff.get("title", "")
 
 
+def _declared_drafter(handoff: dict, pipeline_cfg: dict) -> str:
+    """The drafting model as declared, verbatim, or "" if undeclared.
+
+    Split out from :func:`_drafting_model` because the two callers need
+    different things from the same declaration. Excluding a self-review needs a
+    provider this pipeline can match against, so an unrecognised name has to
+    become None there. Reporting provenance needs the string the author
+    actually wrote, including one that matches no provider -- "drafted with
+    gpt-4o" is still worth printing, and silently reporting it as "undeclared"
+    would be a lie about what the handoff said.
+    """
+    return (handoff.get("drafted_with") or "").strip() or (
+        pipeline_cfg.get("drafting_model") or ""
+    ).strip()
+
+
 def _drafting_model(handoff: dict, pipeline_cfg: dict) -> str | None:
     """Return the model that drafted the article, or None if undeclared.
 
@@ -203,9 +219,7 @@ def _drafting_model(handoff: dict, pipeline_cfg: dict) -> str | None:
     cost of a typo here is a review pass that should have been dropped, and
     failing the whole run over it would be worse.
     """
-    declared = (handoff.get("drafted_with") or "").strip() or (
-        pipeline_cfg.get("drafting_model") or ""
-    ).strip()
+    declared = _declared_drafter(handoff, pipeline_cfg)
     if not declared:
         return None
 
@@ -1897,6 +1911,7 @@ def run_draft_pipeline(
         prior_report=prior_report,
         prior_report_path=prior_report_path,
         primary_claim=handoff.get("primary_claim", ""),
+        drafted_with=_declared_drafter(handoff, pipeline_cfg),
     )
 
     # Pass 3: Citation resolution — extract factual claims from fact-check results
