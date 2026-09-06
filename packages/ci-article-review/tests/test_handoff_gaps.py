@@ -484,3 +484,131 @@ class TestTheProposedSourceListSaysWhatItLeftOut:
         )
         assert "and 53 more in the draft's citation block" in gap["suggestion"]
         assert "73 markers" in gap["impact"]
+
+
+class TestTheAuthorGap:
+    """A missing author is only a gap when the draft actually speaks as one.
+
+    The field exists because citation verification cannot check a first-person
+    claim without a name. Measured 2026-09-04 against a page that does name the
+    author: told nothing, the verifier bound "I" to the first person on the
+    page; told only not to guess, it returned `not_addressed` against that same
+    page. Both are silent failures that land in Section 9 looking like the
+    draft's fault.
+    """
+
+    FIRST_PERSON_DRAFT = (
+        "# T\n"
+        "\n"
+        "I co-founded the exchange in 2015, and my notes from the hearing show "
+        "three separate outages that quarter.\n"
+    )
+    IMPERSONAL_DRAFT = (
+        "# T\n"
+        "\n"
+        "The figures do not transfer between regions, and three planning "
+        "documents now assume otherwise without checking.\n"
+    )
+
+    def _fields(self, handoff, **kw):
+        return [g["field"] for g in assess(handoff, domains_ran=_ALL_DOMAINS, **kw)]
+
+    def test_it_fires_when_no_author_is_resolvable_anywhere(self):
+        gap = _by_field(
+            assess(
+                {"title": "T"},
+                draft=self.FIRST_PERSON_DRAFT,
+                domains_ran=_ALL_DOMAINS,
+            ),
+            "author",
+        )
+        assert gap["severity"] == "degrading"
+        assert gap["sections"] == ["SECTION 9: Citations"]
+        # Citation resolution is a pass, not a review domain — naming a domain
+        # here would put a "Built without" note on a section it never touched.
+        assert gap["domains"] == []
+
+    def test_the_publication_config_default_closes_it(self):
+        """A single-author publication sets author_name once and is covered."""
+        assert "author" not in self._fields(
+            {"title": "T"},
+            pub_config={"author_name": "Mike Hammett"},
+            draft=self.FIRST_PERSON_DRAFT,
+        )
+
+    def test_the_handoff_line_closes_it(self):
+        assert "author" not in self._fields(
+            {"title": "T", "author": "Guest Writer"}, draft=self.FIRST_PERSON_DRAFT
+        )
+
+    def test_an_impersonal_draft_is_not_nagged(self):
+        """Nothing to anchor means nothing was lost — do not report a cost."""
+        assert "author" not in self._fields({"title": "T"}, draft=self.IMPERSONAL_DRAFT)
+
+    def test_resolved_first_person_claims_are_counted_when_available(self):
+        gap = _by_field(
+            assess(
+                {"title": "T"},
+                draft=self.FIRST_PERSON_DRAFT,
+                domains_ran=_ALL_DOMAINS,
+                citations=[
+                    {"claim": "I co-founded the exchange."},
+                    {"claim": "My notes show three outages."},
+                    {"claim": "The grid served 41 percent from nuclear."},
+                ],
+            ),
+            "author",
+        )
+        assert "2 claims put through citation resolution" in gap["impact"]
+
+    def test_it_falls_back_to_draft_sentences_when_nothing_resolved(self):
+        """Offline runs resolve no citations; the draft still shows the need."""
+        gap = _by_field(
+            assess(
+                {"title": "T"},
+                draft=self.FIRST_PERSON_DRAFT,
+                domains_ran=_ALL_DOMAINS,
+                citations=[],
+            ),
+            "author",
+        )
+        assert "sentence" in gap["impact"]
+        assert "citation resolution" not in gap["impact"].split("speak")[0]
+
+    def test_the_guidance_points_at_the_config_not_the_handoff(self):
+        """The config default is the fix that covers --raw-draft and --url too."""
+        gap = _by_field(
+            assess(
+                {"title": "T"},
+                draft=self.FIRST_PERSON_DRAFT,
+                domains_ran=_ALL_DOMAINS,
+            ),
+            "author",
+        )
+        assert "author_name" in gap["guidance"]
+        assert "--raw-draft" in gap["guidance"]
+
+
+class TestFirstPersonDetection:
+    """Half case-sensitive on purpose — see the constant's own note."""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("I asked the county board.", True),
+            ("My notes show three.", True),
+            ("Send the filing to me.", True),
+            ("That is mine.", True),
+            ("We asked the county board.", False),
+            ("Our coverage area is Northern Illinois.", False),
+            ("The grid is complex.", False),
+            ("That is, i.e., an example.", False),
+        ],
+    )
+    def test_pronoun_matching(self, text, expected):
+        assert bool(handoff_gaps._FIRST_PERSON_RE.search(text)) is expected
+
+    def test_editorial_we_does_not_count_as_a_personal_claim(self):
+        """ "We" is corporate or editorial far more often than it is one person."""
+        draft = "We asked the county board. Our reporting found three outages."
+        assert handoff_gaps._first_person_sentences(draft) == []

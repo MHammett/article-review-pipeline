@@ -1078,6 +1078,7 @@ Open `configs/your_publication_name.yaml`. Key fields:
 |---|---|
 | `publication_description` | One paragraph: what you cover, who reads it, what makes a piece unpublishable |
 | `audience.primary` | Who reads it, what they know, what makes them stop reading |
+| `author_name` | Optional — who "I" refers to in your drafts, by name. Citation verification needs it to check first-person claims against a source page. The handoff's `Author:` line overrides it per article; this is the only source for `--raw-draft` and `--url`. |
 | `style_profile` | Your characteristic style — see PLAYBOOK.md for how to develop this (the legacy key `voice_profile` is still accepted) |
 | `style_rules.banned_words` | Words you never want in your published writing |
 | `style_rules.banned_phrases` | Phrases you never want |

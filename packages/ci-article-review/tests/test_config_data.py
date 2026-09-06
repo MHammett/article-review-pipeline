@@ -353,3 +353,95 @@ class TestRetiredPresets:
                 break
         else:
             raise AssertionError("no --cost-preset argument found")
+
+
+class TestAuthorNameIsADeclaredPublicationKey:
+    """`author_name` was read by the pipeline before anything declared it.
+
+    ``pipeline`` falls back to ``pub_config["author_name"]`` to tell citation
+    verification who "I" is. That key appeared in no example config, no
+    scaffolding, and no documentation — it worked only for the one config that
+    happened to set it by hand. A second user had no way to discover it.
+    """
+
+    def _example(self):
+        from pathlib import Path
+
+        import yaml
+
+        for parent in Path(__file__).resolve().parents:
+            candidate = (
+                parent
+                / "packages"
+                / "ci-article-review"
+                / "src"
+                / "ci_article_review"
+                / "configs"
+                / "publication.example.yaml"
+            )
+            if candidate.is_file():
+                return yaml.safe_load(candidate.read_text(encoding="utf-8"))
+        raise AssertionError("publication.example.yaml not found")
+
+    def test_the_example_config_declares_it(self):
+        """setup.py copies this file verbatim, so this is the scaffolding too."""
+        assert "author_name" in self._example()
+
+    def test_it_is_documented_in_the_configuration_reference(self):
+        from pathlib import Path
+
+        for parent in Path(__file__).resolve().parents:
+            doc = parent / "docs" / "CONFIGURATION.md"
+            if doc.is_file():
+                assert "author_name" in doc.read_text(encoding="utf-8")
+                return
+        raise AssertionError("docs/CONFIGURATION.md not found")
+
+    def test_the_pipeline_reads_the_key_the_example_declares(self):
+        """Guards the two drifting apart — the whole failure being fixed."""
+        from pathlib import Path
+
+        for parent in Path(__file__).resolve().parents:
+            src = (
+                parent
+                / "packages"
+                / "ci-article-review"
+                / "src"
+                / "ci_article_review"
+                / "pipeline.py"
+            )
+            if src.is_file():
+                assert 'pub_config.get("author_name")' in src.read_text(
+                    encoding="utf-8"
+                )
+                return
+        raise AssertionError("pipeline.py not found")
+
+
+class TestNearMissConfigKeysAreFlagged:
+    """A key that is *almost* right is the one that costs something silently.
+
+    An unknown key is fine — configs carry notes and future keys. But
+    ``authorname`` reads as absent, the pipeline falls back to no author, and
+    citation verification loses first-person checking with no error, no warning
+    and no missing-field message anywhere.
+    """
+
+    def _warn(self, config, caplog):
+        from ci_article_review.config_loader import _warn_on_near_miss_keys
+
+        with caplog.at_level("WARNING"):
+            _warn_on_near_miss_keys(config, "testpub")
+        return [r.getMessage() for r in caplog.records]
+
+    def test_a_typo_of_a_known_key_warns_and_names_both(self, caplog):
+        (message,) = self._warn({"authorname": "Someone"}, caplog)
+        assert "authorname" in message
+        assert "author_name" in message
+
+    def test_a_correct_key_is_silent(self, caplog):
+        assert self._warn({"author_name": "Someone"}, caplog) == []
+
+    def test_an_unrelated_custom_key_is_not_flagged(self, caplog):
+        """Never a whitelist — an unknown key the pipeline ignores is allowed."""
+        assert self._warn({"my_own_notes": "x", "author_bio": "y"}, caplog) == []

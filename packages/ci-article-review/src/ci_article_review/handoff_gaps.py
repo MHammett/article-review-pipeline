@@ -96,6 +96,22 @@ _DISCLOSURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Not case-insensitive, deliberately: "I" is matched only as a capital,
+#: because a case-blind "i" matches the i in "i.e." and would count an
+#: abbreviation as a personal claim. The others are matched in both cases
+#: since they legitimately open a sentence.
+#:
+#: First-person *singular* only. "we" and "our" are routinely editorial or
+#: corporate ("we asked the county", "our coverage area") and attributing those
+#: to one named person would be wrong more often than right; "I" is the pronoun
+#: that actually needs a name behind it before a claim about the writer can be
+#: checked against a page.
+_FIRST_PERSON_RE = re.compile(r"\b(?:I|[Mm]e|[Mm]y|[Mm]ine|[Mm]yself)\b")
+
+#: Section 9 is produced by a pass, not by a review domain, so it has no entry
+#: in ``_DOMAIN_SECTIONS`` to derive a title from.
+_CITATION_SECTION = "SECTION 9: Citations"
+
 #: A disclosure is a short note. Above this, a paragraph is doing real work and
 #: is never dropped for matching a phrase above.
 _DISCLOSURE_MAX_WORDS = 60
@@ -263,18 +279,24 @@ def _gap(
     impact,
     *,
     domains=(),
+    sections=None,
     suggestion=None,
     basis=None,
     guidance=None,
     placeholder=False,
 ):
+    # ``sections`` is normally derived from ``domains`` — one review domain
+    # builds one section. Citation resolution breaks that: it is a pass, not a
+    # domain, so a field that only degrades Section 9 has a section to name and
+    # no domain to derive it from. Passing it explicitly keeps the per-section
+    # note (which keys off ``domains``) correctly silent there.
     return {
         "field": field,
         "label": label,
         "severity": severity,
         "impact": impact,
         "domains": list(domains),
-        "sections": _sections_for(domains),
+        "sections": _sections_for(domains) if sections is None else list(sections),
         "suggestion": suggestion,
         "suggestion_basis": basis,
         "guidance": guidance,
@@ -711,6 +733,90 @@ def _drafted_with_gap(handoff, pipeline_cfg, domains_ran):
     )
 
 
+def _first_person_claims(citations):
+    """Resolved citations whose claim speaks in the first person singular."""
+    return [
+        c
+        for c in (citations or [])
+        if _FIRST_PERSON_RE.search(str(c.get("claim") or ""))
+    ]
+
+
+def _first_person_sentences(draft):
+    """Draft sentences in the first person singular — the offline fallback."""
+    return [
+        part
+        for part in re.split(r"(?<=[.!?])\s+", draft or "")
+        if _FIRST_PERSON_RE.search(part)
+    ]
+
+
+def _author_gap(handoff, pub_config, draft, citations):
+    """Report a missing author only when the draft actually speaks as one.
+
+    Two gates, both about not crying wolf. The publication config's
+    ``author_name`` is a real answer — a single-author publication sets it once
+    and every run is covered, including ``--raw-draft`` and ``--url``, which
+    carry no handoff metadata — so a handoff without an ``Author:`` line is
+    fully specified when that default exists. And a draft with no first-person
+    singular in it has nothing for an author name to anchor, so naming the
+    field would be reporting a cost the run does not pay.
+
+    What it costs when it *is* missing was measured on 2026-09-04 against
+    fd-ix.com/about/team/, a page that does in fact name the author: told
+    nothing, the verifier bound "I" to the first person it found on the page
+    and offered a stranger's family as evidence; told only not to guess, it
+    returned ``not_addressed`` against the page carrying the author's own bio.
+    Both failures are silent — one produces a wrong citation, the other an
+    unverifiable verdict, and neither says the cause was a missing name.
+    """
+    if not _is_missing(handoff.get("author")):
+        return None
+    if str((pub_config or {}).get("author_name") or "").strip():
+        return None
+
+    resolved = _first_person_claims(citations)
+    if resolved:
+        measured = (
+            f"{len(resolved)} claim{'' if len(resolved) == 1 else 's'} put through "
+            f"citation resolution speak{'s' if len(resolved) == 1 else ''} in the "
+            f"first person"
+        )
+    else:
+        sentences = _first_person_sentences(draft)
+        if not sentences:
+            return None
+        measured = (
+            f"{len(sentences)} sentence{'' if len(sentences) == 1 else 's'} in the "
+            f"draft speak{'s' if len(sentences) == 1 else ''} in the first person"
+        )
+
+    return _gap(
+        "author",
+        "Author:",
+        "degrading",
+        impact=(
+            f"No `Author:` line in the handoff and no `author_name` in the "
+            f"publication config, so citation verification was never told who "
+            f'"I" is — and {measured}. A first-person claim cannot be checked '
+            f"against a page without a name to look for: the verifier either "
+            f'binds "I" to whoever the page happens to name, which cites a '
+            f"stranger as evidence about you, or refuses to guess and returns "
+            f"`not_addressed` against a page that does name you. Both land in "
+            f"{_CITATION_SECTION} looking like a sourcing problem in the draft "
+            f"rather than a missing field in the handoff."
+        ),
+        sections=[_CITATION_SECTION],
+        guidance=(
+            "Set `author_name:` in the publication config if you are its usual "
+            "byline — one line, and every run is covered, including --raw-draft "
+            "and --url. Use the handoff's `Author:` line only for a guest or "
+            "co-authored piece, where it overrides that default."
+        ),
+        placeholder=_is_placeholder(handoff.get("author")),
+    )
+
+
 def assess(
     handoff,
     *,
@@ -719,6 +825,7 @@ def assess(
     domains_ran=(),
     pipeline_cfg=None,
     has_prior_run=False,
+    citations=(),
 ):
     """Return the handoff gaps for one run, worst first.
 
@@ -729,10 +836,17 @@ def assess(
     ``domains_ran`` is the set of review domains this run actually executed, so
     a run narrowed with ``--only-domain`` does not claim a field degraded a
     pass that never happened.
+
+    ``citations`` is the run's resolved Section 9 entries. Only the author gap
+    reads them, and only to count how many resolved claims actually speak in
+    the first person — the number that says what a missing name cost. Offline
+    runs resolve nothing, so it falls back to counting the draft's own
+    first-person sentences.
     """
     draft = draft or handoff.get("draft") or ""
     gaps = [
         _title_gap(handoff, draft, domains_ran),
+        _author_gap(handoff, pub_config, draft, citations),
         _primary_claim_gap(handoff, draft, domains_ran, has_prior_run),
         _target_audience_gap(handoff, pub_config, domains_ran),
         _pre_draft_analysis_gap(handoff, domains_ran),

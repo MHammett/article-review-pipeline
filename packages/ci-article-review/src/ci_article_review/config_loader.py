@@ -1,3 +1,4 @@
+import difflib
 import logging
 import re
 from pathlib import Path
@@ -213,6 +214,7 @@ def load_publication_config(publication_name, config_dir="configs"):
         raise ValueError(f"{path} is empty or not a valid YAML mapping.")
     config = _resolve_env_recursive(config, env=_EFFECTIVE_ENV)
     _validate_publication_config(config, publication_name)
+    _warn_on_near_miss_keys(config, publication_name)
     return config
 
 
@@ -248,6 +250,64 @@ def _validate_publication_config(config, publication_name):
             + "\n".join(f"  {m}" for m in missing)
             + "\nSee configs/publication.example.yaml for the expected structure."
         )
+
+
+#: Top-level publication keys the pipeline actually reads. Used only for
+#: near-miss detection below, never as a whitelist — a config may legitimately
+#: carry keys this list does not know, and rejecting those would break every
+#: config the moment a new one is added.
+_KNOWN_PUB_KEYS = frozenset(
+    {
+        "api_keys",
+        "audience",
+        "author_name",
+        "citation_sources",
+        "custom_domains",
+        "languagetool",
+        "publication_description",
+        "publication_name",
+        "rank_math",
+        "seo_rules",
+        "style_profile",
+        "style_rules",
+        "voice_profile",
+        "wordpress",
+    }
+)
+
+
+def _warn_on_near_miss_keys(config, publication_name):
+    """Warn when a top-level key looks like a typo of one the pipeline reads.
+
+    An unknown key is not an error — configs carry their own notes and future
+    keys — so this never rejects anything. What it catches is the key that is
+    *almost* right, which is the one that costs something: ``authorname`` or
+    ``author-name`` reads as absent, the pipeline falls back to no author at
+    all, and citation verification silently loses the ability to check
+    first-person claims. No error, no warning, no missing-field message —
+    exactly the class of failure the handoff-gap report exists to surface,
+    happening one layer below it where that report cannot see it.
+
+    ``difflib.get_close_matches`` rather than an edit-distance implementation:
+    stdlib, and the ratio cutoff is the standard way to spell "close enough to
+    be a typo, far enough not to be a different word".
+    """
+    for key in config:
+        if key in _KNOWN_PUB_KEYS:
+            continue
+        close = difflib.get_close_matches(key, _KNOWN_PUB_KEYS, n=1, cutoff=0.85)
+        if close:
+            log.warning(
+                "Publication config '%s' has a key %r that closely resembles "
+                "%r but is not it. If that is a typo, the pipeline is reading "
+                "%r as absent and falling back to its default. Rename it or, "
+                "if %r is deliberate, ignore this.",
+                publication_name,
+                key,
+                close[0],
+                close[0],
+                key,
+            )
 
 
 # ---------------------------------------------------------------------------
