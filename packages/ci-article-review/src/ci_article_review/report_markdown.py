@@ -549,8 +549,9 @@ def _capture_note(citation):
     if age == 0:
         return " — snapshot dated today"
     if age:
+        plural = "day" if age == 1 else "days"
         return (
-            f" — archive.org returned an existing snapshot {age} days old "
+            f" — archive.org returned an existing snapshot {age} {plural} old "
             f"rather than making a new capture"
         )
     return ""

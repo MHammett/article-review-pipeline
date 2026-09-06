@@ -1143,13 +1143,15 @@ def _record_submission(entry, sub):
             # know that it failed, so we do not say so.
             wb["archive_outcome"] = wayback.ARCHIVE_SUBMITTED
             wb["archive_outcome_detail"] = (
-                f"the request was sent and archive.org did not answer in time "
-                f"({sub.get('error')}); the capture may have run anyway"
+                "the request was sent and archive.org did not answer in time; "
+                "the capture may have run anyway"
             )
         else:
             wb["archive_outcome"] = wayback.ARCHIVE_SUBMIT_FAILED
             wb["archive_outcome_detail"] = (
-                sub.get("error") or "archive.org did not accept the submission"
+                sub.get("error_summary")
+                or sub.get("error")
+                or "archive.org did not accept the submission"
             )
     elif sub.get("archived") and sub.get("snapshot_url"):
         _record_archived(wb, sub)
@@ -1160,7 +1162,7 @@ def _record_submission(entry, sub):
         )
     else:
         wb["archive_outcome"] = wayback.ARCHIVE_SUBMITTED
-        wb["archive_outcome_detail"] = (
+        wb["archive_outcome_detail"] = sub.get("error_summary") or (
             "archive.org accepted the request but named no snapshot, and an "
             "unauthenticated submission has no job id to ask about it"
         )
@@ -1426,6 +1428,45 @@ def _submit_missing_archives(results, archive_org_creds=None, history_root=None)
     if not targets:
         return
 
+    # Ask archive.org what it will actually accept, before spending requests
+    # finding out the hard way. Costs one paced call and can only ever make the
+    # run more cautious — see the two rules below.
+    capacity = wayback.capture_capacity(access_key=access_key, secret_key=secret_key)
+    if capacity.get("daily_exhausted"):
+        # Every submission from here is refused. Collecting a batch of failures
+        # to learn that tells the author nothing they can act on; the quota does.
+        used = capacity.get("daily_captures")
+        limit = capacity.get("daily_captures_limit")
+        for entry in targets:
+            wb = entry.setdefault("wayback", {})
+            wb["archive_outcome"] = wayback.ARCHIVE_NOT_ATTEMPTED
+            wb["archive_outcome_detail"] = (
+                f"not submitted: this archive.org account has used its daily "
+                f"capture quota ({used} of {limit}). It resets on archive.org's "
+                f"schedule; the next run will try again."
+            )
+        log.warning(
+            "Wayback daily capture quota exhausted (%s/%s) — %d citation(s) not submitted",
+            used,
+            limit,
+            len(targets),
+        )
+        return
+
+    submit_parallel = _MAX_SUBMIT_PARALLEL
+    available = capacity.get("available")
+    if isinstance(available, int) and available < submit_parallel:
+        # Narrow only, never widen. The static ceiling was chosen by watching
+        # archive.org get upset and is the safe bound; a live reading that says
+        # "fewer slots than that" is new information worth obeying, while one
+        # saying "more" is not worth the risk of trusting a stale number.
+        submit_parallel = max(1, available)
+        log.info(
+            "Wayback reports %s capture slot(s) free; submitting %d at a time",
+            available,
+            submit_parallel,
+        )
+
     def _submit_one(entry):
         try:
             sub = wayback.submit(
@@ -1447,7 +1488,7 @@ def _submit_missing_archives(results, archive_org_creds=None, history_root=None)
     # the atexit hook it registers regardless of how it's shut down, joins
     # every worker with a bare, untimed t.join(), which is how finished
     # ci-review processes were previously found still alive two days later.
-    submit_semaphore = threading.Semaphore(min(len(targets), _MAX_SUBMIT_PARALLEL))
+    submit_semaphore = threading.Semaphore(min(len(targets), submit_parallel))
 
     def _bounded_submit(entry):
         with submit_semaphore:
@@ -1461,9 +1502,7 @@ def _submit_missing_archives(results, archive_org_creds=None, history_root=None)
         )
         for entry in targets
     ]
-    ceiling = _batch_ceiling(
-        len(targets), _MAX_SUBMIT_PARALLEL, _SUBMIT_TIMEOUT_SECONDS
-    )
+    ceiling = _batch_ceiling(len(targets), submit_parallel, _SUBMIT_TIMEOUT_SECONDS)
     outcomes = run_all_with_timeout(jobs, global_timeout=ceiling)
     for url, (_, error) in outcomes.items():
         if error is not None:

@@ -206,6 +206,22 @@ The console says which happened:
 
 Every failure here degrades to "not established" and never fails the run.
 
+**Capture options.** The `/save` form's control names *are* the API's parameter names, so everything the web form offers is available: `capture_outlinks`, `capture_all`, `capture_screenshot`, `disable_adblocker`, `wm-save-mywebarchive`, `email_result`, `wacz`. The pipeline sets exactly one, and it is a correctness fix rather than a feature:
+
+`capture_all=0` — **archive.org's own form defaults this ON**, and ON means "archive the page even if it answers 4xx/5xx". For citation archiving that manufactures a false positive: a source that blocks the capture with a 403 would have its block page archived, the next run's availability check would find a snapshot, and the report would call the citation archived when what is archived is an error page. It would bite hardest on sources that refuse automated requests — the citations already flagged as most needing an archive.
+
+Deliberately not set: `email_result` and `wacz` (archive.org emails the account owner once per capture, and a run submits many citations), `wm-save-mywebarchive` (writes to the operator's personal archive), `capture_outlinks` (enormous added load for pages the article does not cite), `capture_screenshot` (nothing renders a screenshot URL yet, so it would be collected and discarded), `force_get` (captures JavaScript-rendered pages worse).
+
+`if_not_archived_within` was tried and rejected. It looks like a fit for `wayback_snapshot_stale_days`, but measured 2026-09-06 it makes archive.org answer `job_id: null` with *"The same snapshot had been made 177 hours ago"* while the identical request without it captures normally — so it removes information, and it is a second gate on a decision this pass has already made.
+
+**Capacity-aware pacing (authenticated only).** `GET /save/status/user` reports what the account can actually do right now:
+
+```json
+{"processing":0,"available":3,"daily_captures":49,"daily_captures_limit":30000}
+```
+
+Every concurrency number governing archiving was otherwise invented. Before submitting, the run asks: if the daily quota is exhausted, nothing is submitted and each citation says so with the quota figures — rather than the author reading a batch of failures. If fewer capture slots are free than the static ceiling, the batch narrows to match. A reading can only ever make the run *more* cautious; it never widens past the static bound, so a stale or wrong answer cannot make things worse. Without credentials the endpoint answers 401 and the run behaves exactly as before.
+
 **Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to obtain the document another way, and uses whatever it gets for checksumming and relevance verification. There are two tiers, tried in this order:
 
 1. **The live page behind a browser TLS fingerprint** — 403 only. See "Escalating past a bot block" below.

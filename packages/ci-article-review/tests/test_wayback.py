@@ -801,7 +801,37 @@ class TestCheckJobStatus:
     def test_a_transport_error_never_raises(self):
         result, _ = self._call(side_effect=Exception("connection reset"))
         assert result["state"] == "unknown"
-        assert "connection reset" in result["reason"]
+        assert result["reason"]
+
+    def test_the_reason_is_a_sentence_and_the_raw_error_is_kept_beside_it(self):
+        """A real run put this in the report verbatim:
+
+            HTTPSConnectionPool(host='web.archive.org', port=443): Max retries
+            exceeded with url: /save/status/... (Caused by NewConnectionError(
+            ... [WinError 10061] ...))
+
+        That is a debugger's string in a document written for someone deciding
+        what to publish. The sentence goes in the report; the raw text stays
+        available for whoever is actually debugging.
+        """
+        result, _ = self._call(
+            side_effect=requests.exceptions.ConnectionError(
+                "HTTPSConnectionPool(host='web.archive.org', port=443): Max "
+                "retries exceeded (Caused by NewConnectionError(...WinError 10061...))"
+            )
+        )
+        assert result["reason"] == (
+            "could not reach archive.org about this capture — the connection "
+            "was refused, dropped, or the host did not resolve"
+        )
+        assert "HTTPSConnectionPool" not in result["reason"]
+        assert "HTTPSConnectionPool" in result["raw_error"]
+
+    def test_a_timeout_says_so_in_words(self):
+        result, _ = self._call(
+            side_effect=requests.exceptions.ReadTimeout("Read timed out.")
+        )
+        assert "did not answer" in result["reason"]
 
     def test_the_secret_is_redacted_out_of_an_error(self):
         result, _ = self._call(
@@ -839,6 +869,176 @@ class TestCheckJobStatus:
         headers = mock_get.call_args.kwargs["headers"]
         assert headers["Authorization"] == "LOW AK:SK"
         assert headers["Accept"] == "application/json"
+
+
+class TestCaptureOptions:
+    """What we deliberately ask Save Page Now to do, and deliberately do not."""
+
+    def _post(self, **kwargs):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.post",
+            return_value=_mock_response({"job_id": "spn2-x"}),
+        ) as mock_post:
+            wayback.submit(
+                "https://example.com/", access_key="AK", secret_key="SK", **kwargs
+            )
+        return mock_post.call_args.kwargs["data"]
+
+    def test_error_pages_are_not_archived(self):
+        """`capture_all` defaults ON in archive.org's own form, and ON means
+        "archive it even if it answers 4xx/5xx". For a citation that manufactures
+        a false archive: a source that 403s the capture would get its block page
+        saved, and the next run would report the citation as archived."""
+        assert self._post()["capture_all"] == "0"
+
+    def test_archive_org_is_not_asked_to_re_decide_what_to_capture(self):
+        """``if_not_archived_within`` looks like a fit for
+        ``wayback_snapshot_stale_days`` and is not. Live 2026-09-06 it made
+        archive.org answer ``job_id: null`` with "The same snapshot had been made
+        177 hours ago" while the identical request without it captured — so it
+        only ever removes information, and it is a second gate on a decision this
+        pass has already made."""
+        assert "if_not_archived_within" not in self._post(stale_days=180)
+
+    def test_an_accepted_request_that_starts_no_capture_says_why(self):
+        """archive.org answers 200 with a null job_id and an explanation."""
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.post",
+            return_value=_mock_response(
+                {
+                    "url": "https://example.com/",
+                    "job_id": None,
+                    "message": "The same snapshot had been made 177 hours ago.",
+                }
+            ),
+        ):
+            result = wayback.submit(
+                "https://example.com/", access_key="AK", secret_key="SK"
+            )
+        assert result["submitted"] is True
+        assert result["job_id"] is None
+        assert "177 hours ago" in result["error_summary"]
+
+    def test_nothing_emails_the_operator_or_touches_their_archive(self):
+        """A run submits many citations. `email_result` and `wacz` would each
+        send mail per capture, and `wm-save-mywebarchive` writes to the
+        operator's own account — none of those are side effects a review gets to
+        cause on its own."""
+        data = self._post()
+        for never in ("email_result", "wacz", "wm-save-mywebarchive"):
+            assert never not in data
+
+    def test_no_outlink_or_screenshot_load_is_added(self):
+        data = self._post()
+        assert "capture_outlinks" not in data
+        assert "capture_screenshot" not in data
+
+    def test_the_url_is_still_sent(self):
+        assert self._post()["url"] == "https://example.com/"
+
+
+class TestSubmitHonoursTheBreaker:
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def test_a_tripped_breaker_stops_submissions_too(self):
+        """Submissions used to ignore the breaker entirely: once five lookups
+        had been refused the availability API went quiet while Save Page Now —
+        the more expensive call, since it starts a real capture — kept firing."""
+        wayback._rate_limited_lookups = wayback._CIRCUIT_TRIP_AFTER
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get"
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.post"
+            ) as mock_post,
+        ):
+            result = wayback.submit("https://example.com/")
+        mock_get.assert_not_called()
+        mock_post.assert_not_called()
+        assert result["submitted"] is False
+        assert result["rate_limited"] is True
+        assert result["archived"] is False
+
+    def test_an_untripped_breaker_submits_normally(self):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response({}),
+        ) as mock_get:
+            result = wayback.submit("https://example.com/")
+        mock_get.assert_called_once()
+        assert result["submitted"] is True
+
+
+class TestCaptureCapacity:
+    """archive.org will say how much capacity the account has. Every concurrency
+    number governing archiving was otherwise invented."""
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    LIVE = {
+        "processing": 0,
+        "available": 3,
+        "daily_captures": 49,
+        "daily_captures_limit": 30000,
+    }
+
+    def _call(self, payload=None, side_effect=None, **kw):
+        opts = {"access_key": "AK", "secret_key": "SK"}
+        opts.update(kw)
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_json_response(payload) if payload else None,
+                side_effect=side_effect,
+            ) as mock_get,
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+        ):
+            return wayback.capture_capacity(**opts), mock_get
+
+    def test_the_real_payload_shape_parses(self):
+        """Measured live 2026-09-06 — this is verbatim what archive.org sent."""
+        cap, _ = self._call(self.LIVE)
+        assert cap["known"] is True
+        assert cap["available"] == 3
+        assert cap["daily_captures"] == 49
+        assert cap["daily_captures_limit"] == 30000
+        assert cap["daily_exhausted"] is False
+
+    def test_an_exhausted_quota_is_recognised(self):
+        cap, _ = self._call({**self.LIVE, "daily_captures": 30000})
+        assert cap["daily_exhausted"] is True
+
+    def test_unknown_never_collapses_into_exhausted(self):
+        """ "We could not find out" must not stop the run archiving."""
+        cap, _ = self._call({})
+        assert cap["daily_exhausted"] is False
+        assert cap["available"] is None
+
+    def test_no_credentials_means_no_call(self):
+        cap, mock_get = self._call(self.LIVE, access_key=None, secret_key=None)
+        assert cap["known"] is False
+        assert "authenticated" in cap["reason"]
+        mock_get.assert_not_called()
+
+    def test_a_tripped_breaker_skips_the_lookup(self):
+        wayback._rate_limited_lookups = wayback._CIRCUIT_TRIP_AFTER
+        cap, mock_get = self._call(self.LIVE)
+        assert cap["known"] is False
+        mock_get.assert_not_called()
+
+    def test_a_transport_failure_is_a_sentence_not_a_stack(self):
+        cap, _ = self._call(side_effect=requests.exceptions.ConnectionError("boom"))
+        assert cap["known"] is False
+        assert "could not reach archive.org" in cap["reason"]
 
 
 class TestJobStatusSharesTheOneRateLimitScheme:

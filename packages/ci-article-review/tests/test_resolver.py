@@ -2852,3 +2852,97 @@ class TestSourceAdaptersIdentifyThemselves:
         assert not self._calls_without_headers(
             "resp = requests.get(url, timeout=15, headers=DEFAULT_HEADERS)"
         )
+
+
+class TestSubmissionRespectsRealCapacity:
+    """archive.org reports how much capture capacity the account has. Before
+    this, every concurrency number was invented and the run discovered limits by
+    running into them."""
+
+    def _targets(self, n=3):
+        return [
+            {"url": f"https://x{i}", "resolved": True, "wayback": {"archived": False}}
+            for i in range(n)
+        ]
+
+    def _run(self, capacity, targets=None):
+        targets = targets if targets is not None else self._targets()
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.classify_host",
+                return_value="public",
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.capture_capacity",
+                return_value=capacity,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None, "archived": False},
+            ) as mock_submit,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+                return_value={"state": "not_checked", "reason": "no creds"},
+            ),
+        ):
+            resolver._submit_missing_archives(
+                targets, {"access_key": "AK", "secret_key": "SK"}
+            )
+        return targets, mock_submit
+
+    def _capacity(self, **kw):
+        base = {
+            "available": 3,
+            "processing": 0,
+            "daily_captures": 49,
+            "daily_captures_limit": 30000,
+            "daily_exhausted": False,
+            "known": True,
+            "reason": None,
+        }
+        base.update(kw)
+        return base
+
+    def test_an_exhausted_quota_stops_submissions_and_says_why(self):
+        """Submitting anyway would spend a batch of requests to learn something
+        the quota already told us, and the author would see failures rather than
+        the one fact they can act on."""
+        targets, mock_submit = self._run(
+            self._capacity(daily_exhausted=True, daily_captures=30000)
+        )
+        mock_submit.assert_not_called()
+        for t in targets:
+            wb = t["wayback"]
+            assert wb["archive_outcome"] == wayback.ARCHIVE_NOT_ATTEMPTED
+            assert "daily capture quota" in wb["archive_outcome_detail"]
+            assert "30000" in wb["archive_outcome_detail"]
+
+    def test_scarce_slots_narrow_the_batch(self):
+        targets, mock_submit = self._run(self._capacity(available=1))
+        # Still submits everything, just not at once.
+        assert mock_submit.call_count == len(targets)
+
+    def test_plentiful_slots_do_not_widen_past_the_static_ceiling(self):
+        """A live reading may only make the run more cautious. The static bound
+        was chosen by watching archive.org get upset; trusting a possibly-stale
+        number to exceed it risks the IP block it exists to prevent."""
+        import ci_article_review.adapters.citation.resolver as r
+
+        seen = {}
+        real_sem = r.threading.Semaphore
+
+        def spy(n):
+            seen["n"] = n
+            return real_sem(n)
+
+        with patch.object(r.threading, "Semaphore", side_effect=spy):
+            self._run(self._capacity(available=99))
+        assert seen["n"] <= r._MAX_SUBMIT_PARALLEL
+
+    def test_unknown_capacity_behaves_exactly_as_before(self):
+        targets, mock_submit = self._run(
+            self._capacity(known=False, available=None, daily_exhausted=False)
+        )
+        assert mock_submit.call_count == len(targets)
+        for t in targets:
+            assert t["wayback"]["archive_outcome"] != wayback.ARCHIVE_NOT_ATTEMPTED
