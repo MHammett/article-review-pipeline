@@ -1477,11 +1477,41 @@ def _recover_failed_calls(
     return raw_results
 
 
-#: Models whose fact_check answers come from a live search rather than training
-#: recall. The preset comment at `thorough` limits fact_check to these "for
-#: quality", and a substitute should honour the same preference before falling
-#: back to one that cannot search.
+#: Models that consult live sources without being asked to. gemini is sent
+#: `tools: [googleSearch]` on every call and perplexity is a search product, so
+#: neither can be un-grounded from config. openai, grok and claude ground only
+#: when `web_search` covers the domain — see `_is_grounded_for`, which is what
+#: callers should use.
 _SEARCH_GROUNDED_MODELS = ("gemini", "perplexity")
+
+
+def _is_grounded_for(model_name: str, domain: str, cfg: dict) -> bool:
+    """True if ``model_name`` would consult live sources for ``domain``.
+
+    There are two ways to be grounded and the static tuple above only knows
+    one. `maximum` sets `web_search: [fact_check]` on claude precisely so that
+    domain searches — its own comment counts the grounded models on fact_check
+    in the plural because of it — while a membership test against the tuple
+    reports claude as ungrounded. The effect was narrow but backwards: choosing
+    a fact_check substitute, an ungrounded model outranked one the config had
+    explicitly grounded, on the single domain where grounding is the reason the
+    ensemble is shaped the way it is.
+
+    Reading configuration rather than asserting from the model name is the same
+    correction `grounding_bonus` already made in consolidation, and for the same
+    reason: the guess and the configuration drift apart, and only one of them is
+    what the run will actually do.
+    """
+    if model_name in _SEARCH_GROUNDED_MODELS:
+        return True
+    # Callers normalise, but this runs on the path taken *after* calls have
+    # already failed, so the simple config form documented in user.example.yaml
+    # (`openai: gpt-5.5`) degrades to "not grounded" here rather than raising
+    # AttributeError at the least recoverable moment. `_prompt_override` on the
+    # same object already fails soft; matching that is deliberate.
+    if not isinstance(cfg, dict):
+        return False
+    return _web_search_enabled(cfg.get("web_search"), domain)
 
 
 def _domains_with_nothing_usable(raw_results, expected_domains=None):
@@ -1521,9 +1551,11 @@ def _substitute_candidates(domain, tried, model_configs, api_keys, drafting_mode
     """
     pool = _THOROUGHNESS_PRESETS["maximum"].get(domain, [])
     if domain == "fact_check":
-        pool = [m for m in pool if m in _SEARCH_GROUNDED_MODELS] + [
-            m for m in pool if m not in _SEARCH_GROUNDED_MODELS
-        ]
+
+        def _grounded(m):
+            return _is_grounded_for(m, domain, model_configs.get(m, {}))
+
+        pool = [m for m in pool if _grounded(m)] + [m for m in pool if not _grounded(m)]
     out = []
     for model_name in pool:
         if model_name in tried:

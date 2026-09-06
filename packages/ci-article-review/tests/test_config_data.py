@@ -96,13 +96,31 @@ class TestPresetsStructure:
                 f"{name}: no models"
             )
 
-    def test_no_grok_reasoning_effort(self):
-        # Grok reasoning is model-selection based; reasoning_effort is not a valid Grok param.
+    #: Grok models that accept reasoning_effort. Before grok-4.6 (2026-08-12)
+    #: Grok reasoning was model-selection only and the parameter is not valid,
+    #: which is what this guard originally banned outright.
+    _GROK_TAKES_EFFORT = {"grok-4.6"}
+
+    def test_grok_reasoning_effort_only_on_models_that_accept_it(self):
+        """Was a blanket ban, on the grounds that no Grok took the parameter.
+
+        grok-4.6 does. Verified live 2026-09-05: litellm forwards it to xAI with
+        no client-side reject and none of the `allowed_openai_params` hatch
+        mistral needs, and grok honours it — ~380 completion tokens at low
+        against ~1060 at high on one prompt. The ban is therefore narrowed to
+        the models it is actually true of rather than dropped, because sending
+        the parameter to grok-4.3 would still be a 400 for no gain.
+        """
         data = _load("presets.yaml")
         for name, body in data.items():
             grok = body.get("models", {}).get("grok") or {}
-            assert "reasoning_effort" not in grok, (
-                f"{name}: grok has reasoning_effort — use grok-4.20-0309-reasoning instead"
+            if "reasoning_effort" not in grok:
+                continue
+            assert grok.get("model") in self._GROK_TAKES_EFFORT, (
+                f"{name}: grok {grok.get('model')!r} predates reasoning_effort"
+            )
+            assert grok["reasoning_effort"] in ("low", "medium", "high", "xhigh"), (
+                f"{name}: grok reasoning_effort={grok['reasoning_effort']!r} invalid"
             )
 
     def test_mistral_reasoning_effort_is_high_or_none_only(self):
