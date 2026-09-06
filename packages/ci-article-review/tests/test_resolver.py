@@ -1080,6 +1080,451 @@ class TestKnownUrlWaybackFallback:
         assert results[0]["origin_failure"] == "rate_limited"
 
 
+#: A second article body, distinguishable from ``_ARTICLE_HTML`` by checksum.
+#: Ordering tests have to say *which* of two available copies was read, and two
+#: fixtures that extract to the same text cannot answer that.
+_SNAPSHOT_HTML = (
+    "<!DOCTYPE html><html><head><title>Archived Copy</title></head>"
+    "<body><article><h1>Archived Copy</h1><p>"
+    + ("This archived snapshot records the older wording of the report. " * 8)
+    + "</p></article></body></html>"
+)
+
+
+def _impersonated_response(
+    body=_ARTICLE_HTML,
+    url="https://example.com/page",
+    content_type="text/html; charset=utf-8",
+):
+    """What ``impersonating_get`` hands back on success.
+
+    A ``curl_cffi`` response, not a ``requests`` one. The resolver reads it
+    through the same ``_extract_fetched`` path, so it needs the same
+    ``.content``/``.headers``/``.encoding`` surface, plus ``.url`` — which is
+    load-bearing here rather than incidental: it is where the fetch *landed*,
+    and the archive lookup follows it.
+    """
+    return type(
+        "R",
+        (),
+        {
+            "status_code": 200,
+            "url": url,
+            "content": body.encode("utf-8") if isinstance(body, str) else body,
+            "headers": {"Content-Type": content_type},
+            "encoding": "utf-8",
+        },
+    )()
+
+
+def _extracted_checksum(html):
+    text, _ = extract.extract_response_text(
+        html.encode("utf-8"), content_type="text/html"
+    )
+    return resolver.sha256_checksum(text)
+
+
+class TestKnownUrlImpersonationEscalation:
+    """A 403 escalates to a browser TLS fingerprint before it reaches for the
+    archive.
+
+    Policy (repo owner): for a public document, retrieval method does not affect
+    citation validity, because the reader gets the same page. The link checker
+    has escalated like this since 2026-08-12; citation verification did not, and
+    the 2026-09-05 Honda run reported eight claims as "fetch was refused" whose
+    sources the link checker could have read.
+
+    Ordering is the design decision under test. Live-first is not a preference
+    for the origin over the archive — it is that ``wayback.check`` runs on the
+    success path anyway, so escalating first yields the snapshot link *as well
+    as* a current read, where archive-first trades the current read away to
+    obtain something it was going to get regardless.
+    """
+
+    _URL = "https://example.com/page"
+
+    def _resolve(
+        self,
+        *,
+        status=403,
+        impersonated=None,
+        wayback_result=None,
+        snapshot_body=_SNAPSHOT_HTML,
+    ):
+        """One known_url claim whose honest fetch fails with ``status``.
+
+        ``wayback.submit`` is stubbed for the reason ``_resolve_with_fetch_failure``
+        above documents: a resolved citation with no snapshot is a re-capture
+        target, and example.com passes ``is_public_host``, so an unstubbed run
+        asks archive.org to really capture the page.
+        """
+        wayback_result = (
+            {"archived": False} if wayback_result is None else wayback_result
+        )
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=[
+                    _http_error_response(status),
+                    _page_response(snapshot_body),
+                ],
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver.impersonating_get",
+                return_value=impersonated,
+            ) as mock_imp,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value=wayback_result,
+            ) as mock_wb,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
+                return_value={
+                    "failed": False,
+                    "data": {
+                        "verdict": "supports",
+                        "reason": "matches",
+                        # Must be findable in the extracted text: a
+                        # "supports" verdict whose quote is not grounded is
+                        # demoted, which would mask the tier under test.
+                        "quote": (
+                            "The measured value is documented in detail "
+                            "throughout this report."
+                        ),
+                    },
+                    "model": "mistral-small-latest",
+                    "tokens": {"prompt": 10, "completion": 5},
+                    "elapsed_seconds": 0.2,
+                },
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": self._URL}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+            )
+        return results[0], mock_get, mock_imp, mock_wb
+
+    def test_a_403_is_read_from_the_live_page_after_escalation(self):
+        result, mock_get, mock_imp, _ = self._resolve(
+            impersonated=_impersonated_response()
+        )
+
+        assert result["resolved"] is True
+        assert result["verification"] == "checksum"
+        assert result["verified_via"] == "tls_impersonation"
+        assert result["origin_failure"] == "blocked"
+        mock_imp.assert_called_once()
+        # One honest fetch and no second one: the snapshot was never fetched,
+        # because the live page answered.
+        assert mock_get.call_count == 1
+
+    def test_the_live_copy_is_what_gets_checksummed_not_the_snapshot(self):
+        """The ordering decision, stated as an assertion.
+
+        Both copies are obtainable here. The checksum and the relevance verdict
+        are reported at this pipeline's strongest tier, so they have to describe
+        the document the article actually cites — not a snapshot that may be a
+        year old, as both Honda-run snapshots were (358 and 494 days, each
+        flagged stale).
+        """
+        result, _, _, _ = self._resolve(
+            impersonated=_impersonated_response(),
+            wayback_result={
+                "archived": True,
+                "snapshot_url": (
+                    "https://web.archive.org/web/2024/https://example.com/page"
+                ),
+            },
+        )
+
+        assert result["checksum"] == _extracted_checksum(_ARTICLE_HTML)
+        assert result["checksum"] != _extracted_checksum(_SNAPSHOT_HTML)
+        assert "archive_provenance" not in result
+
+    def test_the_archive_pairing_survives_escalation(self):
+        """Escalating must not cost the reader the snapshot.
+
+        This is what makes live-first safe rather than merely preferable: the
+        pairing a refused source most needs is still collected, and still
+        rendered beside it.
+        """
+        snapshot = "https://web.archive.org/web/2024/https://example.com/page"
+        result, _, _, _ = self._resolve(
+            impersonated=_impersonated_response(),
+            wayback_result={"archived": True, "snapshot_url": snapshot},
+        )
+
+        assert result["wayback"]["snapshot_url"] == snapshot
+
+    def test_the_archive_lookup_follows_the_redirect_to_the_document(self):
+        """Ask archive.org about the page that served the content.
+
+        Every one of the Honda run's eight refused claims held a Vertex
+        ``grounding-api-redirect`` URL. Looking *that* up returns
+        ``archived: false``, which the renderer states as "archive.org has no
+        snapshot of this URL" — while both real sources are archived. A false
+        absence printed beside the citations that most need the archive is the
+        exact failure this pairing exists to prevent.
+        """
+        result, _, _, mock_wb = self._resolve(
+            impersonated=_impersonated_response(url="https://real.example/doc"),
+            wayback_result={
+                "archived": True,
+                "snapshot_url": (
+                    "https://web.archive.org/web/2024/https://real.example/doc"
+                ),
+            },
+        )
+
+        assert mock_wb.call_args[0][0] == "https://real.example/doc"
+        assert result["final_url"] == "https://real.example/doc"
+        # The URL the draft cites stays the citation's own; the destination is
+        # additional, not a replacement.
+        assert result["url"] == self._URL
+
+    def test_no_final_url_is_recorded_when_the_fetch_did_not_move(self):
+        result, _, _, mock_wb = self._resolve(
+            impersonated=_impersonated_response(url=self._URL)
+        )
+
+        assert "final_url" not in result
+        assert mock_wb.call_args[0][0] == self._URL
+
+    def test_the_citation_records_reader_friction_not_a_confession(self):
+        result, _, _, _ = self._resolve(impersonated=_impersonated_response())
+
+        access = result["reader_access"]
+        assert "403" in access
+        # Says what it costs the reader, and what to do about it...
+        assert "archive" in access.lower()
+        # ...and never implies the source is disqualified by how it was read.
+        assert "unverified" not in access.lower()
+        assert "not support" not in access.lower()
+
+    def test_escalated_content_is_still_relevance_checked(self):
+        """Escalation changes how the page was obtained and nothing downstream.
+
+        A page read this way that does not back the claim still has to be
+        downgraded — otherwise the strongest tier would be easier to reach
+        through the escalation path than through an honest fetch.
+        """
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=[_http_error_response(403)],
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.impersonating_get",
+                return_value=_impersonated_response(),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": False},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.llm.call_provider",
+                return_value={
+                    "failed": False,
+                    "data": {
+                        "verdict": "contradicts",
+                        "reason": "says otherwise",
+                        "quote": "",
+                    },
+                    "model": "mistral-small-latest",
+                    "tokens": {"prompt": 10, "completion": 5},
+                    "elapsed_seconds": 0.2,
+                },
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": self._URL}],
+                _SOURCES,
+                api_keys={"mistral": {"api_key": "k"}},
+            )
+
+        assert results[0]["resolved"] is False
+        assert results[0]["verification"] == "content_mismatch"
+        assert results[0]["verified_via"] == "tls_impersonation"
+
+
+class TestEscalationIsScopedToARefusal:
+    """Only a 403 escalates.
+
+    Policy puts paywalled and access-controlled content out of scope, and the
+    other qualifying failures are not refusals a different handshake can clear:
+    a 401 says an account is required, a 429 is a rate limit that changing
+    fingerprint to slip would be abuse rather than verification, and a timeout
+    or DNS failure never reached the origin at all. All of them keep going
+    straight to the archive, exactly as before.
+    """
+
+    def _escalation_attempted_for(self, failure):
+        snapshot = "https://web.archive.org/web/2024/https://example.com/page"
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=[failure, _page_response()],
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.impersonating_get",
+                return_value=None,
+            ) as mock_imp,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": True, "snapshot_url": snapshot},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+        return mock_imp.called, results[0]
+
+    @pytest.mark.parametrize("status", [401, 429])
+    def test_a_401_or_429_goes_straight_to_the_archive(self, status):
+        called, result = self._escalation_attempted_for(_http_error_response(status))
+        assert called is False
+        assert result["verified_via"] == "wayback_fallback"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            requests.exceptions.ReadTimeout("read timed out"),
+            requests.exceptions.ConnectionError("getaddrinfo failed"),
+        ],
+    )
+    def test_an_unreached_origin_goes_straight_to_the_archive(self, exc):
+        called, result = self._escalation_attempted_for(exc)
+        assert called is False
+        assert result["verified_via"] == "wayback_fallback"
+
+    @pytest.mark.parametrize("status", [404, 500])
+    def test_a_404_or_5xx_escalates_nowhere_and_asks_nobody(self, status):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                return_value=_http_error_response(status),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.impersonating_get",
+                return_value=None,
+            ) as mock_imp,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check"
+            ) as mock_wb,
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/gone"}],
+                _SOURCES,
+            )
+
+        mock_imp.assert_not_called()
+        mock_wb.assert_not_called()
+        assert results[0]["resolved"] is False
+
+
+class TestEscalationNeverLowersTheOutcome:
+    """A failed escalation has to leave the archive fallback exactly as it was.
+
+    The tier is additive or it is a regression: anything it hands back that is
+    not genuinely readable must fall through, or a 403 the archive could have
+    satisfied would start reporting as unverifiable instead.
+    """
+
+    _WALL = (
+        "<html><head><title>Request Access</title></head><body><main>"
+        "<h1>Request Access</h1><p>Your request has been flagged as potentially "
+        "automated. If you are a human user receiving this message, please "
+        "complete the CAPTCHA (bot test) below and click Request Access. "
+        "Programmatic access is limited to our developer APIs.</p>"
+        "</main></body></html>"
+    )
+    _NEARLY_EMPTY = "<html><body><article><p>Too short.</p></article></body></html>"
+
+    def _resolve_with_impersonated(self, body):
+        snapshot = "https://web.archive.org/web/2024/https://example.com/page"
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=[_http_error_response(403), _page_response()],
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver.impersonating_get",
+                return_value=_impersonated_response(body),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": True, "snapshot_url": snapshot},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+        return results[0], mock_get
+
+    def test_a_challenge_page_falls_through_to_the_archive(self):
+        result, mock_get = self._resolve_with_impersonated(self._WALL)
+
+        assert result["verified_via"] == "wayback_fallback"
+        assert result["checksum"] == _extracted_checksum(_ARTICLE_HTML)
+        # The snapshot really was fetched — two honest fetches, not one.
+        assert mock_get.call_count == 2
+
+    def test_a_near_empty_body_falls_through_to_the_archive(self):
+        result, _ = self._resolve_with_impersonated(self._NEARLY_EMPTY)
+
+        assert result["verified_via"] == "wayback_fallback"
+
+    def test_a_block_that_holds_behaves_exactly_as_it_did_before(self):
+        """curl_cffi absent, or the WAF unmoved: ``impersonating_get`` returns
+        None either way, and the 403 path is the one it always was."""
+        snapshot = "https://web.archive.org/web/2024/https://example.com/page"
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=[_http_error_response(403), _page_response()],
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.impersonating_get",
+                return_value=None,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": True, "snapshot_url": snapshot},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None},
+            ),
+        ):
+            results = resolver.resolve_citations(
+                [{"claim": "a claim", "known_url": "https://example.com/page"}],
+                _SOURCES,
+            )
+
+        assert results[0]["verified_via"] == "wayback_fallback"
+        assert results[0]["origin_failure"] == "blocked"
+        assert "archive.org snapshot" in results[0]["archive_provenance"]
+
+
 class TestUnresolvedCitationsRecordWhatArchiveOrgSaid:
     """A failed fetch used to record no archive state at all.
 
@@ -2227,3 +2672,183 @@ class TestNextRunReconciliation:
                 targets, str(tmp_path), "AK", "SK"
             )
         assert remaining == targets
+
+
+class TestResolvedUrlIsRecorded:
+    """Where the fetch actually landed, for citations that arrive via a redirector.
+
+    A grounded model cites through one: a gemini-sourced citation arrives as a
+    271-character `vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIY...`
+    that names no publication and is not durable. `safe_get` follows redirects a
+    validated hop at a time and returns the last hop's response, so the resolved
+    address was already in hand and was being dropped. Measured 2026-09-05 on the
+    Honda run: opaque redirect URLs were 817 of the 2,682 characters in one
+    Section 9 entry, while the page behind them was a Jalopnik article this pass
+    had already fetched, read and checksummed.
+    """
+
+    _REDIRECTOR = "https://redirector.example/grounding-api-redirect/AUZIYabc123"
+    _REAL = "https://www.jalopnik.com/honda-clocks-stuck"
+
+    def _fetch(self, final_url):
+        resp = MagicMock()
+        resp.url = final_url
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "text/html"}
+        resp.text = (
+            "<html><body><article><p>" + ("word " * 80) + "</p></article></body></html>"
+        )
+        resp.content = resp.text.encode()
+        resp.encoding = "utf-8"
+        resp.apparent_encoding = "utf-8"
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def _resolve(self, final_url):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                return_value=self._fetch(final_url),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": False},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver._verify_relevance",
+                return_value=({"checked": False, "reason": "no key"}, None),
+            ),
+        ):
+            return resolver.resolve_citations(
+                [{"claim": "c", "known_urls": [self._REDIRECTOR]}], []
+            )[0]
+
+    def test_the_resolved_url_is_recorded_when_it_differs(self):
+        assert self._resolve(self._REAL)["final_url"] == self._REAL
+
+    def test_the_requested_url_is_still_recorded(self):
+        """The citation as given still has to be reportable — it is what the
+        model actually produced."""
+        assert self._resolve(self._REAL)["url"] == self._REDIRECTOR
+
+    def test_an_ordinary_citation_gains_no_extra_field(self):
+        assert "final_url" not in self._resolve(self._REDIRECTOR)
+
+    def test_the_wayback_fallback_path_does_not_raise(self):
+        """`final_url` is assigned inside the try that the fallback skips.
+        Leaving it unbound turned every fallback into an unresolved citation --
+        caught here rather than by the fallback tests noticing collateral damage.
+        """
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                side_effect=requests.exceptions.ConnectionError("dns"),
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                return_value={"archived": False},
+            ),
+        ):
+            result = resolver.resolve_citations(
+                [{"claim": "c", "known_urls": [self._REDIRECTOR]}], []
+            )[0]
+        assert "final_url" not in result
+        assert isinstance(result, dict)
+
+
+class TestResolvedUrlIsWhatTheReaderSees:
+    def test_the_report_links_the_resolved_url_not_the_redirector(self):
+        from ci_article_review.report_markdown import _render_archive_pair
+
+        out = "\n".join(
+            _render_archive_pair(
+                {
+                    "url": "https://redirector.example/grounding-api-redirect/AUZIYabc",
+                    "final_url": "https://www.jalopnik.com/honda-clocks-stuck",
+                    "wayback": {"archived": False},
+                }
+            )
+        )
+        assert "jalopnik.com" in out
+        assert "grounding-api-redirect" not in out
+
+    def test_it_falls_back_to_the_requested_url(self):
+        from ci_article_review.report_markdown import _render_archive_pair
+
+        out = "\n".join(
+            _render_archive_pair(
+                {"url": "https://example.org/a", "wayback": {"archived": False}}
+            )
+        )
+        assert "https://example.org/a" in out
+
+
+class TestSourceAdaptersIdentifyThemselves:
+    """Every adapter fetch sends a User-Agent that says who we are.
+
+    Measured 2026-09-05: census, eia and fred called `requests.get` with no
+    headers at all, so they identified as `python-requests/2.x` to the
+    government APIs that are the most authoritative sources this pipeline has.
+    An anonymous agent is what gets blocked -- the Overpass 406 recorded in this
+    project's notes was a User-Agent block, not a rate limit -- and being
+    identifiable is what lets an operator allowlist us instead of guessing.
+
+    Asserted against the source rather than by driving each adapter, because the
+    thing worth catching is a NEW adapter written with a bare `requests.get`.
+    Each has its own entry point, key requirement and claim-matching, so a
+    behavioural test would cover whichever ones the fixture happened to reach.
+
+    fhwa, epa, pjm, icc, ferc and ilga make no HTTP calls -- they are
+    pointer-only adapters -- so they have nothing to identify.
+    """
+
+    def _calls_without_headers(self, text):
+        out = []
+        for verb in ("requests.get(", "requests.post("):
+            start = 0
+            while True:
+                i = text.find(verb, start)
+                if i == -1:
+                    break
+                depth, j = 0, i + len(verb) - 1
+                while j < len(text):
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j += 1
+                call = text[i : j + 1]
+                if "headers=" not in call:
+                    out.append(call.splitlines()[0][:70])
+                start = j + 1
+        return out
+
+    def test_no_adapter_fetches_anonymously(self):
+        from pathlib import Path
+
+        sources = Path(
+            "packages/ci-article-review/src/ci_article_review/adapters/citation/sources"
+        )
+        if not sources.is_dir():  # pytest invoked from elsewhere
+            import ci_article_review.adapters.citation.sources as pkg
+
+            sources = Path(pkg.__file__).parent
+
+        offenders = {}
+        for path in sorted(sources.glob("*.py")):
+            bare = self._calls_without_headers(path.read_text(encoding="utf-8"))
+            if bare:
+                offenders[path.name] = bare
+        assert not offenders, (
+            "these adapters fetch without a User-Agent, so they identify as "
+            f"python-requests to the source: {offenders}"
+        )
+
+    def test_the_guard_would_catch_a_bare_call(self):
+        """The scan is the test; make sure it is not vacuously passing."""
+        assert self._calls_without_headers("resp = requests.get(url, timeout=15)")
+        assert not self._calls_without_headers(
+            "resp = requests.get(url, timeout=15, headers=DEFAULT_HEADERS)"
+        )
