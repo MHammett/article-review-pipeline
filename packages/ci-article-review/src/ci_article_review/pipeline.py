@@ -76,6 +76,7 @@ from ci_core.concurrency import (
     exit_without_waiting_for_foreign_threads,
     run_all_with_timeout,
 )
+from ci_core.http import impersonation_available
 from ci_core.llm.model_registry import check_model_currency
 from ci_core.llm import timeout_model
 from . import live_model_check
@@ -987,6 +988,53 @@ def _record_fact_check_degradation(report: dict, results: dict) -> None:
         {
             "section": "SECTION 2: Factual Verification, SECTION 9: Citations",
             "caused_by": failed,
+            "detail": detail,
+        }
+    )
+
+
+def _record_impersonation_degradation(report: dict, pre_analysis: dict) -> None:
+    """Record that blocked links were never escalated, because the tier is absent.
+
+    ``impersonating_get`` returns ``None`` both when a block held and when
+    ``curl_cffi`` was never installed, and every caller treats ``None`` as "the
+    block held". That is the right default for a fetch and the wrong one for a
+    report: one of the two is a property of the source, the other is a property
+    of this machine, and only the second is fixable.
+
+    The cost of not saying so is measured. The escalation tier sat inert from
+    2026-08-12 to 2026-09-06 — the extra was in no dependency group, so no
+    ``uv run`` invocation had it — and nothing in any run said a word. Every
+    affected citation was reported exactly as if the source had refused a
+    browser, which is the one reading that makes the missing dependency
+    invisible.
+
+    Fires only when a link was actually blocked. A run with nothing to escalate
+    lost nothing by not being able to, and saying so would be noise.
+    """
+    if impersonation_available():
+        return
+    blocked = [
+        r
+        for r in (pre_analysis.get("links") or [])
+        if r.get("escalation_unavailable") or r.get("status_code") == 403
+    ]
+    if not blocked:
+        return
+    detail = (
+        f"{len(blocked)} cited link(s) returned HTTP 403 and were never put "
+        f"through the TLS-impersonation escalation: the optional 'unblock' "
+        f"extra (curl_cffi) is not installed. They are reported as blocked, "
+        f"which is indistinguishable in this report from a source that refuses "
+        f"browsers too — but the attempt was never made, so treat 'blocked' "
+        f"here as 'unknown'. Install with `uv sync --extra unblock` and re-run "
+        f"before concluding a source is unreachable."
+    )
+    log.warning("Links: %s", detail)
+    report.setdefault("degradations", []).append(
+        {
+            "section": "SECTION 9: Citations, link validation",
+            "caused_by": ["curl_cffi not installed (ci-core[unblock])"],
             "detail": detail,
         }
     )
@@ -2562,6 +2610,7 @@ def run_draft_pipeline(
 
     fact_check = report.get("section_2_fact_check") or {}
     _record_fact_check_degradation(report, results)
+    _record_impersonation_degradation(report, pre_analysis)
     claims = _collect_citation_claims(fact_check, corrected_draft)
     if offline:
         # Claim collection above still runs — it is pure parsing over the draft
