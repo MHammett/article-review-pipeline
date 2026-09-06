@@ -398,6 +398,7 @@ content-intelligence/
 │   │   │   ├── consolidation.py       weighted ensemble consolidation → one report
 │   │   │   ├── ensemble_capture.py    saves/loads raw ensemble output for --replay
 │   │   │   ├── handoff_parser.py      parses Template A and Template C documents
+│   │   │   ├── handoff_gaps.py        what each missing handoff field cost the run, and the line to paste
 │   │   │   ├── history.py             saves run artifacts to pipeline_history/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
 │   │   │   ├── voice_pattern_report.py  recurring voice patterns across articles (ci-voice-patterns)

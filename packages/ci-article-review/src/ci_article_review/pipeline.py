@@ -65,6 +65,7 @@ from .handoff_parser import (
 )
 from . import history as hist
 from . import consolidation
+from . import handoff_gaps
 from ci_core import redact
 from ci_core.config_helpers import normalize_model_configs
 from ci_core import llm
@@ -2029,6 +2030,31 @@ def run_draft_pipeline(
     # Attach currency check results so they appear in the saved report JSON
     # and can be rendered by _print_draft_summary.
     report["model_currency"] = currency
+
+    # Which handoff fields were missing, what each one cost this run, and — where
+    # the run can infer a candidate — the line to paste into the handoff.
+    #
+    # Deliberately here, at the end: everything above has already been sent,
+    # scored and consolidated, so nothing this produces can reach a model
+    # prompt. That ordering is the safeguard, not a convenience. A proposed
+    # primary claim the author has not accepted must never be reviewed against
+    # as though they had — see handoff_gaps' module docstring.
+    gaps = handoff_gaps.assess(
+        handoff,
+        pub_config=pub_config,
+        draft=corrected_draft,
+        domains_ran=sorted({domain for (_model, domain) in results}),
+        pipeline_cfg=pipeline_cfg,
+        has_prior_run=prior_report is not None,
+    )
+    if gaps:
+        report["handoff_gaps"] = gaps
+        log.warning(
+            "Handoff metadata: %d field(s) missing (%s) — see the report's "
+            "'Handoff metadata gaps' section for what each one degraded.",
+            len(gaps),
+            ", ".join(g["label"] for g in gaps),
+        )
 
     # Mark a replayed run. Its cost figures are the captured run's, carried in
     # the api_call_log — real when they were incurred, but not spent again here.

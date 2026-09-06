@@ -185,6 +185,95 @@ def _render_model_failures(report):
     return lines
 
 
+_SEVERITY_HEADING = {
+    "critical": "Changed what the models were asked",
+    "degrading": "Context the models would have used",
+    "advisory": "Run bookkeeping",
+}
+
+
+def _render_handoff_gaps(report):
+    """Which handoff fields were missing, what each cost, and the line to paste.
+
+    Sits in the header rather than among the numbered sections, for the same
+    reason the failed-passes block does: an incomplete handoff is not a finding
+    about the article, it is context for reading every finding below. A reader
+    who reaches SECTION 5 without knowing that `PRIMARY CLAIM` was empty will
+    read a generic completeness flag as a fact about the draft rather than as
+    an artefact of what the pass was told.
+
+    The proposed values are **proposals**. The run was not conducted against
+    them and never will be — ``handoff_gaps.assess`` runs after the last model
+    call precisely so that it cannot be. Pasting one into the handoff and
+    re-running is what makes it real.
+    """
+    gaps = report.get("handoff_gaps") or []
+    if not gaps:
+        return []
+
+    lines = [f"## ⚠ Handoff metadata gaps ({len(gaps)})", ""]
+    lines.append(
+        "These fields were absent from the handoff. Each entry says what the "
+        "absence cost *this* run, and what to write instead. Nothing proposed "
+        "here was used in the review — a value you have not accepted is not a "
+        "value the pipeline may act on. Paste the fix into the handoff and "
+        "re-run to get the review these sections could not give you."
+    )
+    lines.append("")
+
+    for severity in ("critical", "degrading", "advisory"):
+        in_tier = [g for g in gaps if g.get("severity") == severity]
+        if not in_tier:
+            continue
+        lines.append(f"### {_SEVERITY_HEADING[severity]}")
+        lines.append("")
+        for gap in in_tier:
+            flag = (
+                " — left as its template placeholder" if gap.get("placeholder") else ""
+            )
+            lines.append(f"**`{gap.get('label', gap.get('field', ''))}`**{flag}")
+            lines.append("")
+            lines.append(gap.get("impact", ""))
+            lines.append("")
+            suggestion = gap.get("suggestion")
+            if suggestion:
+                basis = gap.get("suggestion_basis")
+                lines.append(
+                    f"*Proposed, not used in this run. From {basis}. Paste it "
+                    f"into the handoff if you agree with it:*"
+                    if basis
+                    else "*Proposed, not used in this run. Paste it into the "
+                    "handoff if you agree with it:*"
+                )
+                lines.append("")
+                lines.append("```")
+                lines.extend(suggestion.splitlines())
+                lines.append("```")
+                lines.append("")
+            elif gap.get("guidance"):
+                lines.append(f"*What to add: {gap['guidance']}*")
+                lines.append("")
+    return lines
+
+
+def _metadata_gap_note(report, domain):
+    """One line naming the handoff fields this section was built without, or []."""
+    missing = [
+        g.get("label", g.get("field", ""))
+        for g in (report.get("handoff_gaps") or [])
+        if domain in (g.get("domains") or [])
+    ]
+    if not missing:
+        return []
+    fields = ", ".join(f"`{m}`" for m in missing)
+    return [
+        f"> **Built without {fields}** — those handoff fields were missing or "
+        f"unfilled this run (see *Handoff metadata gaps* above). Findings here "
+        f"reflect what the pass was told, not only what is in the draft.",
+        "",
+    ]
+
+
 def _missing_models_note(report, domain):
     """One line naming the models that failed on ``domain``, or []."""
     missing = [
@@ -202,9 +291,21 @@ def _missing_models_note(report, domain):
     ]
 
 
+def _section_notes(report, domain):
+    """Every "read this section knowing X" line for one domain, in one call.
+
+    Two things can leave a section short of what the run intended — a failed
+    model pass and an empty handoff field — and they are not alternatives: a
+    run can hit both. Combining them here means a new note reaches every
+    section at once instead of only the call sites that were updated.
+    """
+    report = report or {}
+    return _missing_models_note(report, domain) + _metadata_gap_note(report, domain)
+
+
 def _render_section_2(fact_check, report=None):
     lines = ["## SECTION 2: Factual Verification", ""]
-    lines.extend(_missing_models_note(report or {}, "fact_check"))
+    lines.extend(_section_notes(report, "fact_check"))
     if not fact_check:
         lines.append("_No fact-check results._")
         return lines
@@ -1099,6 +1200,8 @@ def render_report_markdown(report):
         )
         lines.append("")
 
+    lines.extend(_render_handoff_gaps(report))
+
     delta = report.get("delta")
     if delta:
         lines.append("## Delta From Prior Run")
@@ -1130,14 +1233,14 @@ def render_report_markdown(report):
         _render_flags_section(
             "SECTION 3: Voice and AI-Speak",
             report.get("section_3_voice", []),
-            note=_missing_models_note(report, "voice_style"),
+            note=_section_notes(report, "voice_style"),
         )
     )
     lines.extend(
         _render_flags_section(
             "SECTION 4: Argument Integrity",
             report.get("section_4_argument", []),
-            note=_missing_models_note(report, "argument_integrity"),
+            note=_section_notes(report, "argument_integrity"),
         )
     )
     lines.extend(
@@ -1145,13 +1248,13 @@ def render_report_markdown(report):
             "SECTION 5: Completeness and Framing",
             report.get("section_5_completeness", []),
             passage_key="passage_reference",
-            note=_missing_models_note(report, "completeness"),
+            note=_section_notes(report, "completeness"),
         )
     )
     lines.extend(
         _render_section_6(
             report.get("section_6_red_team", {}),
-            note=_missing_models_note(report, "red_team"),
+            note=_section_notes(report, "red_team"),
         )
     )
     lines.extend(_render_section_7(report.get("section_7_low_confidence", [])))
