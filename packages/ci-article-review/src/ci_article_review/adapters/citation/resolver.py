@@ -3,10 +3,17 @@ import importlib
 import logging
 import secrets
 import threading
+import time
 
 
 from ci_core.concurrency import run_all_with_timeout
-from ci_core.http import UnsafeURLError, is_public_host, safe_get
+from ci_core.http import (
+    HOST_NON_PUBLIC,
+    HOST_PUBLIC,
+    UnsafeURLError,
+    classify_host,
+    safe_get,
+)
 
 from ci_core import extract
 from ci_core import llm
@@ -129,6 +136,34 @@ _RESOLVE_TIMEOUT_SECONDS = 90
 #: Per-call safety-net timeout for one Wayback submission, above wayback.submit's
 #: own 30s default for the same reason as _RESOLVE_TIMEOUT_SECONDS.
 _SUBMIT_TIMEOUT_SECONDS = 45
+
+#: Wall-clock ceiling for the same-run capture-status pass (see
+#: ``_poll_capture_outcomes``). Deliberately small, and deliberately not zero.
+#:
+#: The choice this number encodes: **wait briefly in this run, reconcile the
+#: rest in the next one.** Both halves are needed, and neither is sufficient.
+#:
+#:   * Waiting for every capture is not an option. SPN2 captures take seconds to
+#:     minutes, every status call goes through the shared 3s pacing clock
+#:     (``wayback._MIN_INTERVAL_SECONDS``), and a run with 20 unarchived
+#:     citations would spend minutes of the author's wall clock watching
+#:     somebody else's crawler. The pipeline does not block on that.
+#:   * Not waiting at all is what produced the problem this fixes: the report
+#:     said "submitted for archiving", the author read "archived", and a capture
+#:     archive.org dropped on the floor looked exactly like one it completed.
+#:
+#: So: spend a bounded slice here, which resolves the fast captures — most of
+#: them, for an ordinary article page — and hand everything still running to
+#: ``_reconcile_prior_captures`` on the next run, which asks archive.org what
+#: became of it. Whatever this budget does not cover is reported as *pending*,
+#: never as archived.
+#:
+#: Only reachable with credentials: archive.org's job-status endpoint answers
+#: 401 to everyone else (verified 2026-09-05 — see ``wayback.check_job_status``),
+#: and only the authenticated submission path mints a job id at all. Without
+#: credentials the unauthenticated path already answers synchronously, off the
+#: redirect, so there is nothing here to wait for either way.
+_CAPTURE_POLL_BUDGET_SECONDS = 45
 
 
 def _batch_ceiling(job_count, max_parallel, per_call_timeout, slack=60):
@@ -882,21 +917,274 @@ def _resolve_one(
     }
 
 
-def _submit_missing_archives(results, archive_org_creds=None):
+#: Snapshot fields copied verbatim from a wayback answer onto a citation. Named
+#: once so the three places that fold an answer in cannot copy different subsets.
+_SNAPSHOT_FIELDS = (
+    "snapshot_url",
+    "snapshot_ts",
+    "snapshot_age_days",
+    "snapshot_stale",
+)
+
+
+def _record_archived(wb, source):
+    """Mark a citation archived from an answer that named the snapshot.
+
+    The only function permitted to set ``archived: True`` off the back of a
+    submission, and it requires a ``snapshot_url`` to do it. That is the whole
+    guard: "archive.org accepted the request" must never become "the page is
+    archived" without a URL to point at.
+    """
+    wb["archived"] = True
+    for key in _SNAPSHOT_FIELDS:
+        if key in source:
+            wb[key] = source[key]
+    wb["archive_outcome"] = wayback.ARCHIVE_ARCHIVED
+    wb["archive_outcome_detail"] = None
+
+
+def _record_submission(entry, sub):
+    """Fold one ``wayback.submit`` result into the citation's ``wayback`` dict.
+
+    Records an outcome, not just a flag. ``submitted: True`` was the entire
+    record before this, and it answers the wrong question: it says what the
+    pipeline asked for, and the report then told the author what they wanted to
+    hear about it. The branches below are what can actually be true after a
+    submission, and exactly one of them claims the page is archived — the one
+    holding a snapshot URL.
+    """
+    wb = entry.setdefault("wayback", {})
+    wb["submitted"] = bool(sub.get("submitted"))
+    if sub.get("job_id"):
+        wb["submission_job_id"] = sub["job_id"]
+    if sub.get("error"):
+        wb["submission_error"] = sub["error"]
+
+    if not sub.get("submitted"):
+        if sub.get("outcome_unknown"):
+            # The request went out and no answer came back in time. We do not
+            # know that it failed, so we do not say so.
+            wb["archive_outcome"] = wayback.ARCHIVE_SUBMITTED
+            wb["archive_outcome_detail"] = (
+                f"the request was sent and archive.org did not answer in time "
+                f"({sub.get('error')}); the capture may have run anyway"
+            )
+        else:
+            wb["archive_outcome"] = wayback.ARCHIVE_SUBMIT_FAILED
+            wb["archive_outcome_detail"] = (
+                sub.get("error") or "archive.org did not accept the submission"
+            )
+    elif sub.get("archived") and sub.get("snapshot_url"):
+        _record_archived(wb, sub)
+    elif sub.get("job_id"):
+        wb["archive_outcome"] = wayback.ARCHIVE_PENDING
+        wb["archive_outcome_detail"] = (
+            "capture queued with archive.org; it had not finished when this run asked"
+        )
+    else:
+        wb["archive_outcome"] = wayback.ARCHIVE_SUBMITTED
+        wb["archive_outcome_detail"] = (
+            "archive.org accepted the request but named no snapshot, and an "
+            "unauthenticated submission has no job id to ask about it"
+        )
+
+
+def _record_job_status(entry, status):
+    """Fold a ``wayback.check_job_status`` answer in. Returns its ``state``.
+
+    ``not_checked`` and ``unknown`` both leave the citation *pending* carrying
+    the reason we could not find out, rather than downgrading it to failed. We
+    did not establish a failure; we established nothing, and saying so is the
+    point of this whole change.
+    """
+    wb = entry.setdefault("wayback", {})
+    state = status.get("state")
+    if state == "success":
+        _record_archived(wb, status)
+    elif state == "failed":
+        wb["archive_outcome"] = wayback.ARCHIVE_CAPTURE_FAILED
+        wb["archive_outcome_detail"] = status.get("reason")
+    else:
+        wb["archive_outcome"] = wayback.ARCHIVE_PENDING
+        wb["archive_outcome_detail"] = status.get("reason")
+    return state
+
+
+def build_pending_capture_index(history_root=None):
+    """url -> most recent prior ``{job_id, article_slug, run_number, generated}``
+    for a capture a previous run left unresolved.
+
+    The next-run half of the capture story, and the reason ``job_id`` is written
+    to the report at all. Built the same way and for the same reason as
+    ``build_checksum_index``: one scan of history per run, then O(1) lookups.
+
+    Only citations whose last recorded ``archive_outcome`` was still open are
+    indexed. A capture already known to have succeeded or failed has nothing
+    left to ask about, and re-asking would spend pacing budget on a settled
+    question.
+    """
+    if history_root is None:
+        history_root = history_analytics.HISTORY_ROOT
+
+    index = {}
+    for entry in history_analytics.load_reports(history_root):
+        for c in entry["report"].get("section_9_citations") or []:
+            url = c.get("url")
+            wb = c.get("wayback") or {}
+            job_id = wb.get("submission_job_id")
+            if not url or not job_id:
+                continue
+            if wb.get("archive_outcome") not in (
+                wayback.ARCHIVE_PENDING,
+                wayback.ARCHIVE_SUBMITTED,
+            ):
+                continue
+            index[url] = {
+                "job_id": job_id,
+                "article_slug": entry["slug"],
+                "run_number": entry["report"].get("run_number"),
+                "generated": entry["report"].get("generated"),
+            }
+    return index
+
+
+def _reconcile_prior_captures(targets, history_root, access_key, secret_key):
+    """Ask archive.org what became of captures an earlier run left pending.
+
+    Returns the subset of ``targets`` still worth submitting.
+
+    This is what stops the silent-failure loop. Without it, a capture that
+    archive.org accepted and then dropped shows up next run as "not archived",
+    gets resubmitted, is dropped again, and every report in the sequence says
+    the same reassuring thing while nothing is ever archived. Asking the job
+    what happened turns that into a stated reason.
+
+    Never raises: a citation whose prior job cannot be read is simply submitted
+    again, which is exactly what would have happened before this existed.
+    """
+    if not (access_key and secret_key and history_root):
+        return targets
+    try:
+        pending = build_pending_capture_index(history_root)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"Could not read prior Wayback capture jobs: {exc}")
+        return targets
+    if not pending:
+        return targets
+
+    still_to_submit = []
+    for entry in targets:
+        prior = pending.get(entry["url"])
+        if not prior:
+            still_to_submit.append(entry)
+            continue
+        try:
+            status = wayback.check_job_status(
+                prior["job_id"], access_key=access_key, secret_key=secret_key
+            )
+        except Exception as exc:  # pragma: no cover - check_job_status swallows
+            log.warning(f"Wayback job status raised for {entry['url']}: {exc}")
+            still_to_submit.append(entry)
+            continue
+
+        state = status.get("state")
+        if state == "success":
+            # It landed after all — the previous run just could not wait for it.
+            _record_job_status(entry, status)
+            entry["wayback"]["submission_job_id"] = prior["job_id"]
+        elif state == "pending":
+            # Still running on archive.org's side. Submitting again would queue a
+            # second capture of the same page behind the first.
+            _record_job_status(entry, status)
+            entry["wayback"]["submission_job_id"] = prior["job_id"]
+        else:
+            if state == "failed":
+                # Worth carrying into the report even though we are about to try
+                # again: "this keeps failing, and here is what archive.org said"
+                # is the fact a repeated non-archival is hiding.
+                entry.setdefault("wayback", {})["prior_capture_failure"] = {
+                    "job_id": prior["job_id"],
+                    "reason": status.get("reason"),
+                    "run_number": prior.get("run_number"),
+                }
+            still_to_submit.append(entry)
+    return still_to_submit
+
+
+def _poll_capture_outcomes(entries, access_key, secret_key):
+    """Bounded same-run wait on SPN2 capture jobs. Never raises.
+
+    Spends at most ``_CAPTURE_POLL_BUDGET_SECONDS`` of wall clock — see that
+    constant for why the answer is "a little, not none, and not all of it".
+    Every call goes through ``wayback.check_job_status``, hence through the
+    module's shared pacing clock and circuit breaker, so this pass cannot
+    outrun the rate-limit protection the rest of the module relies on.
+
+    Entries whose capture is still running when the budget expires keep their
+    ``pending`` outcome and their job id, which is what the next run reconciles.
+    """
+    if not (access_key and secret_key):
+        return
+    pending = [e for e in entries if e.get("wayback", {}).get("submission_job_id")]
+    if not pending:
+        return
+
+    deadline = time.monotonic() + _CAPTURE_POLL_BUDGET_SECONDS
+    while pending and time.monotonic() < deadline:
+        still_pending = []
+        for entry in pending:
+            if time.monotonic() >= deadline:
+                still_pending.append(entry)
+                continue
+            try:
+                status = wayback.check_job_status(
+                    entry["wayback"]["submission_job_id"],
+                    access_key=access_key,
+                    secret_key=secret_key,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(f"Wayback job status raised for {entry.get('url')}: {exc}")
+                return
+            state = _record_job_status(entry, status)
+            if state == "not_checked":
+                # The breaker tripped mid-pass. Every remaining job would get the
+                # same answer, and each ask costs pacing budget to be told so.
+                return
+            if state == "pending":
+                still_pending.append(entry)
+        pending = still_pending
+
+
+def _submit_missing_archives(results, archive_org_creds=None, history_root=None):
     """Follow-up pass: request Wayback archiving for resolved citations whose
-    URL isn't archived yet.
+    URL isn't archived yet, and establish what became of the request.
 
     Runs after the main resolution pass, at a lower concurrency
     (_MAX_SUBMIT_PARALLEL) than claim resolution — archive.org's Save Page Now
     API does a real page capture per request, so submitting inline per-claim
     at the same parallelism as resolution risks a rate-limit or IP block.
-    Submission is fire-and-forget: it does not verify the capture completed
-    (that can take seconds to minutes on archive.org's side); a future run's
-    ``wayback.check()`` will pick up the new snapshot once it exists.
 
-    Mutates each result's ``wayback`` dict in place, adding ``submitted`` and,
-    on failure, ``submission_error``. Never raises — a submission failure
-    degrades to "still shows as unarchived", it does not fail the run.
+    **No longer fire-and-forget.** It used to submit, record ``submitted: True``
+    and stop, which meant a capture archive.org accepted and then dropped was
+    indistinguishable from one it completed — and the report told the author the
+    citation had been "submitted for archiving", which reads as archived.
+    Three things establish the real outcome now, in the order they can:
+
+    1. An unauthenticated submission redirects to the snapshot it just wrote, so
+       ``wayback.submit`` returns a snapshot URL and the citation is archived
+       before this function returns. No waiting involved.
+    2. An authenticated submission returns a job id instead. Those get a bounded
+       same-run poll (``_poll_capture_outcomes``, ~45s for the whole pass).
+    3. Anything still running at the end stays *pending*, keeps its job id, and
+       is reconciled on the next run by ``_reconcile_prior_captures`` — which
+       also runs first here, so a still-running capture is not resubmitted and a
+       failed one is reported with archive.org's own reason.
+
+    Mutates each result's ``wayback`` dict in place: ``submitted``,
+    ``archive_outcome`` (see ``wayback.ARCHIVE_*``), ``archive_outcome_detail``,
+    ``submission_job_id`` where there is one, and the snapshot fields once a
+    snapshot actually exists. Never raises — every failure here degrades to
+    "not established", it does not fail the run.
     """
     creds = archive_org_creds or {}
     access_key = creds.get("access_key")
@@ -909,7 +1197,7 @@ def _submit_missing_archives(results, archive_org_creds=None):
     # readable later, and a snapshot older than the threshold predates whatever
     # the page says now. Submitting is fire-and-forget and costs nothing but the
     # request, so the only reason not to was that nobody wired it up.
-    targets = [
+    wants_archiving = [
         r
         for r in results
         if r.get("resolved")
@@ -918,11 +1206,46 @@ def _submit_missing_archives(results, archive_org_creds=None):
             r.get("wayback", {}).get("archived") is False
             or r.get("wayback", {}).get("snapshot_stale")
         )
-        # Never hand a non-public URL to archive.org. It could not archive one
-        # anyway, so the only effect would be transmitting an internal hostname
-        # and path to a third party that logs it.
-        and is_public_host(r["url"])
     ]
+
+    # Two different reasons to not submit, and they are not the same fact.
+    # ``is_public_host`` collapses them — it answers False both for "this is an
+    # internal address" and for "DNS did not resolve" — and the citation was
+    # then dropped from the batch with nothing recorded anywhere. Caught by a
+    # live run 2026-09-05: a transient resolver failure made one citation skip
+    # submission entirely, and the run reported it exactly as it reports a URL
+    # nobody needed to archive. That is the same silence this whole change is
+    # about, one step earlier in the pipeline.
+    targets = []
+    for entry in wants_archiving:
+        outcome = classify_host(entry["url"])
+        if outcome == HOST_PUBLIC:
+            targets.append(entry)
+            continue
+        wb = entry.setdefault("wayback", {})
+        wb["archive_outcome"] = wayback.ARCHIVE_NOT_ATTEMPTED
+        wb["archive_outcome_detail"] = (
+            # Never hand a non-public URL to archive.org. It could not archive
+            # one anyway, so the only effect would be transmitting an internal
+            # hostname and path to a third party that logs it.
+            "not submitted: the address is not public, and an internal host is "
+            "never handed to archive.org"
+            if outcome == HOST_NON_PUBLIC
+            else "not submitted: the hostname did not resolve when the run "
+            "reached the archiving pass, so archive.org was never asked"
+        )
+        log.info(
+            "Wayback submission not attempted for %s (%s)",
+            entry["url"],
+            outcome,
+        )
+    if not targets:
+        return
+
+    # Settle last run's unfinished business first: a capture still running does
+    # not want a second submission queued behind it, and one that failed has a
+    # reason worth reporting before we try again.
+    targets = _reconcile_prior_captures(targets, history_root, access_key, secret_key)
     if not targets:
         return
 
@@ -934,9 +1257,7 @@ def _submit_missing_archives(results, archive_org_creds=None):
         except Exception as e:
             log.warning(f"Wayback submission raised for {entry['url']}: {e}")
             sub = {"submitted": False, "error": str(e)}
-        entry["wayback"]["submitted"] = sub.get("submitted", False)
-        if sub.get("error"):
-            entry["wayback"]["submission_error"] = sub["error"]
+        _record_submission(entry, sub)
 
     # Bounded to _MAX_SUBMIT_PARALLEL concurrent requests via the semaphore,
     # same as the ThreadPoolExecutor form this replaces — a burst of unbounded
@@ -970,6 +1291,28 @@ def _submit_missing_archives(results, archive_org_creds=None):
     for url, (_, error) in outcomes.items():
         if error is not None:
             log.warning(f"Wayback submission abandoned for {url}: {error}")
+            # An abandoned submission established nothing at all. Left alone it
+            # would keep whatever `wayback` already said, which for these
+            # entries is "archived: False" — indistinguishable from a submission
+            # that ran and failed.
+            for entry in targets:
+                if entry["url"] == url and "archive_outcome" not in entry.get(
+                    "wayback", {}
+                ):
+                    wb = entry.setdefault("wayback", {})
+                    wb["submitted"] = False
+                    # Abandoned, not refused — same reasoning as a read timeout
+                    # in `submit`: we stopped waiting, which says nothing about
+                    # what archive.org did with the request.
+                    wb["archive_outcome"] = wayback.ARCHIVE_SUBMITTED
+                    wb["archive_outcome_detail"] = (
+                        f"the submission did not finish within "
+                        f"{_SUBMIT_TIMEOUT_SECONDS}s and was abandoned ({error}); "
+                        f"whether archive.org captured the page is unknown"
+                    )
+
+    # Bounded wait on anything archive.org queued rather than captured inline.
+    _poll_capture_outcomes(targets, access_key, secret_key)
 
 
 def _normalize_claim_entry(entry):
@@ -1099,5 +1442,7 @@ def resolve_citations(
         if bucket:
             result["fact_check_bucket"] = bucket
         resolved_results.append(result)
-    _submit_missing_archives(resolved_results, (api_keys or {}).get("archive_org"))
+    _submit_missing_archives(
+        resolved_results, (api_keys or {}).get("archive_org"), history_root
+    )
     return resolved_results

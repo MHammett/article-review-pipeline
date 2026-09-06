@@ -175,13 +175,34 @@ An `archived: false` entry is untouched by all of this: that is an answer, and o
 
 **Save Page Now submission.** After resolution finishes, any resolved citation whose URL is *not* yet archived gets submitted to archive.org's Save Page Now API. This runs as a follow-up pass at a lower concurrency than resolution itself (2 vs. 8), because each submission triggers a real page capture on archive.org's side rather than a cheap read.
 
-Submission is **fire-and-forget by design**. Captures run asynchronously and can take seconds to minutes, and the pipeline does not poll for completion — it won't block your run on someone else's crawler. The console reports it plainly:
+**Submitted is not archived, and the report no longer conflates the two.** This used to be fire-and-forget: the pipeline submitted, recorded `submitted: true`, and said "submitted for archiving" — which reads as *archived*. Nothing established that. A capture archive.org accepted and then dropped looked exactly like one it completed, run after run. Each citation now records an `archive_outcome`, and only one of its values claims a snapshot exists:
+
+| `archive_outcome` | Means | Snapshot URL? |
+| --- | --- | --- |
+| `archived` | archive.org named the snapshot it wrote | yes — reported and citable |
+| `pending` | capture queued, still running when the report was written | no |
+| `submitted` | accepted, no snapshot named and no job id to ask about | no |
+| `capture_failed` | accepted, then the capture failed — reason recorded | no |
+| `submit_failed` | archive.org refused the request itself | no |
+| `not_attempted` | never asked: non-public address, or the host did not resolve | no |
+
+How each is established depends on which endpoint the run can use:
+
+**Without credentials** the unauthenticated `GET /save/<url>` runs the capture inline and redirects to the resulting snapshot, so the snapshot URL is in hand before the call returns — no waiting, no polling, no next run. (Measured 2026-09-05: one 302 hop to a `/web/<timestamp>/<url>` minted seconds earlier.) The pipeline previously followed that redirect and discarded the URL.
+
+**With credentials** the SPN2 endpoint queues the capture and returns a job id instead. Those get a bounded same-run wait (~45s for the whole pass, sharing the pacing clock below), and anything still running when it expires stays `pending`, keeps its job id, and is reconciled on the *next* run: that run asks `/save/status/<job_id>` what became of it before resubmitting, so a capture that keeps failing is reported with archive.org's own reason instead of silently retrying forever. Note that the job-status endpoint is **credential-only** — it answers `401` to everyone else — which is why an unauthenticated run reads its answer off the redirect instead.
+
+Freshness is measured rather than assumed: a save can redirect to a pre-existing snapshot, and a four-year-old copy is still reported stale.
+
+The console says which happened:
 
 ```
-  3 resolved URL(s) submitted for archiving (check back later — archive.org processes asynchronously)
+  3 resolved URL(s) archived this run — snapshot URL recorded against the citation
+  1 resolved URL(s) submitted for archiving, capture NOT confirmed — reported as pending, not as archived
+  1 resolved URL(s) accepted by archive.org and then failed to capture — still not archived
 ```
 
-A later run's availability check will pick up the snapshot once it exists. A submission failure degrades to "still shows as unarchived" and never fails the run.
+Every failure here degrades to "not established" and never fails the run.
 
 **Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to read an archived snapshot of that same URL instead, and uses the snapshot's content for checksumming and relevance verification.
 
@@ -203,7 +224,7 @@ The same rules govern draft link validation (`analysis/links.py`), so a link rec
 
 ### archive.org credentials (optional)
 
-Submissions work without credentials via the unauthenticated capture endpoint, subject to tighter and less predictable rate limits. Supplying an S3-style key pair from <https://archive.org/account/s3.php> uses the authenticated SPN2 endpoint, which gets higher rate limits and returns a job id:
+Submissions work without credentials via the unauthenticated capture endpoint, subject to tighter and less predictable rate limits. Supplying an S3-style key pair from <https://archive.org/account/s3.php> uses the authenticated SPN2 endpoint, which gets higher rate limits and returns a job id. The trade-off is not one-directional: the unauthenticated endpoint captures inline and hands back a snapshot URL immediately, while the authenticated one queues the capture, so an authenticated run is the one that has to wait or reconcile. What credentials buy is the ability to *ask what happened* — `/save/status/<job_id>` is credential-only, so without them a queued capture can never be followed up:
 
 ```yaml
 api_keys:

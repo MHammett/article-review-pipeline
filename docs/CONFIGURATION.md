@@ -82,7 +82,7 @@ api_keys:
     secret_key: your_secret_key_here
 ```
 
-**`archive_org`** is optional. The pipeline submits unarchived citation URLs to archive.org either way; credentials just switch it from the unauthenticated capture endpoint to the authenticated SPN2 endpoint, which has higher rate limits. Get a key pair at <https://archive.org/account/s3.php>. See [CITATIONS.md](CITATIONS.md#wayback-machine-behavior) for what the submission actually does.
+**`archive_org`** is optional. The pipeline submits unarchived citation URLs to archive.org either way; credentials switch it from the unauthenticated capture endpoint to the authenticated SPN2 endpoint, which has higher rate limits, returns a job id, and — the part that matters for the report — lets the pipeline ask `/save/status/<job_id>` how a capture actually went. That endpoint is credential-only, so without a key pair a queued capture can never be followed up. Get a key pair at <https://archive.org/account/s3.php>. See [CITATIONS.md](CITATIONS.md#wayback-machine-behavior) for what the submission actually does.
 
 Note that the `mistral` key does double duty: besides its review passes, it powers the citation relevance check that gates the "verified" confidence tier. Without it, citations are fetched and checksummed but not relevance-confirmed — see [CITATIONS.md](CITATIONS.md#confidence-tiers).
 

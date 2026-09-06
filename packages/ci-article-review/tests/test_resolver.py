@@ -948,7 +948,7 @@ class TestKnownUrlWaybackFallback:
         ``wayback.submit`` is stubbed alongside ``check``. It has to be: a
         resolved result whose snapshot is absent or stale is a re-capture target
         for ``_submit_missing_archives``, and ``example.com`` passes
-        ``is_public_host``, so an unstubbed run asks archive.org's Save Page Now
+        the public-host guard, so an unstubbed run asks archive.org's Save Page Now
         API to really capture the page — measured at 21s of live network in a
         unit test, on every run of the suite.
         """
@@ -1200,16 +1200,20 @@ class TestArchiveSubmission:
     def _treat_fixture_urls_as_public(self):
         """Let the placeholder URLs in this class past the public-host check.
 
-        Submission now skips non-public URLs so an internal hostname is never
+        Submission skips non-public URLs so an internal hostname is never
         handed to archive.org (audit finding 20). These tests use unresolvable
         placeholders like ``https://x``, which the guard correctly rejects.
         Patching it here keeps the suite offline — the alternative is real DNS
         in unit tests — while the guard's own behaviour is covered in
         ``TestArchiveSubmissionSkipsNonPublicUrls`` below.
+
+        Patches ``classify_host`` rather than ``is_public_host``: the pass needs
+        to tell "internal address" apart from "DNS did not answer", which the
+        boolean cannot.
         """
         with patch(
-            "ci_article_review.adapters.citation.resolver.is_public_host",
-            return_value=True,
+            "ci_article_review.adapters.citation.resolver.classify_host",
+            return_value="public",
         ):
             yield
 
@@ -1865,3 +1869,361 @@ class TestWaybackRateLimitHandling:
             with patch.object(wayback.time, "sleep"):
                 wayback._get_availability("https://example.org", 10)
         assert wayback._rate_limited_lookups == 3
+
+
+class TestCaptureOutcomeIsRecorded:
+    """``submitted: True`` is a record of what the pipeline asked for, and the
+    report turned it into a claim about what happened. These pin the difference.
+
+    ``job_id`` was the sharpest form of the problem: collected on every
+    authenticated submission and read by nothing, so the only handle on a
+    capture's outcome was thrown away the instant it arrived.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _treat_fixture_urls_as_public(self):
+        with patch(
+            "ci_article_review.adapters.citation.resolver.classify_host",
+            return_value="public",
+        ):
+            yield
+
+    def _resolve(self, submit_result, **kwargs):
+        def fake_resolve(claim, api_key=None):
+            return {"found": True, "url": "https://x", "content": "data"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check",
+                side_effect=lambda url, timeout=10: {"archived": False},
+            ),
+            patch(
+                "ci_article_review.adapters.citation.sources.fred.resolve",
+                side_effect=fake_resolve,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value=submit_result,
+            ),
+        ):
+            return resolver.resolve_citations(["c"], _SOURCES, **kwargs)[0]
+
+    def test_the_job_id_is_written_to_the_citation(self):
+        """The whole point: a later run needs this to ask what happened."""
+        result = self._resolve(
+            {"submitted": True, "job_id": "spn2-abc123", "archived": False}
+        )
+        assert result["wayback"]["submission_job_id"] == "spn2-abc123"
+        assert result["wayback"]["archive_outcome"] == wayback.ARCHIVE_PENDING
+
+    def test_a_snapshot_url_is_what_makes_a_citation_archived(self):
+        result = self._resolve(
+            {
+                "submitted": True,
+                "job_id": None,
+                "archived": True,
+                "snapshot_url": "https://web.archive.org/web/20260905121627/https://x",
+                "snapshot_ts": "20260905121627",
+                "snapshot_age_days": 0,
+                "snapshot_stale": False,
+            }
+        )
+        assert result["wayback"]["archived"] is True
+        assert result["wayback"]["archive_outcome"] == wayback.ARCHIVE_ARCHIVED
+        assert result["wayback"]["snapshot_url"].startswith("https://web.archive.org")
+
+    def test_acceptance_without_a_snapshot_does_not_claim_archived(self):
+        """archive.org said yes and named nothing. That is not an archive."""
+        result = self._resolve({"submitted": True, "job_id": None, "archived": False})
+        assert result["wayback"]["archive_outcome"] == wayback.ARCHIVE_SUBMITTED
+        assert result["wayback"].get("archived") is not True
+
+    def test_a_timed_out_submission_is_unknown_not_failed(self):
+        result = self._resolve(
+            {
+                "submitted": False,
+                "job_id": None,
+                "error": "Read timed out. (read timeout=30)",
+                "outcome_unknown": True,
+            }
+        )
+        assert result["wayback"]["archive_outcome"] == wayback.ARCHIVE_SUBMITTED
+        assert "may have run anyway" in result["wayback"]["archive_outcome_detail"]
+
+    def test_a_refused_submission_is_recorded_as_such(self):
+        result = self._resolve(
+            {"submitted": False, "job_id": None, "error": "429 Too Many Requests"}
+        )
+        assert result["wayback"]["archive_outcome"] == wayback.ARCHIVE_SUBMIT_FAILED
+        assert "429" in result["wayback"]["archive_outcome_detail"]
+
+
+class TestSameRunCapturePolling:
+    """The bounded wait. Only reachable with credentials — archive.org's
+    job-status endpoint is 401 to everyone else."""
+
+    @pytest.fixture(autouse=True)
+    def _treat_fixture_urls_as_public(self):
+        with patch(
+            "ci_article_review.adapters.citation.resolver.classify_host",
+            return_value="public",
+        ):
+            yield
+
+    def _entry(self, job_id="spn2-abc123"):
+        return {
+            "url": "https://x",
+            "resolved": True,
+            "wayback": {"archived": False, "submission_job_id": job_id},
+        }
+
+    def test_a_capture_that_completes_in_the_window_is_reported_archived(self):
+        entry = self._entry()
+        status = {
+            "job_id": "spn2-abc123",
+            "state": "success",
+            "snapshot_url": "https://web.archive.org/web/20260905121627/https://x",
+            "snapshot_ts": "20260905121627",
+            "snapshot_age_days": 0,
+            "snapshot_stale": False,
+        }
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+            return_value=status,
+        ):
+            resolver._poll_capture_outcomes([entry], "AK", "SK")
+
+        assert entry["wayback"]["archived"] is True
+        assert entry["wayback"]["archive_outcome"] == wayback.ARCHIVE_ARCHIVED
+        assert entry["wayback"]["snapshot_url"] == status["snapshot_url"]
+
+    def test_a_capture_that_fails_reports_the_reason_not_silence(self):
+        entry = self._entry()
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+            return_value={
+                "job_id": "spn2-abc123",
+                "state": "failed",
+                "reason": "Cannot resolve host example.invalid.",
+            },
+        ):
+            resolver._poll_capture_outcomes([entry], "AK", "SK")
+
+        assert entry["wayback"]["archive_outcome"] == wayback.ARCHIVE_CAPTURE_FAILED
+        assert "Cannot resolve host" in entry["wayback"]["archive_outcome_detail"]
+        assert entry["wayback"].get("archived") is not True
+
+    def test_the_budget_is_a_ceiling_and_leaves_the_rest_pending(self):
+        """A capture still running when the budget expires stays pending and
+        keeps its job id — that is what the next run reconciles. It must not
+        silently become "archived" or "failed"."""
+        entry = self._entry()
+        calls = []
+
+        def always_pending(job_id, **kwargs):
+            calls.append(job_id)
+            return {"job_id": job_id, "state": "pending", "reason": "still working"}
+
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+                side_effect=always_pending,
+            ),
+            patch.object(resolver, "_CAPTURE_POLL_BUDGET_SECONDS", 0.05),
+        ):
+            resolver._poll_capture_outcomes([entry], "AK", "SK")
+
+        assert calls, "the budget should allow at least one attempt"
+        assert entry["wayback"]["archive_outcome"] == wayback.ARCHIVE_PENDING
+        assert entry["wayback"]["submission_job_id"] == "spn2-abc123"
+
+    def test_a_tripped_breaker_stops_the_pass_rather_than_asking_again(self):
+        """Each ask costs pacing budget to be told the same thing."""
+        entries = [self._entry("spn2-1"), self._entry("spn2-2")]
+        calls = []
+
+        def breaker(job_id, **kwargs):
+            calls.append(job_id)
+            return {
+                "job_id": job_id,
+                "state": "not_checked",
+                "reason": "skipped: archive.org rate limit tripped earlier this run",
+            }
+
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+            side_effect=breaker,
+        ):
+            resolver._poll_capture_outcomes(entries, "AK", "SK")
+
+        assert len(calls) == 1
+        assert entries[0]["wayback"]["archive_outcome"] == wayback.ARCHIVE_PENDING
+
+    def test_without_credentials_nothing_is_asked(self):
+        entry = self._entry()
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status"
+        ) as mock_status:
+            resolver._poll_capture_outcomes([entry], None, None)
+        mock_status.assert_not_called()
+
+    def test_polling_never_raises_into_citation_resolution(self):
+        entry = self._entry()
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+            side_effect=RuntimeError("boom"),
+        ):
+            resolver._poll_capture_outcomes([entry], "AK", "SK")
+        assert entry["resolved"] is True
+
+
+class TestNextRunReconciliation:
+    """A capture archive.org accepted and dropped shows up next run as "not
+    archived", gets resubmitted, and is dropped again — with every report in the
+    sequence saying the same reassuring thing. Asking the job what happened is
+    what breaks that loop."""
+
+    def _report(self, tmp_path, slug, run, citation):
+        d = tmp_path / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"run_{run}_report.json").write_text(
+            json.dumps(
+                {"run_number": run, "section_9_citations": [citation]},
+            ),
+            encoding="utf-8",
+        )
+
+    def test_the_index_finds_captures_left_unresolved(self, tmp_path):
+        self._report(
+            tmp_path,
+            "a",
+            1,
+            {
+                "url": "https://x",
+                "wayback": {
+                    "submission_job_id": "spn2-abc",
+                    "archive_outcome": wayback.ARCHIVE_PENDING,
+                },
+            },
+        )
+        index = resolver.build_pending_capture_index(str(tmp_path))
+        assert index["https://x"]["job_id"] == "spn2-abc"
+        assert index["https://x"]["run_number"] == 1
+
+    def test_settled_captures_are_not_re_asked(self, tmp_path):
+        """A capture already known to have succeeded or failed has nothing left
+        to ask about, and asking spends pacing budget on a closed question."""
+        for i, outcome in enumerate(
+            (wayback.ARCHIVE_ARCHIVED, wayback.ARCHIVE_CAPTURE_FAILED), start=1
+        ):
+            self._report(
+                tmp_path,
+                f"a{i}",
+                i,
+                {
+                    "url": f"https://x{i}",
+                    "wayback": {
+                        "submission_job_id": "spn2-abc",
+                        "archive_outcome": outcome,
+                    },
+                },
+            )
+        assert resolver.build_pending_capture_index(str(tmp_path)) == {}
+
+    def _targets(self):
+        return [{"url": "https://x", "resolved": True, "wayback": {"archived": False}}]
+
+    def _reconcile(self, tmp_path, status):
+        self._report(
+            tmp_path,
+            "a",
+            7,
+            {
+                "url": "https://x",
+                "wayback": {
+                    "submission_job_id": "spn2-abc",
+                    "archive_outcome": wayback.ARCHIVE_PENDING,
+                },
+            },
+        )
+        targets = self._targets()
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+            return_value=status,
+        ):
+            remaining = resolver._reconcile_prior_captures(
+                targets, str(tmp_path), "AK", "SK"
+            )
+        return targets[0], remaining
+
+    def test_a_capture_that_landed_later_is_not_resubmitted(self, tmp_path):
+        entry, remaining = self._reconcile(
+            tmp_path,
+            {
+                "job_id": "spn2-abc",
+                "state": "success",
+                "snapshot_url": "https://web.archive.org/web/20260905121627/https://x",
+                "snapshot_ts": "20260905121627",
+                "snapshot_age_days": 0,
+                "snapshot_stale": False,
+            },
+        )
+        assert remaining == []
+        assert entry["wayback"]["archived"] is True
+        assert entry["wayback"]["archive_outcome"] == wayback.ARCHIVE_ARCHIVED
+
+    def test_a_capture_still_running_is_not_queued_behind_itself(self, tmp_path):
+        entry, remaining = self._reconcile(
+            tmp_path,
+            {"job_id": "spn2-abc", "state": "pending", "reason": "still working"},
+        )
+        assert remaining == []
+        assert entry["wayback"]["archive_outcome"] == wayback.ARCHIVE_PENDING
+        assert entry["wayback"]["submission_job_id"] == "spn2-abc"
+
+    def test_a_failed_capture_is_retried_and_the_reason_carried_forward(self, tmp_path):
+        """Retrying is right; retrying silently is what hid the problem."""
+        entry, remaining = self._reconcile(
+            tmp_path,
+            {
+                "job_id": "spn2-abc",
+                "state": "failed",
+                "reason": "error:soft-time-limit-exceeded",
+            },
+        )
+        assert remaining == [entry]
+        assert (
+            entry["wayback"]["prior_capture_failure"]["reason"]
+            == "error:soft-time-limit-exceeded"
+        )
+        assert entry["wayback"]["prior_capture_failure"]["run_number"] == 7
+
+    def test_an_unreadable_job_just_submits_again(self, tmp_path):
+        """Exactly what would have happened before this existed."""
+        entry, remaining = self._reconcile(
+            tmp_path,
+            {"job_id": "spn2-abc", "state": "unknown", "reason": "connection reset"},
+        )
+        assert remaining == [entry]
+
+    def test_reconciliation_is_skipped_without_credentials(self, tmp_path):
+        targets = self._targets()
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.check_job_status"
+        ) as mock_status:
+            remaining = resolver._reconcile_prior_captures(
+                targets, str(tmp_path), None, None
+            )
+        assert remaining == targets
+        mock_status.assert_not_called()
+
+    def test_unreadable_history_does_not_fail_the_run(self, tmp_path):
+        targets = self._targets()
+        with patch(
+            "ci_article_review.adapters.citation.resolver.build_pending_capture_index",
+            side_effect=OSError("history unreadable"),
+        ):
+            remaining = resolver._reconcile_prior_captures(
+                targets, str(tmp_path), "AK", "SK"
+            )
+        assert remaining == targets
