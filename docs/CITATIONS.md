@@ -258,6 +258,10 @@ A difference is reported, not judged. It has two innocent explanations (the page
 
 **Snapshots that captured an error page.** The availability API reports each capture's own HTTP status, and it was being discarded. A pre-existing snapshot can be a capture of a 403 or 404 — "archived" is then true and useless, because what is preserved is the refusal, not the document. Those are now flagged outright. The pipeline's own captures cannot produce one (`capture_all=0`), but pre-existing snapshots are outside its control.
 
+**Was that us, or archive.org?** A 520, a read timeout and a refused connection look identical from inside the pipeline, and each is equally consistent with "we asked too often" and "the service is having a bad afternoon" — all three were seen in a single afternoon of real runs. When at least one submission fails, the run asks `GET /save/status/system` once and records the answer against the failed entries, so a failure reads either *"archive.org reported its capture system healthy at the time"* (it was us) or *"...reported its capture system as degraded — this was the service, not the pipeline"*. A healthy run never makes the call, and an unknown verdict adds nothing rather than appending "we could not tell" to a failure the reader is already looking at. Credential-only, like the other status endpoints.
+
+**Queued captures expire after 7 days.** A job archive.org has forgotten would otherwise stay in the pending index permanently, and every future run would spend a paced status call rediscovering that. Captures finish in seconds to minutes; a week is generous.
+
 **Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to obtain the document another way, and uses whatever it gets for checksumming and relevance verification. There are two tiers, tried in this order:
 
 1. **The live page behind a browser TLS fingerprint** — 403 only. See "Escalating past a bot block" below.

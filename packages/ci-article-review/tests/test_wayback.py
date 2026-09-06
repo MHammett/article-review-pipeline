@@ -1156,3 +1156,96 @@ class TestSnapshotStatusIsKept:
         r = self._check(self._closest())
         assert "snapshot_status" not in r
         assert "snapshot_is_error_capture" not in r
+
+
+class TestSystemStatus:
+    """A 520, a read timeout and a refused connection look identical from inside
+    the pipeline, and each is equally consistent with "we asked too often" and
+    "the service is unwell". This is what tells them apart."""
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    LIVE = {
+        "recent_captures": 941,
+        "status": "ok",
+        "queues": {"spn2-captures": 0, "spn2-api": 0, "spn2-screenshots": 0},
+    }
+
+    def _call(self, payload=None, side_effect=None):
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_json_response(payload) if payload is not None else None,
+                side_effect=side_effect,
+            ) as mock_get,
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+        ):
+            return wayback.system_status(), mock_get
+
+    def test_the_real_payload_shape_parses(self):
+        """Measured live 2026-09-06 — verbatim what archive.org sent."""
+        st, _ = self._call(self.LIVE)
+        assert st["known"] is True
+        assert st["ok"] is True
+        assert st["recent_captures"] == 941
+        assert st["busiest_queue"] is None
+
+    def test_the_deepest_backlog_is_identified(self):
+        st, _ = self._call(
+            {**self.LIVE, "queues": {"spn2-captures": 12, "spn2-api": 300}}
+        )
+        assert st["busiest_queue"] == ("spn2-api", 300)
+
+    def test_a_degraded_service_is_reported_as_such(self):
+        st, _ = self._call({**self.LIVE, "status": "degraded"})
+        assert st["ok"] is False
+        assert st["status"] == "degraded"
+
+    def test_a_tripped_breaker_asks_nothing(self):
+        """Diagnosis is not exempt from the budget it is diagnosing."""
+        wayback._rate_limited_lookups = wayback._CIRCUIT_TRIP_AFTER
+        st, mock_get = self._call(self.LIVE)
+        assert st["known"] is False
+        mock_get.assert_not_called()
+
+    def test_a_transport_failure_is_a_sentence(self):
+        st, _ = self._call(side_effect=requests.exceptions.ConnectionError("x"))
+        assert st["known"] is False
+        assert "could not reach archive.org" in st["reason"]
+
+
+class TestServiceHealthNote:
+    def test_an_unwell_service_takes_the_blame(self):
+        note = wayback.service_health_note(
+            {"known": True, "ok": False, "status": "degraded"}
+        )
+        assert "degraded" in note
+        assert "not the pipeline" in note
+
+    def test_a_healthy_service_says_so(self):
+        note = wayback.service_health_note(
+            {"known": True, "ok": True, "status": "ok", "busiest_queue": None}
+        )
+        assert "healthy" in note
+
+    def test_healthy_but_backed_up_is_worth_saying(self):
+        note = wayback.service_health_note(
+            {
+                "known": True,
+                "ok": True,
+                "status": "ok",
+                "busiest_queue": ("spn2-api", 900),
+            }
+        )
+        assert "busy" in note
+        assert "900" in note
+
+    def test_an_unknown_verdict_adds_nothing(self):
+        """Appending "we could not tell" to a failure the reader is already
+        looking at is noise, not information."""
+        assert wayback.service_health_note({"known": False}) is None
+        assert wayback.service_health_note(None) is None
