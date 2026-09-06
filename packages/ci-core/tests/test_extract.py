@@ -314,6 +314,52 @@ class TestExtractArticleStillWorks:
         assert body == "trafilatura body"
 
 
+#: Built rather than written so no tool in the chain can normalise it away.
+_FFFD = chr(0xFFFD)
+
+
+class TestBinaryMislabelledAsText:
+    """The gap left after PDFs were routed by magic bytes.
+
+    A body with no angle brackets cannot be caught by the HTML path, and
+    without PDF magic nothing else looks at it -- so a server that labels a
+    binary file ``text/plain`` used to hand the verifier a page of mojibake.
+    That is the raw-PDF failure again, minus the signature that made it
+    obvious.
+    """
+
+    #: Binary that deliberately contains no "<" or ">".
+    RAW = bytes(b for b in range(256) if b not in (0x3C, 0x3E)) * 4
+
+    def test_binary_labelled_text_plain_yields_nothing(self):
+        text, kind = extract.extract_response_text(
+            self.RAW, content_type="text/plain", url="https://x.example/d"
+        )
+        assert kind == "text"
+        assert text == ""
+
+    def test_binary_with_no_content_type_yields_nothing(self):
+        text, _kind = extract.extract_response_text(self.RAW, url="https://x.example/d")
+        assert text == ""
+
+    def test_real_prose_with_one_bad_byte_is_kept(self):
+        """A single mojibake in a long page is not grounds to discard it."""
+        prose = ("The commission published its findings in April. " * 20) + _FFFD
+        assert not extract.looks_like_binary(prose)
+        text, kind = extract.extract_response_text(
+            prose.encode("utf-8"), content_type="text/plain"
+        )
+        assert kind == "text"
+        assert text.startswith("The commission published")
+
+    def test_clean_prose_is_not_binary(self):
+        assert not extract.looks_like_binary("Perfectly ordinary text.")
+        assert not extract.looks_like_binary("")
+
+    def test_mostly_replacement_characters_is_binary(self):
+        assert extract.looks_like_binary("ab" + _FFFD * 30)
+
+
 class TestBodySelection:
     """trafilatura is preferred, but not when it has lost most of the page.
 

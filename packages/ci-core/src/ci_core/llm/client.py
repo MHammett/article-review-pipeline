@@ -96,6 +96,7 @@ import httpx
 import litellm
 
 from .. import redact
+from .. import text_repair
 from . import cache as cache_mod
 from . import schema as schema_mod
 from .json_utils import extract_json_with_salvage
@@ -736,17 +737,23 @@ def _consume_completion_stream(stream, first_byte, gap):
                 if isinstance(entry, dict) and entry:
                     grounding_meta = entry
 
-    return {
-        "content": "".join(parts),
-        "usage": usage,
-        "finish_reason": finish_reason,
-        "citations": citations,
-        "search_results": search_results,
-        # Only the Responses API surfaces web-search events; this keeps the two
-        # consumers returning the same keys so _extras_from needs no branch.
-        "web_search_used": False,
-        "grounding_metadata": grounding_meta,
-    }
+    # Repaired here, at the point the provider's bytes become our strings,
+    # so everything downstream -- the JSON parse, the text shim,
+    # search-result snippets -- sees the same corrected text. See
+    # ci_core.text_repair for what Perplexity does to General Punctuation.
+    return text_repair.repair_tree(
+        {
+            "content": "".join(parts),
+            "usage": usage,
+            "finish_reason": finish_reason,
+            "citations": citations,
+            "search_results": search_results,
+            # Only the Responses API surfaces web-search events; this keeps the two
+            # consumers returning the same keys so _extras_from needs no branch.
+            "web_search_used": False,
+            "grounding_metadata": grounding_meta,
+        }
+    )
 
 
 def _consume_responses_stream(stream, first_byte, gap):
@@ -801,23 +808,25 @@ def _consume_responses_stream(stream, first_byte, gap):
                 if incomplete is not None:
                     status = getattr(incomplete, "reason", None) or status
 
-    return {
-        "content": "".join(parts),
-        "usage": usage,
-        # The Responses API reports truncation as an incomplete status with
-        # reason "max_output_tokens" rather than finish_reason="length".
-        "finish_reason": "length" if status == "max_output_tokens" else status,
-        "reasoning_summary": "".join(reasoning_parts),
-        # Usually empty even on a grounded call, and that is the provider's
-        # doing rather than a gap here: OpenAI attaches url_citation
-        # annotations to cited spans of prose, and every review domain asks for
-        # a JSON schema, which has no prose to cite. Measured 2026-09-04 —
-        # search ran, the answer was right, `annotations` came back `[]`.
-        "citations": citations,
-        "search_results": [],
-        "web_search_used": searched,
-        "grounding_metadata": {},
-    }
+    return text_repair.repair_tree(
+        {
+            "content": "".join(parts),
+            "usage": usage,
+            # The Responses API reports truncation as an incomplete status with
+            # reason "max_output_tokens" rather than finish_reason="length".
+            "finish_reason": "length" if status == "max_output_tokens" else status,
+            "reasoning_summary": "".join(reasoning_parts),
+            # Usually empty even on a grounded call, and that is the provider's
+            # doing rather than a gap here: OpenAI attaches url_citation
+            # annotations to cited spans of prose, and every review domain asks for
+            # a JSON schema, which has no prose to cite. Measured 2026-09-04 —
+            # search ran, the answer was right, `annotations` came back `[]`.
+            "citations": citations,
+            "search_results": [],
+            "web_search_used": searched,
+            "grounding_metadata": {},
+        }
+    )
 
 
 def _usage_as_dict(usage):
