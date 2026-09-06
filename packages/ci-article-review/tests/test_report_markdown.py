@@ -2050,6 +2050,124 @@ class TestWaybackSummaryDoesNotDriftFromTheAdapter:
             )
 
 
+class TestHandoffMetadataGapsBlock:
+    """The gap list has to reach the report, grouped and actionable.
+
+    ``handoff_gaps`` builds the entries; this is the half that decides whether
+    the author ever sees them. A report that carries ``handoff_gaps`` in its
+    JSON and renders nothing is exactly the silent degradation the feature was
+    built to end, moved one layer out.
+    """
+
+    GAPS = [
+        {
+            "field": "primary_claim",
+            "label": "PRIMARY CLAIM",
+            "severity": "critical",
+            "impact": "Three domains graded the draft against a claim they inferred.",
+            "domains": ["argument_integrity", "completeness", "red_team"],
+            "sections": ["SECTION 4: Argument Integrity"],
+            "suggestion": "PRIMARY CLAIM\nThe figures do not transfer.",
+            "suggestion_basis": "the draft's opening paragraph",
+            "guidance": None,
+            "placeholder": False,
+        },
+        {
+            "field": "known_gaps",
+            "label": "KNOWN GAPS",
+            "severity": "degrading",
+            "impact": "completeness could not tell an accepted gap from a missed one.",
+            "domains": ["completeness"],
+            "sections": ["SECTION 5: Completeness and Framing"],
+            "suggestion": None,
+            "suggestion_basis": None,
+            "guidance": "List what you know is missing and why.",
+            "placeholder": False,
+        },
+    ]
+
+    def test_no_block_when_the_handoff_was_complete(self):
+        md = render_report_markdown(_base_report())
+        assert "Handoff metadata gaps" not in md
+
+    def test_the_block_carries_impact_and_a_pasteable_proposal(self):
+        md = render_report_markdown(_base_report(handoff_gaps=self.GAPS))
+        assert "## ⚠ Handoff metadata gaps (2)" in md
+        assert "Three domains graded the draft against a claim they inferred." in md
+        assert "```\nPRIMARY CLAIM\nThe figures do not transfer.\n```" in md
+        assert "the draft's opening paragraph" in md
+
+    def test_a_field_with_no_candidate_still_says_what_to_add(self):
+        md = render_report_markdown(_base_report(handoff_gaps=self.GAPS))
+        assert "*What to add: List what you know is missing and why.*" in md
+
+    def test_the_block_disclaims_that_proposals_were_used(self):
+        """The one sentence that must never be dropped from this block."""
+        md = render_report_markdown(_base_report(handoff_gaps=self.GAPS))
+        assert "Nothing proposed here was used in the review" in md
+        assert "not used in this run" in md
+
+    def test_entries_are_grouped_by_severity_worst_first(self):
+        md = render_report_markdown(_base_report(handoff_gaps=self.GAPS))
+        assert md.index("Changed what the models were asked") < md.index(
+            "Context the models would have used"
+        )
+
+    def test_a_left_in_placeholder_is_called_out_on_the_heading(self):
+        gaps = [{**self.GAPS[0], "placeholder": True}]
+        md = render_report_markdown(_base_report(handoff_gaps=gaps))
+        assert "left as its template placeholder" in md
+
+
+class TestSectionsNameWhatTheyWereBuiltWithout:
+    """Per-section notes, so a finding is read against what the pass was told."""
+
+    GAP = {
+        "field": "primary_claim",
+        "label": "PRIMARY CLAIM",
+        "severity": "critical",
+        "impact": "The claim was empty.",
+        "domains": ["completeness"],
+        "sections": ["SECTION 5: Completeness and Framing"],
+        "suggestion": None,
+        "suggestion_basis": None,
+        "guidance": "State the claim.",
+        "placeholder": False,
+    }
+
+    def test_the_note_lands_on_the_section_whose_domain_lost_the_field(self):
+        md = render_report_markdown(_base_report(handoff_gaps=[self.GAP]))
+        section_5 = md.split("## SECTION 5")[1].split("## SECTION")[0]
+        assert "Built without `PRIMARY CLAIM`" in section_5
+
+    def test_the_note_stays_off_sections_the_field_never_reached(self):
+        md = render_report_markdown(_base_report(handoff_gaps=[self.GAP]))
+        section_3 = md.split("## SECTION 3")[1].split("## SECTION")[0]
+        assert "Built without" not in section_3
+
+    def test_a_failed_model_and_a_missing_field_both_get_said(self):
+        """They are not alternatives — one run can hit both, and both matter."""
+        md = render_report_markdown(
+            _base_report(
+                handoff_gaps=[self.GAP],
+                model_failures=["openai:completeness"],
+                model_failure_details=[
+                    {
+                        "pass": "openai:completeness",
+                        "model": "gpt-5.5",
+                        "domain": "completeness",
+                        "section": "SECTION 5: Completeness and Framing",
+                        "error": "timeout",
+                        "elapsed_seconds": 90.0,
+                    }
+                ],
+            )
+        )
+        section_5 = md.split("## SECTION 5")[1].split("## SECTION")[0]
+        assert "Built without gpt-5.5" in section_5
+        assert "Built without `PRIMARY CLAIM`" in section_5
+
+
 class TestArchiveOutcomeWording:
     """ "Submitted" is a record of what was asked for. "Archived" is a claim
     about the world. The renderer used to print the first and mean the second.
