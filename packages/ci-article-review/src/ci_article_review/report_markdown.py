@@ -938,6 +938,93 @@ def _render_mismatch_entry(citation):
     return lines
 
 
+def _render_reference_list(citations):
+    """Every cited address once, with its archive copy, ready to publish.
+
+    The pairing already existed per citation, but only inside the diagnostic
+    entries — spread over five disposition buckets and interleaved with claim
+    text, verification tiers and relevance notes. That is the right shape for
+    deciding whether to trust a citation and the wrong shape for the job the
+    author actually has next, which is putting both addresses into the article.
+    Getting a reference list out of it meant reading the whole section and
+    transcribing by hand, and a source backing three claims appeared three
+    times.
+
+    So: one entry per address, in the order first cited, deduplicated, split by
+    whether an archive copy exists. Sources with no snapshot are listed rather
+    than dropped — the author needs to know which references the article cannot
+    carry an archive link for, and silence would read as "all of them are fine".
+
+    Where the archive was checked against the live page (see
+    ``resolver._verify_archive_matches``) an unconfirmed pairing is marked. It
+    is the only part of this list that is a judgement rather than a fact, and it
+    is the one the author would otherwise publish blind.
+    """
+    paired, live_only, seen = [], [], set()
+    for c in citations:
+        live, archive = _citation_pair(c)
+        if not live or live in seen:
+            continue
+        seen.add(live)
+        (paired if archive else live_only).append((live, archive, c))
+
+    if not paired and not live_only:
+        return []
+
+    lines = [
+        f"### Reference list — live and archived addresses "
+        f"({len(paired) + len(live_only)} source(s))",
+        "",
+        "Each source once, in the order first cited. Paste-ready: the archive "
+        "address is what keeps the citation readable after the live page moves, "
+        "changes, or starts refusing readers.",
+        "",
+    ]
+
+    if paired:
+        for i, (live, archive, c) in enumerate(paired, 1):
+            lines.append(f"{i}. {live}")
+            wb = c.get("wayback") or {}
+            note = ""
+            if wb.get("snapshot_is_error_capture"):
+                note = (
+                    f"  — **do not publish this pairing**: the snapshot captured "
+                    f"an HTTP {wb.get('snapshot_status')} response, not the document"
+                )
+            elif c.get("archive_match") == _MATCH_DIFFERS:
+                note = "  — **archive does not match the live page**; check before publishing"
+            elif c.get("archive_match") == _MATCH_UNCHECKED:
+                note = "  — archive not verified against the live page this run"
+            elif wb.get("snapshot_stale"):
+                note = "  — snapshot is stale; re-archive before relying on it"
+            lines.append(f"   archived: {archive}{note}")
+        lines.append("")
+
+    if live_only:
+        lines.append(
+            f"**No archive copy ({len(live_only)})** — publishable only as a "
+            f"live link, and only as durable as that link:"
+        )
+        for live, _archive, c in live_only:
+            wb = c.get("wayback")
+            if not isinstance(wb, dict):
+                why = "archive.org was never asked about this URL"
+            elif wb.get("archived") is None:
+                why = "the archive.org lookup did not complete this run"
+            elif wb.get("archive_outcome") == _ARCHIVE_CAPTURE_FAILED:
+                why = "archive.org tried to capture it and could not"
+            elif wb.get("archive_outcome") in (_ARCHIVE_PENDING, _ARCHIVE_SUBMITTED):
+                why = "submitted for archiving this run; no snapshot yet"
+            elif wb.get("archive_outcome") == _ARCHIVE_NOT_ATTEMPTED:
+                why = "not submitted for archiving"
+            else:
+                why = "archive.org has no snapshot of this URL"
+            lines.append(f"- {live} — {why}")
+        lines.append("")
+
+    return lines
+
+
 def _render_section_9(citations):
     # The heading carries the framing deliberately. "Citations" alone reads as a
     # list of sources backing the article, which invites more confidence than
@@ -993,6 +1080,10 @@ def _render_section_9(citations):
     for key, label in _DISPOSITIONS:
         lines.append(f"| {label} | {len(grouped[key])} |")
     lines.append("")
+
+    # The deliverable, before the diagnostics. Everything below this point helps
+    # the author decide what to trust; this is what they act on once they have.
+    lines.extend(_render_reference_list(citations))
 
     # Relate the fact-check pass's own verdict to whether anything was retrieved.
     # These are independent — one is model judgment, the other is retrieval — and

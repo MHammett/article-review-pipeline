@@ -222,6 +222,24 @@ Deliberately not set: `email_result` and `wacz` (archive.org emails the account 
 
 Every concurrency number governing archiving was otherwise invented. Before submitting, the run asks: if the daily quota is exhausted, nothing is submitted and each citation says so with the quota figures — rather than the author reading a batch of failures. If fewer capture slots are free than the static ceiling, the batch narrows to match. A reading can only ever make the run *more* cautious; it never widens past the static bound, so a stale or wrong answer cannot make things worse. Without credentials the endpoint answers 401 and the run behaves exactly as before.
 
+**Reference list for publication.** Section 9 opens with every cited address, once each, in the order first cited, paired with its archive copy:
+
+```
+### Reference list - live and archived addresses (3 source(s))
+
+1. https://www.iana.org/help/example-domains
+   archived: http://web.archive.org/web/20260905123736/https://www.iana.org/help/example-domains
+2. https://www.rfc-editor.org/rfc/rfc2606.html
+   archived: http://web.archive.org/web/20260830225036/https://www.rfc-editor.org/rfc/rfc2606.html
+
+**No archive copy (1)** - publishable only as a live link:
+- https://example.org/x - archive.org tried to capture it and could not
+```
+
+The pairing was always present per citation, but only inside the diagnostic entries below - spread over five disposition buckets and interleaved with claim text, verification tiers and relevance notes. That is the right shape for deciding whether to trust a citation and the wrong shape for putting both addresses into the article. A source backing three claims appeared three times; here it appears once.
+
+Sources with no snapshot are listed rather than dropped, each with the specific reason, because the author needs to know which references the article cannot carry an archive link for. A pairing that was not confirmed against the live page, captured an error page, or is stale is marked inline - those are the ones that should not be published as-is.
+
 **Does the archive say what the live page said?** The report tells you to *cite both* the live URL and the archive copy. That is a recommendation you act on, and nothing used to establish that the two agree — a snapshot of a paywall, a cookie wall, a bot block, or a much older version of the page renders exactly like a good one.
 
 Each resolved citation's snapshot is now fetched and compared against the same checksum the live fetch produced. It works the same whether this run created the snapshot or it already existed.
