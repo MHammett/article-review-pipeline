@@ -4,6 +4,7 @@ import logging
 import secrets
 import threading
 import time
+from datetime import datetime, timezone
 
 
 from ci_core.concurrency import run_all_with_timeout
@@ -1189,6 +1190,39 @@ def _record_job_status(entry, status):
     return state
 
 
+#: How long a queued capture stays worth asking about.
+#:
+#: SPN2 captures finish in seconds to minutes — one measured live at ~15s. A job
+#: still unresolved after a week is not going to resolve; archive.org has either
+#: forgotten it or lost it. Without a bound such a job stays in the index
+#: permanently, and every future run spends a paced status call rediscovering
+#: that, forever, for a citation that will meanwhile have been resubmitted and
+#: archived by some other route. The index scans all history — 50 reports and
+#: 2,185 citations in this repo's main checkout already — so "forever" is the
+#: operative word.
+_PENDING_CAPTURE_MAX_AGE_DAYS = 7
+
+
+def _report_age_days(entry):
+    """Whole days since a history entry was generated, or None if unknowable.
+
+    ``history_analytics._parse_timestamp`` returns a *naive* datetime when the
+    report's ``generated`` field carries no offset, and an aware one when it
+    falls back to file mtime. Subtracting one from the other raises, so the
+    naive case is read as UTC rather than left to blow up on whichever report
+    happens to come first.
+    """
+    ts = entry.get("timestamp")
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    try:
+        return (datetime.now(timezone.utc) - ts).days
+    except (TypeError, OverflowError):  # pragma: no cover - defensive
+        return None
+
+
 def build_pending_capture_index(history_root=None):
     """url -> most recent prior ``{job_id, article_slug, run_number, generated}``
     for a capture a previous run left unresolved.
@@ -1207,6 +1241,11 @@ def build_pending_capture_index(history_root=None):
 
     index = {}
     for entry in history_analytics.load_reports(history_root):
+        age = _report_age_days(entry)
+        if age is not None and age > _PENDING_CAPTURE_MAX_AGE_DAYS:
+            # Too old to still be running. Asking costs a paced call to be told
+            # what the calendar already says.
+            continue
         for c in entry["report"].get("section_9_citations") or []:
             url = c.get("url")
             wb = c.get("wayback") or {}
@@ -1288,6 +1327,44 @@ def _reconcile_prior_captures(targets, history_root, access_key, secret_key):
                 }
             still_to_submit.append(entry)
     return still_to_submit
+
+
+def _note_service_health(entries, access_key, secret_key):
+    """When archiving went wrong, say whether archive.org was the reason.
+
+    A 520, a read timeout and a refused connection look identical from inside
+    this pipeline, and each is equally consistent with "we asked too often" and
+    with "the service is having a bad afternoon". Reporting them without that
+    distinction leaves the author to guess, and guessing wrong in the flattering
+    direction is how a service outage gets written down as a broken citation.
+    All three were seen in a single afternoon of real runs.
+
+    One call, and only when at least one submission has already failed — a run
+    where everything archived cleanly pays nothing for it.
+    """
+    failed = [
+        e
+        for e in entries
+        if (e.get("wayback") or {}).get("archive_outcome")
+        in (wayback.ARCHIVE_SUBMIT_FAILED, wayback.ARCHIVE_SUBMITTED)
+    ]
+    if not failed:
+        return
+    try:
+        status = wayback.system_status(access_key=access_key, secret_key=secret_key)
+        note = wayback.service_health_note(status)
+    except Exception as exc:  # pragma: no cover - system_status swallows
+        log.debug("Wayback service-status lookup raised: %s", exc)
+        return
+    if not note:
+        return
+    for entry in failed:
+        wb = entry["wayback"]
+        detail = (wb.get("archive_outcome_detail") or "").rstrip()
+        wb["archive_outcome_detail"] = (
+            f"{detail.rstrip('.')}. {note}." if detail else f"{note}."
+        )
+        wb["archive_service_ok"] = bool(status.get("ok"))
 
 
 def _poll_capture_outcomes(entries, access_key, secret_key):
@@ -1526,6 +1603,10 @@ def _submit_missing_archives(results, archive_org_creds=None, history_root=None)
                         f"{_SUBMIT_TIMEOUT_SECONDS}s and was abandoned ({error}); "
                         f"whether archive.org captured the page is unknown"
                     )
+
+    # After the abandoned-submission handler above, so entries it just marked
+    # are included in the question "was that us or them?".
+    _note_service_health(targets, access_key, secret_key)
 
     # Bounded wait on anything archive.org queued rather than captured inline.
     _poll_capture_outcomes(targets, access_key, secret_key)

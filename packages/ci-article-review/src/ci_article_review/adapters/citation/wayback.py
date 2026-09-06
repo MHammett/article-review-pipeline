@@ -18,6 +18,7 @@ _AVAILABILITY_API = "https://archive.org/wayback/available"
 _SAVE_API = "https://web.archive.org/save"
 _SAVE_STATUS_API = "https://web.archive.org/save/status"
 _SAVE_USER_STATUS_API = "https://web.archive.org/save/status/user"
+_SAVE_SYSTEM_STATUS_API = "https://web.archive.org/save/status/system"
 _STALE_DAYS = (
     180  # default — overridden by pipeline.wayback_snapshot_stale_days in user.yaml
 )
@@ -174,6 +175,12 @@ _BACKOFF_BASE_SECONDS = 5.0
 #: ``_MAX_ATTEMPTS`` retries inside one lookup are a single refusal. (Counting
 #: attempts made this trip after two lookups rather than five.)
 _CIRCUIT_TRIP_AFTER = 5
+
+#: Queue depth at which archive.org counts as busy rather than merely up.
+#: Measured healthy 2026-09-06 with every one of its thirteen capture queues
+#: at zero, so any sustained backlog is worth telling the reader about — it
+#: is the difference between 'your citation failed' and 'everyone's did'.
+_BUSY_QUEUE_DEPTH = 50
 
 _pace_lock = threading.Lock()
 _last_call_at = 0.0
@@ -906,6 +913,106 @@ def capture_capacity(timeout=15, access_key=None, secret_key=None):
         "known": True,
         "reason": None,
     }
+
+
+def system_status(timeout=15, access_key=None, secret_key=None):
+    """Is archive.org's capture system healthy, or are we the problem? Never raises.
+
+    ``GET /save/status/system``. Measured live 2026-09-06::
+
+        {"recent_captures":941,"status":"ok","queues":{"spn2-captures":0, ...13 queues}}
+
+    Why this is worth asking. When archiving degrades, everything the pipeline
+    can see looks the same from the inside: a 520, a read timeout, a refused
+    connection. Those are equally consistent with "we asked too often" and with
+    "the service is having a bad afternoon", and the run has been reporting them
+    as though the distinction did not exist. It is the same misdiagnosis as
+    treating a User-Agent block as rate limiting — the fix for one is to back
+    off, and the fix for the other is to wait and stop blaming yourself.
+
+    Asked once per run and only when something has already gone wrong, so a
+    healthy run pays nothing for it.
+
+    Returns a dict with:
+      ok               bool | None — archive.org's own health verdict
+      status           str        — the raw status string it reported
+      recent_captures  int | None
+      busiest_queue    (name, depth) | None — the deepest non-empty queue
+      known            bool       — False when we could not find out
+      reason           str | None
+    """
+    unknown = {
+        "ok": None,
+        "status": "",
+        "recent_captures": None,
+        "busiest_queue": None,
+        "known": False,
+    }
+    if rate_limited_out():
+        # Deliberately still asks nothing: the breaker exists because further
+        # calls cost the run pacing budget, and that applies to diagnosis too.
+        return {
+            **unknown,
+            "reason": (
+                "skipped: archive.org rate limit tripped earlier this run "
+                "(no service-status lookup attempted)"
+            ),
+        }
+
+    headers = dict(DEFAULT_HEADERS)
+    headers["Accept"] = "application/json"
+    if access_key and secret_key:
+        headers["Authorization"] = f"LOW {access_key}:{secret_key}"
+    try:
+        resp = _paced_get(_SAVE_SYSTEM_STATUS_API, timeout, headers=headers)
+        data = resp.json()
+    except Exception as exc:
+        log.debug("Wayback system-status lookup failed: %s", exc)
+        return {
+            **unknown,
+            "reason": _transport_failure_summary(exc, "for its service status"),
+        }
+
+    status = str(data.get("status") or "").strip()
+    queues = data.get("queues")
+    busiest = None
+    if isinstance(queues, dict):
+        depths = [(n, d) for n, d in queues.items() if isinstance(d, int) and d > 0]
+        if depths:
+            busiest = max(depths, key=lambda kv: kv[1])
+    recent = data.get("recent_captures")
+    return {
+        "ok": status.lower() == "ok",
+        "status": status,
+        "recent_captures": recent if isinstance(recent, int) else None,
+        "busiest_queue": busiest,
+        "known": True,
+        "reason": None,
+    }
+
+
+def service_health_note(status):
+    """One clause naming who was at fault, or None when it adds nothing.
+
+    Returns None for a healthy service *and* for an unknown one: appending
+    "we could not tell" to every failed submission would be noise on top of a
+    failure the reader is already looking at.
+    """
+    if not status or not status.get("known"):
+        return None
+    if status.get("ok"):
+        busiest = status.get("busiest_queue")
+        if busiest and busiest[1] >= _BUSY_QUEUE_DEPTH:
+            return (
+                f"archive.org reported itself healthy but busy at the time "
+                f"({busiest[0]} queue {busiest[1]} deep)"
+            )
+        return "archive.org reported its capture system healthy at the time"
+    return (
+        f"archive.org reported its capture system as "
+        f"{status.get('status') or 'not ok'} at the time — this was the service, "
+        f"not the pipeline"
+    )
 
 
 def format_summary(wb):
