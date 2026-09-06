@@ -536,6 +536,8 @@ content-intelligence/
 │   │   │   │   └── watermarking.py    which providers mark generated text;
 │   │   │   │                          provenance bookkeeping, not detection
 │   │   │   ├── extract.py        HTML/PDF -> readable text, claim-centred excerpts
+│   │   │   ├── text_repair.py    undoes Perplexity's low-byte narrowing of
+│   │   │   │                     General Punctuation (U+2019 arriving as 0x19)
 │   │   │   ├── http.py           USER_AGENT + DEFAULT_HEADERS for all outbound calls
 │   │   │   ├── concurrency.py    run_with_timeout — the wall-clock backstop both
 │   │   │   │                     applications run their provider calls under

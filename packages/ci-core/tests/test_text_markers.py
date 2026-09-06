@@ -28,6 +28,8 @@ VS17 = "\U000e0100"
 VS18 = "\U000e0101"
 CHECK = "✔"  # category So, a symbol a selector may legitimately restyle
 CYRILLIC_A = "а"
+MICRO_SIGN = "µ"  # U+00B5, the character a keyboard's µ key produces
+GREEK_MU = "μ"  # U+03BC, what Unicode normalisation prefers
 
 
 def kinds(findings):
@@ -195,6 +197,50 @@ class TestHomoglyphs:
         # mixed-script check would never see the substituted letter.
         findings = scan(f"They d{CYRILLIC_A}n’t agree.")
         assert KIND_HOMOGLYPH in kinds(findings)
+
+
+class TestMicroPrefixIsNotAHomoglyph:
+    """SI notation defeats the mixed-script test by construction.
+
+    Both spellings of the micro prefix read as a foreign letter next to a Latin
+    unit symbol, so every correctly written microtesla or microgram was a
+    "serious" finding — and this publication measures magnetic fields, so that
+    failed the publish gate on drafts whose only sin was correct units.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            f"exposure of 200 {MICRO_SIGN}T at the fence line",
+            f"exposure of 200 {GREEK_MU}T at the fence line",
+            f"PM2.5 measured at 12 {MICRO_SIGN}g/m3",
+            f"a switching delay of 40 {MICRO_SIGN}s",
+            f"a gap of 5 {MICRO_SIGN}m across",
+        ],
+    )
+    def test_si_units_are_not_flagged(self, text):
+        assert [f for f in scan(text) if f.kind == KIND_HOMOGLYPH] == []
+
+    def test_the_exemption_does_not_cover_a_real_word(self):
+        """A mu standing in for a Latin "u" is the substitution being hunted."""
+        findings = scan(f"{GREEK_MU}nicode is a lookalike")
+        assert KIND_HOMOGLYPH in kinds(findings)
+
+    def test_the_exemption_stops_at_the_longest_unit_symbol(self):
+        """Bounded at three characters, so it stays notation and not prose."""
+        assert [
+            f for f in scan(f"12 {MICRO_SIGN}mol") if f.kind == KIND_HOMOGLYPH
+        ] == []
+        assert KIND_HOMOGLYPH in kinds(scan(f"{MICRO_SIGN}morphic behaviour"))
+
+    def test_a_bare_micro_sign_is_not_flagged(self):
+        assert [
+            f for f in scan(f"the {MICRO_SIGN} prefix") if f.kind == KIND_HOMOGLYPH
+        ] == []
+
+    def test_other_substitutions_still_caught_alongside_units(self):
+        findings = scan(f"200 {MICRO_SIGN}T at the b{CYRILLIC_A}nk")
+        assert by_char(findings).keys() == {CYRILLIC_A}
 
 
 class TestAnomalies:

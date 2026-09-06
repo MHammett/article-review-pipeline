@@ -337,6 +337,30 @@ def looks_like_access_wall(text):
     return any(marker in lowered for marker in _ACCESS_WALL_MARKERS)
 
 
+#: Above this share of undecodable characters, a "text" body is a binary file
+#: that was decoded rather than a document that was read. Real prose sits at
+#: zero; a stray replacement character from one bad byte in a long page stays
+#: far below it, so this does not discard a page over a single mojibake.
+_MAX_UNDECODABLE_RATIO = 0.05
+
+
+def looks_like_binary(text):
+    """True if ``text`` is decoded bytes rather than readable content.
+
+    PDFs are caught before this by magic bytes, and markup by the HTML path.
+    What reaches here is the remaining case: a body with no angle brackets that
+    some server labelled ``text/plain`` (or did not label at all), decoded with
+    ``errors="replace"`` into a run of replacement characters. Handing that to
+    the verifier asks a model whether mojibake supports a claim, which is the
+    same failure as handing it raw PDF -- just without the magic bytes that
+    make it obvious.
+    """
+    if not text:
+        return False
+    bad = sum(1 for c in text if c == "\ufffd" or (ord(c) < 0x20 and c not in "\t\n\r"))
+    return bad / len(text) > _MAX_UNDECODABLE_RATIO
+
+
 def extract_response_text(raw, content_type=None, url=None, encoding="utf-8"):
     """Turn a fetched response body into readable text.
 
@@ -361,7 +385,8 @@ def extract_response_text(raw, content_type=None, url=None, encoding="utf-8"):
     if ctype and not ctype.startswith("text/") and "html" not in ctype:
         # Plain text, JSON, CSV, XML: no markup to strip, use it as-is.
         if ctype in ("application/json", "text/plain") or "xml" in ctype:
-            return decoded.strip(), "text"
+            text = decoded.strip()
+            return ("" if looks_like_binary(text) else text), "text"
 
     if "<" in decoded and ">" in decoded:
         _title, body = extract_article(decoded)
@@ -371,7 +396,8 @@ def extract_response_text(raw, content_type=None, url=None, encoding="utf-8"):
         # through rather than handing raw tags to a text model.
         return "", "html"
 
-    return decoded.strip(), "text"
+    text = decoded.strip()
+    return ("" if looks_like_binary(text) else text), "text"
 
 
 # --- Claim-centered excerpt selection -------------------------------------
