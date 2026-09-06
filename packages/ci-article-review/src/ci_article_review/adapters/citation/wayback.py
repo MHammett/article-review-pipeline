@@ -331,6 +331,37 @@ def _transport_failure_summary(exc, what):
     return f"the request to archive.org {what} failed"
 
 
+def snapshot_raw_url(snapshot_url):
+    """The ``id_`` form of a snapshot URL: the original captured bytes.
+
+    ``https://web.archive.org/web/<ts>/<url>`` serves the capture with
+    archive.org's own banner and its ``wombat.js`` URL-rewriting shim injected.
+    Appending ``id_`` to the timestamp — ``/web/<ts>id_/<url>`` — serves what was
+    actually captured, unmodified.
+
+    That difference is what makes an archived copy checkable against the live
+    page at all. Measured 2026-09-06 across three URLs, one of them archived a
+    week earlier: the ``id_`` body was **byte-identical** to the live page
+    (SHA-256 equal, 6639/10923/9569 bytes), while the ordinary form was nearly
+    three times the size for the same document. Comparing the injected form
+    would be comparing archive.org's chrome, and would report every citation as
+    divergent.
+
+    Returns ``None`` if ``snapshot_url`` is not a snapshot URL.
+    """
+    if not snapshot_url:
+        return None
+    m = _ARCHIVE_URL_RE.search(snapshot_url)
+    if not m:
+        return None
+    # Replace the matched "/web/<ts><flags>/" with "/web/<ts>id_/".
+    return (
+        snapshot_url[: m.start()]
+        + f"https://web.archive.org/web/{m.group(1)}id_/"
+        + snapshot_url[m.end() :]
+    )
+
+
 def _snapshot_state(snapshot_url, ts, stale_days=None):
     """The four snapshot fields every caller reports, from a URL and timestamp.
 
@@ -416,6 +447,15 @@ def check(url, timeout=10, stale_days=None):
         return {"url": url, "archived": False}
 
     result = {"url": url, "archived": True}
+    # The availability API reports the captured response's own HTTP status, and
+    # this discarded it. It matters: a snapshot can be a capture of a 403 block
+    # page or a 404, and "a snapshot exists" then means the opposite of what the
+    # report implies. Our own captures now send capture_all=0 so we never make
+    # one, but a *pre-existing* snapshot is outside our control.
+    status = closest.get("status")
+    if status:
+        result["snapshot_status"] = str(status)
+        result["snapshot_is_error_capture"] = not str(status).startswith("2")
     result.update(
         _snapshot_state(
             closest.get("url", ""), closest.get("timestamp", ""), stale_days

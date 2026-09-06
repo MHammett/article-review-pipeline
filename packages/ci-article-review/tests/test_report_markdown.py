@@ -2196,3 +2196,71 @@ def test_the_archive_outcome_vocabulary_matches_the_adapters():
     assert report_markdown._ARCHIVE_CAPTURE_FAILED == wb.ARCHIVE_CAPTURE_FAILED
     assert report_markdown._ARCHIVE_SUBMIT_FAILED == wb.ARCHIVE_SUBMIT_FAILED
     assert report_markdown._ARCHIVE_NOT_ATTEMPTED == wb.ARCHIVE_NOT_ATTEMPTED
+
+
+class TestArchiveMatchRendering:
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/page"
+
+    def _cit(self, **over):
+        c = {
+            "claim": "A claim",
+            "url": "https://example.org/page",
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": {"archived": True, "snapshot_url": self.SNAP},
+        }
+        c.update(over)
+        return c
+
+    def _text(self, c):
+        return "\n".join(report_markdown._render_archive_pair(c))
+
+    def test_a_verified_pairing_says_so(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert "Archive verified" in out
+        assert "safe to publish" in out
+        assert "Cite both" in out
+
+    def test_a_divergent_archive_is_stated_prominently(self):
+        out = self._text(
+            self._cit(
+                archive_match="differs",
+                archive_match_detail="the archived text does not match.",
+            )
+        )
+        assert "Archive does NOT match the live page" in out
+
+    def test_an_unchecked_archive_claims_nothing(self):
+        out = self._text(
+            self._cit(
+                archive_match="unchecked",
+                archive_match_detail="the snapshot could not be read this run.",
+            )
+        )
+        assert "not verified" in out
+        assert "may or may not contain the document" in out
+
+    def test_an_ordinary_citation_gains_no_line(self):
+        assert "Archive verified" not in self._text(self._cit())
+
+    def test_a_snapshot_of_an_error_page_is_called_out(self):
+        """A snapshot exists and preserves the refusal, not the document."""
+        out = self._text(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": self.SNAP,
+                    "snapshot_status": "403",
+                    "snapshot_is_error_capture": True,
+                }
+            )
+        )
+        assert "capture of an HTTP 403 response" in out
+        assert "the source is not" in out
+
+    def test_the_match_vocabulary_matches_the_resolver(self):
+        from ci_article_review.adapters.citation import resolver as r
+
+        assert report_markdown._MATCH_IDENTICAL == r.ARCHIVE_MATCH_IDENTICAL
+        assert report_markdown._MATCH_DIFFERS == r.ARCHIVE_MATCH_DIFFERS
+        assert report_markdown._MATCH_UNCHECKED == r.ARCHIVE_MATCH_UNCHECKED

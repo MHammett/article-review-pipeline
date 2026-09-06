@@ -1531,6 +1531,144 @@ def _submit_missing_archives(results, archive_org_creds=None, history_root=None)
     _poll_capture_outcomes(targets, access_key, secret_key)
 
 
+#: Bound on concurrent snapshot reads for archive-match verification, and the
+#: per-call safety net. These are ordinary reads of an already-captured page —
+#: the same kind of fetch ``_wayback_fallback_content`` makes, and deliberately
+#: not routed through ``wayback._pace``: that clock exists for the availability
+#: API and Save Page Now, which are the throttled endpoints. Serialising cheap
+#: snapshot reads behind a 3-second interval would add minutes to a run for no
+#: protection anybody asked for.
+_MAX_MATCH_PARALLEL = 4
+_MATCH_TIMEOUT_SECONDS = 30
+
+#: Verdicts for "does the archived copy say what we checked?"
+ARCHIVE_MATCH_IDENTICAL = "identical"
+ARCHIVE_MATCH_DIFFERS = "differs"
+ARCHIVE_MATCH_UNCHECKED = "unchecked"
+
+
+def _verify_archive_matches(results):
+    """Check that each citation's snapshot contains what the live page did.
+
+    The gap this closes: the report tells the author to *cite both* the live URL
+    and the archive copy, and nothing had ever established that the two say the
+    same thing. A snapshot can be a capture of a paywall, a cookie wall, a bot
+    block, or simply a much older version of the page — and every one of those
+    renders exactly like a good archive. "Cite both" is a recommendation the
+    author acts on; it should not rest on an assumption.
+
+    Compares like with like: the citation's own ``checksum`` is a SHA-256 over
+    the *extracted article text* (``checksum_basis: extracted_text``), so the
+    snapshot is fetched, extracted the same way, and hashed the same way. The
+    snapshot is read through ``wayback.snapshot_raw_url`` — the ``id_`` form —
+    because the ordinary form carries archive.org's banner and ``wombat.js``,
+    which would make every citation look divergent.
+
+    Records on the citation:
+      archive_match         "identical" | "differs" | "unchecked"
+      archive_match_detail  what was compared, or why it could not be
+
+    A difference is reported, not judged. It has two innocent explanations (the
+    page changed after capture; extraction differs slightly) and one serious one
+    (the capture is not the document), and this pass cannot tell them apart —
+    so it says what it measured and leaves the conclusion to the reader.
+
+    Never raises.
+    """
+    targets = [
+        r
+        for r in results
+        if r.get("checksum")
+        and r.get("checksum_basis") == "extracted_text"
+        # Only a copy read from the live page can be compared against the
+        # archive. A citation already resolved *from* the archive would be
+        # comparing the snapshot with itself.
+        and r.get("verified_via") != "wayback_fallback"
+        and (r.get("wayback") or {}).get("snapshot_url")
+    ]
+    if not targets:
+        return
+
+    match_semaphore = threading.Semaphore(min(len(targets), _MAX_MATCH_PARALLEL))
+
+    def _verify_one(entry):
+        wb = entry["wayback"]
+        snapshot_url = wb.get("snapshot_url")
+        raw_url = wayback.snapshot_raw_url(snapshot_url)
+        if not raw_url:
+            entry["archive_match"] = ARCHIVE_MATCH_UNCHECKED
+            entry["archive_match_detail"] = (
+                "the recorded snapshot URL is not in a form that can be read "
+                "without archive.org's own banner mixed in"
+            )
+            return
+        try:
+            resp = safe_get(raw_url, timeout=_MATCH_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+        except Exception as exc:
+            entry["archive_match"] = ARCHIVE_MATCH_UNCHECKED
+            entry["archive_match_detail"] = (
+                f"the snapshot could not be read this run "
+                f"({wayback._transport_failure_summary(exc, 'for the snapshot')})"
+            )
+            return
+
+        text, _kind = _extract_fetched(resp, raw_url)
+        if not text or len(text) < _MIN_VERIFIABLE_CHARS:
+            # Same guard as relevance verification: too little text is a banner
+            # or a bot wall, not a document, and hashing it would produce a
+            # confident "differs" from nothing.
+            entry["archive_match"] = ARCHIVE_MATCH_UNCHECKED
+            entry["archive_match_detail"] = (
+                "no readable article text could be extracted from the snapshot, "
+                "so it could not be compared with the live page"
+            )
+            return
+
+        if sha256_checksum(text) == entry["checksum"]:
+            entry["archive_match"] = ARCHIVE_MATCH_IDENTICAL
+            entry["archive_match_detail"] = (
+                "the archived copy's article text is byte-identical to the text "
+                "checksummed from the live page"
+            )
+        else:
+            entry["archive_match"] = ARCHIVE_MATCH_DIFFERS
+            entry["archive_match_detail"] = (
+                f"the archived copy's article text does not match the live page "
+                f"({len(text)} characters archived). The page may have changed "
+                f"since the snapshot was taken, or the snapshot may have "
+                f"captured something other than the document — open both before "
+                f"citing the archive."
+            )
+
+    def _bounded(entry):
+        with match_semaphore:
+            _verify_one(entry)
+
+    jobs = [
+        (
+            entry["wayback"]["snapshot_url"],
+            lambda e=entry: _bounded(e),
+            _MATCH_TIMEOUT_SECONDS,
+        )
+        for entry in targets
+    ]
+    ceiling = _batch_ceiling(len(targets), _MAX_MATCH_PARALLEL, _MATCH_TIMEOUT_SECONDS)
+    outcomes = run_all_with_timeout(jobs, global_timeout=ceiling)
+    for url, (_, error) in outcomes.items():
+        if error is not None:
+            log.warning(f"Archive match verification abandoned for {url}: {error}")
+            for entry in targets:
+                if (
+                    entry["wayback"].get("snapshot_url") == url
+                    and "archive_match" not in entry
+                ):
+                    entry["archive_match"] = ARCHIVE_MATCH_UNCHECKED
+                    entry["archive_match_detail"] = (
+                        "the snapshot comparison did not finish in time"
+                    )
+
+
 def _normalize_claim_entry(entry):
     """Accept either a plain claim string or a dict:
     ``{"claim": str, "known_urls": list[str], "fact_check_bucket": str | None}``.
@@ -1663,4 +1801,8 @@ def resolve_citations(
     _submit_missing_archives(
         resolved_results, (api_keys or {}).get("archive_org"), history_root
     )
+    # After archiving, so a snapshot this run just created is checked too — the
+    # whole point is that the pairing the report offers has been verified,
+    # whether the snapshot is new or was already there.
+    _verify_archive_matches(resolved_results)
     return resolved_results

@@ -222,6 +222,22 @@ Deliberately not set: `email_result` and `wacz` (archive.org emails the account 
 
 Every concurrency number governing archiving was otherwise invented. Before submitting, the run asks: if the daily quota is exhausted, nothing is submitted and each citation says so with the quota figures — rather than the author reading a batch of failures. If fewer capture slots are free than the static ceiling, the batch narrows to match. A reading can only ever make the run *more* cautious; it never widens past the static bound, so a stale or wrong answer cannot make things worse. Without credentials the endpoint answers 401 and the run behaves exactly as before.
 
+**Does the archive say what the live page said?** The report tells you to *cite both* the live URL and the archive copy. That is a recommendation you act on, and nothing used to establish that the two agree — a snapshot of a paywall, a cookie wall, a bot block, or a much older version of the page renders exactly like a good one.
+
+Each resolved citation's snapshot is now fetched and compared against the same checksum the live fetch produced. It works the same whether this run created the snapshot or it already existed.
+
+The comparison is exact, not fuzzy, because of one API detail: `https://web.archive.org/web/<timestamp>id_/<url>` serves the **original captured bytes**, while the ordinary form injects archive.org's banner and its `wombat.js` URL rewriter. Measured 2026-09-06 across three URLs (one archived a week earlier), the `id_` body was byte-identical to the live page — SHA-256 equal — while the ordinary form was nearly three times the size for the same document. Comparing the injected form would report every citation as divergent.
+
+| `archive_match` | Report line |
+| --- | --- |
+| `identical` | "Archive verified: the snapshot's text is identical to the live page this run checked" |
+| `differs` | "**Archive does NOT match the live page**" plus what was measured |
+| `unchecked` | says why, and that the snapshot may or may not contain the document |
+
+A difference is reported, not judged. It has two innocent explanations (the page changed after capture; extraction differs slightly) and one serious one (the capture is not the document), and this pass cannot tell them apart. Citations resolved *from* the archive are skipped — comparing a snapshot with itself proves nothing.
+
+**Snapshots that captured an error page.** The availability API reports each capture's own HTTP status, and it was being discarded. A pre-existing snapshot can be a capture of a 403 or 404 — "archived" is then true and useless, because what is preserved is the refusal, not the document. Those are now flagged outright. The pipeline's own captures cannot produce one (`capture_all=0`), but pre-existing snapshots are outside its control.
+
 **Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to obtain the document another way, and uses whatever it gets for checksumming and relevance verification. There are two tiers, tried in this order:
 
 1. **The live page behind a browser TLS fingerprint** — 403 only. See "Escalating past a bot block" below.

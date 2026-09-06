@@ -2946,3 +2946,97 @@ class TestSubmissionRespectsRealCapacity:
         assert mock_submit.call_count == len(targets)
         for t in targets:
             assert t["wayback"]["archive_outcome"] != wayback.ARCHIVE_NOT_ATTEMPTED
+
+
+class TestArchiveMatchesLive:
+    """The report tells the author to cite the live URL *and* the archive copy.
+    Nothing used to establish that the two say the same thing."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/a"
+
+    def _cit(self, checksum="abc", **over):
+        c = {
+            "claim": "c",
+            "url": "https://example.org/a",
+            "resolved": True,
+            "verification": "checksum",
+            "checksum": checksum,
+            "checksum_basis": "extracted_text",
+            "wayback": {"archived": True, "snapshot_url": self.SNAP},
+        }
+        c.update(over)
+        return c
+
+    def _run(self, citations, text="x" * 400, side_effect=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                return_value=resp,
+                side_effect=side_effect,
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver._extract_fetched",
+                return_value=(text, "html"),
+            ),
+        ):
+            resolver._verify_archive_matches(citations)
+        return mock_get
+
+    def test_a_matching_snapshot_is_confirmed(self):
+        text = "y" * 400
+        c = self._cit(checksum=resolver.sha256_checksum(text))
+        self._run([c], text=text)
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_IDENTICAL
+
+    def test_a_divergent_snapshot_is_reported_not_judged(self):
+        """Three explanations, two of them innocent. It says what it measured."""
+        c = self._cit(checksum="deadbeef")
+        self._run([c], text="z" * 400)
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_DIFFERS
+        assert "may have changed" in c["archive_match_detail"]
+        assert "something other than the document" in c["archive_match_detail"]
+
+    def test_the_snapshot_is_read_without_archive_orgs_banner(self):
+        """The ordinary form carries archive.org's chrome and wombat.js, which
+        would make every citation look divergent."""
+        mock_get = self._run([self._cit()])
+        assert "id_/" in mock_get.call_args[0][0]
+
+    def test_too_little_text_is_unchecked_not_divergent(self):
+        """A bot wall is not a document; hashing it would produce a confident
+        "differs" out of nothing. Same guard as relevance verification."""
+        c = self._cit()
+        self._run([c], text="short")
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_UNCHECKED
+        assert "no readable article text" in c["archive_match_detail"]
+
+    def test_an_unreadable_snapshot_is_unchecked(self):
+        c = self._cit()
+        self._run([c], side_effect=RuntimeError("boom"))
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_UNCHECKED
+
+    def test_a_citation_read_from_the_archive_is_not_compared_with_itself(self):
+        c = self._cit(verified_via="wayback_fallback")
+        mock_get = self._run([c])
+        mock_get.assert_not_called()
+        assert "archive_match" not in c
+
+    def test_a_citation_with_no_snapshot_is_skipped(self):
+        c = self._cit()
+        c["wayback"] = {"archived": False}
+        mock_get = self._run([c])
+        mock_get.assert_not_called()
+
+    def test_a_different_checksum_basis_is_not_compared(self):
+        """Comparing an extracted-text hash with a raw-body hash would report
+        every such citation as divergent for a reason not about the page."""
+        c = self._cit(checksum_basis="raw_body")
+        mock_get = self._run([c])
+        mock_get.assert_not_called()
+
+    def test_verification_never_raises(self):
+        c = self._cit()
+        self._run([c], side_effect=Exception("kaboom"))
+        assert c["resolved"] is True

@@ -1093,3 +1093,66 @@ class TestJobStatusSharesTheOneRateLimitScheme:
             wayback.check_job_status(JOB_ID, access_key="AK", secret_key="SK")
 
         assert wayback._blocked_until >= before + 30.0
+
+
+class TestSnapshotRawUrl:
+    """``id_`` serves the original captured bytes; the ordinary form serves them
+    wrapped in archive.org's banner and its wombat.js URL rewriter."""
+
+    def test_the_id_form_is_produced(self):
+        got = wayback.snapshot_raw_url(
+            "http://web.archive.org/web/20260905123736/https://example.org/a"
+        )
+        assert got == (
+            "https://web.archive.org/web/20260905123736id_/https://example.org/a"
+        )
+
+    def test_a_non_snapshot_url_yields_nothing(self):
+        assert wayback.snapshot_raw_url("https://example.org/a") is None
+        assert wayback.snapshot_raw_url("") is None
+        assert wayback.snapshot_raw_url(None) is None
+
+    def test_flagged_snapshot_forms_are_normalised(self):
+        """Wayback URLs can already carry a mode flag (im_, js_, cs_)."""
+        got = wayback.snapshot_raw_url(
+            "https://web.archive.org/web/20200101000000im_/https://example.org/a"
+        )
+        assert "20200101000000id_/" in got
+
+
+class TestSnapshotStatusIsKept:
+    """The availability API reports the captured response's own HTTP status, and
+    this discarded it. A snapshot of a 403 block page renders exactly like a
+    snapshot of the document."""
+
+    def _check(self, closest):
+        payload = {"archived_snapshots": {"closest": closest}}
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response(payload),
+        ):
+            return wayback.check("https://example.org/a")
+
+    def _closest(self, **over):
+        c = {
+            "available": True,
+            "url": "https://web.archive.org/web/20260905000000/https://example.org/a",
+            "timestamp": "20260905000000",
+        }
+        c.update(over)
+        return c
+
+    def test_a_good_capture_is_marked_as_such(self):
+        r = self._check(self._closest(status="200"))
+        assert r["snapshot_status"] == "200"
+        assert r["snapshot_is_error_capture"] is False
+
+    def test_an_archived_error_page_is_flagged(self):
+        r = self._check(self._closest(status="403"))
+        assert r["snapshot_status"] == "403"
+        assert r["snapshot_is_error_capture"] is True
+
+    def test_an_absent_status_asserts_nothing(self):
+        r = self._check(self._closest())
+        assert "snapshot_status" not in r
+        assert "snapshot_is_error_capture" not in r

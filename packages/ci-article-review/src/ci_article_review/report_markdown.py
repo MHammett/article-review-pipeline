@@ -526,6 +526,43 @@ def _citation_pair(citation):
     return live, wayback.get("snapshot_url")
 
 
+#: Verdicts from ``resolver._verify_archive_matches``. Duplicated rather than
+#: imported for the same reason as ``_ARCHIVE_*`` — see the note there.
+_MATCH_IDENTICAL = "identical"
+_MATCH_DIFFERS = "differs"
+_MATCH_UNCHECKED = "unchecked"
+
+
+def _archive_match_lines(citation, indent):
+    """Whether the archived copy was confirmed to say what the live page said.
+
+    The report tells the author to *cite both* the live URL and the archive
+    copy. That is a recommendation they act on, and nothing used to establish
+    that the two say the same thing — a snapshot of a paywall, a cookie wall, a
+    bot block, or a much older version of the page renders exactly like a good
+    one. The pairing now carries the result of actually checking.
+
+    Silent when nothing was checked and nothing is wrong to report, so an
+    ordinary verified citation does not grow a line saying so twice.
+    """
+    verdict = citation.get("archive_match")
+    if not verdict:
+        return []
+    detail = citation.get("archive_match_detail") or ""
+    if verdict == _MATCH_IDENTICAL:
+        return [
+            f"{indent}- Archive verified: the snapshot's text is identical to "
+            f"the live page this run checked, so the pairing below is safe to "
+            f"publish."
+        ]
+    if verdict == _MATCH_DIFFERS:
+        return [f"{indent}- **Archive does NOT match the live page.** {detail}"]
+    return [
+        f"{indent}- Archive not verified against the live page — {detail} The "
+        f"snapshot may or may not contain the document."
+    ]
+
+
 def _capture_note(citation):
     """Suffix for the Archive line saying what this run's submission produced.
 
@@ -620,6 +657,18 @@ def _render_archive_pair(citation, indent="  "):
             else ""
         )
         out.append(f"{indent}- Archive: {archive}{stale}{_capture_note(citation)}")
+        if wb.get("snapshot_is_error_capture"):
+            # A snapshot exists, and it is a capture of an error page. "Archived"
+            # would be true and useless: what is preserved is the refusal, not
+            # the document. Our own captures cannot produce this (capture_all=0),
+            # but a pre-existing snapshot is outside our control.
+            out.append(
+                f"{indent}- **This snapshot is a capture of an HTTP "
+                f"{wb.get('snapshot_status')} response, not of the document.** "
+                f"Something is archived at that URL; the source is not. Archive "
+                f"it by hand or re-source the claim."
+            )
+        out.extend(_archive_match_lines(citation, indent))
         out.append(f"{indent}- Cite both: {live} (archived: {archive})")
     elif outcome == _ARCHIVE_SUBMIT_FAILED:
         out.append(
