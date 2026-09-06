@@ -1094,6 +1094,10 @@ Open `configs/your_publication_name.yaml`. Key fields:
 | `wordpress.application_password` | The application password from your WordPress profile |
 | `api_keys` | Optional — overrides specific providers' credentials from `user.yaml` for this publication only. See [API key precedence](#api-key-precedence). |
 
+Any top-level key not in this table is an error. That is deliberate: a misspelled key used to read as an absent setting, so `authorname` silently cost the run its author and nothing anywhere said so. The error names the key, suggests the intended spelling when it is close, and lists what is valid.
+
+If you need a key that is deliberately not this pipeline's -- a note to a colleague, or a value another tool reads out of the same file -- prefix it with `x_`. Anything under that prefix is passed over without validation, following the same idea as OpenAPI's `x-` specification extensions.
+
 **`seo_rules`** is optional — omit it to use the defaults. Add it when your publication has different SEO standards from the defaults:
 
 ```yaml

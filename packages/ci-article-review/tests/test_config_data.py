@@ -418,30 +418,9 @@ class TestAuthorNameIsADeclaredPublicationKey:
         raise AssertionError("pipeline.py not found")
 
 
-class TestNearMissConfigKeysAreFlagged:
-    """A key that is *almost* right is the one that costs something silently.
-
-    An unknown key is fine — configs carry notes and future keys. But
-    ``authorname`` reads as absent, the pipeline falls back to no author, and
-    citation verification loses first-person checking with no error, no warning
-    and no missing-field message anywhere.
-    """
-
-    def _warn(self, config, caplog):
-        from ci_article_review.config_loader import _warn_on_near_miss_keys
-
-        with caplog.at_level("WARNING"):
-            _warn_on_near_miss_keys(config, "testpub")
-        return [r.getMessage() for r in caplog.records]
-
-    def test_a_typo_of_a_known_key_warns_and_names_both(self, caplog):
-        (message,) = self._warn({"authorname": "Someone"}, caplog)
-        assert "authorname" in message
-        assert "author_name" in message
-
-    def test_a_correct_key_is_silent(self, caplog):
-        assert self._warn({"author_name": "Someone"}, caplog) == []
-
-    def test_an_unrelated_custom_key_is_not_flagged(self, caplog):
-        """Never a whitelist — an unknown key the pipeline ignores is allowed."""
-        assert self._warn({"my_own_notes": "x", "author_bio": "y"}, caplog) == []
+# The near-miss *warning* these lines used to cover is gone: an unrecognised
+# publication key is now an error, not a log line, and the near-miss spelling
+# is folded into that error as a "did you mean" hint. One case here was
+# deliberately reversed rather than moved — an unrelated custom key such as
+# `author_bio` used to be explicitly allowed and is now rejected, with `x_` as
+# the way to keep one on purpose. See tests/test_publication_config_strictness.py.

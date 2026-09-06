@@ -1,3 +1,7 @@
+# Unrecognised top-level keys are an error, so a typo cannot silently read as
+# an absent setting. If you need a key that is deliberately not this
+# pipeline's -- a note, or a value some other tool reads out of this file --
+# prefix it with x_ and it is ignored without complaint.
 publication_name: your_publication_name
 
 # Optional. Who "I" refers to in your drafts, by name. Citation verification
