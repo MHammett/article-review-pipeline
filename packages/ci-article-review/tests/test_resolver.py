@@ -3083,3 +3083,117 @@ class TestReaskCarriesTheArchiveResult:
         result = {"reask": {}}
         reask.attach_source_checks([(result, {})], [None])
         assert result["reask"]["source_check"]["snapshot_url"] == ""
+
+
+class TestPendingCapturesExpire:
+    """A job archive.org has forgotten would otherwise stay in the index for
+    ever, costing a paced status call every run to rediscover that."""
+
+    def _report(self, tmp_path, slug, run, generated):
+        d = tmp_path / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"run_{run}_report.json").write_text(
+            json.dumps(
+                {
+                    "run_number": run,
+                    "generated": generated,
+                    "section_9_citations": [
+                        {
+                            "url": f"https://example.org/{slug}",
+                            "wayback": {
+                                "submission_job_id": "spn2-abc",
+                                "archive_outcome": "pending",
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _iso(self, days_ago):
+        from datetime import datetime, timedelta, timezone
+
+        return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+    def test_a_recent_pending_capture_is_still_asked_about(self, tmp_path):
+        self._report(tmp_path, "fresh", 1, self._iso(1))
+        assert "https://example.org/fresh" in resolver.build_pending_capture_index(
+            str(tmp_path)
+        )
+
+    def test_an_ancient_pending_capture_is_dropped(self, tmp_path):
+        self._report(tmp_path, "stale", 1, self._iso(60))
+        assert resolver.build_pending_capture_index(str(tmp_path)) == {}
+
+    def test_a_naive_timestamp_does_not_raise(self, tmp_path):
+        """`_parse_timestamp` returns naive datetimes for a `generated` with no
+        offset and aware ones from file mtime. Subtracting one from the other
+        raises, so the mix has to be handled rather than met."""
+        from datetime import datetime, timedelta
+
+        naive = (datetime.now() - timedelta(days=1)).isoformat()
+        self._report(tmp_path, "naive", 1, naive)
+        idx = resolver.build_pending_capture_index(str(tmp_path))
+        assert "https://example.org/naive" in idx
+
+    def test_an_unparseable_timestamp_is_not_treated_as_ancient(self, tmp_path):
+        """Unknown age must not silently discard a live job."""
+        self._report(tmp_path, "odd", 1, "not-a-date")
+        idx = resolver.build_pending_capture_index(str(tmp_path))
+        assert isinstance(idx, dict)
+
+
+class TestServiceHealthIsNotedOnFailure:
+    """Who was at fault — us or archive.org — was unanswerable from the report."""
+
+    def _entry(self, outcome, detail="something went wrong"):
+        return {
+            "url": "https://example.org/a",
+            "resolved": True,
+            "wayback": {
+                "archived": False,
+                "archive_outcome": outcome,
+                "archive_outcome_detail": detail,
+            },
+        }
+
+    def test_a_degraded_service_is_named_on_the_failed_entries(self):
+        entries = [self._entry(wayback.ARCHIVE_SUBMIT_FAILED)]
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.system_status",
+            return_value={"known": True, "ok": False, "status": "degraded"},
+        ):
+            resolver._note_service_health(entries, "AK", "SK")
+        detail = entries[0]["wayback"]["archive_outcome_detail"]
+        assert "degraded" in detail
+        assert "not the pipeline" in detail
+        assert entries[0]["wayback"]["archive_service_ok"] is False
+
+    def test_a_clean_run_never_asks(self):
+        entries = [self._entry(wayback.ARCHIVE_ARCHIVED)]
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.system_status"
+        ) as mock_status:
+            resolver._note_service_health(entries, "AK", "SK")
+        mock_status.assert_not_called()
+
+    def test_an_unknown_verdict_leaves_the_detail_alone(self):
+        entries = [self._entry(wayback.ARCHIVE_SUBMIT_FAILED, "429 Too Many Requests")]
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.system_status",
+            return_value={"known": False, "reason": "could not reach archive.org"},
+        ):
+            resolver._note_service_health(entries, "AK", "SK")
+        assert (
+            entries[0]["wayback"]["archive_outcome_detail"] == "429 Too Many Requests"
+        )
+
+    def test_it_never_raises_into_archiving(self):
+        entries = [self._entry(wayback.ARCHIVE_SUBMIT_FAILED)]
+        with patch(
+            "ci_article_review.adapters.citation.resolver.wayback.system_status",
+            side_effect=RuntimeError("boom"),
+        ):
+            resolver._note_service_health(entries, "AK", "SK")
+        assert entries[0]["resolved"] is True
