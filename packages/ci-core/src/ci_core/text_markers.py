@@ -342,6 +342,35 @@ def _word_spans(text: str):
         yield start, len(text)
 
 
+#: The SI micro prefix, in both spellings Unicode provides for it.
+_MICRO_SIGNS = frozenset({"µ", "μ"})
+
+#: Longest SI unit symbol the micro prefix can lead ("mol").
+_MAX_UNIT_SYMBOL = 3
+
+
+def _is_micro_unit(word: str) -> bool:
+    """True for SI notation like ``µT``, ``μg``, ``µs`` -- not a substitution.
+
+    Both spellings of the prefix defeat the mixed-script test by construction:
+    ``_script_of`` reads U+00B5 as "MICRO" (the first word of "MICRO SIGN",
+    which is not a script at all) and U+03BC as "GREEK", so every correctly
+    written microtesla or microgram reads as a Latin word with a foreign letter
+    in it. For a publication that measures magnetic fields, that failed the
+    publish gate on drafts whose only sin was correct units.
+
+    Deliberately narrow. The exemption needs the prefix in first position and
+    at most a unit symbol after it, so a Greek mu standing in for a Latin "u"
+    inside a real word is still the substitution this check exists to find.
+    """
+    if len(word) < 2 or word[0] not in _MICRO_SIGNS:
+        return False
+    rest = word[1:]
+    return len(rest) <= _MAX_UNIT_SYMBOL and all(
+        c.isascii() and c.isalpha() for c in rest
+    )
+
+
 def _scan_homoglyphs(text: str, findings: dict[str, Finding]) -> None:
     """Flag letters whose script differs from the rest of their own word.
 
@@ -349,9 +378,13 @@ def _scan_homoglyphs(text: str, findings: dict[str, Finding]) -> None:
     of known confusables; it asks whether a word is written in a single
     alphabet, which is the property that makes a substitution work at all. A
     confusable nobody has catalogued yet still fails that test.
+
+    The one exception is SI notation -- see :func:`_is_micro_unit`.
     """
     for start, end in _word_spans(text):
         word = text[start:end]
+        if _is_micro_unit(word):
+            continue
         scripts: dict[int, str] = {}
         for offset, ch in enumerate(word):
             if unicodedata.category(ch).startswith("L"):
