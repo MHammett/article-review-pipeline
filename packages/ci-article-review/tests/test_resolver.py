@@ -2852,3 +2852,234 @@ class TestSourceAdaptersIdentifyThemselves:
         assert not self._calls_without_headers(
             "resp = requests.get(url, timeout=15, headers=DEFAULT_HEADERS)"
         )
+
+
+class TestSubmissionRespectsRealCapacity:
+    """archive.org reports how much capture capacity the account has. Before
+    this, every concurrency number was invented and the run discovered limits by
+    running into them."""
+
+    def _targets(self, n=3):
+        return [
+            {"url": f"https://x{i}", "resolved": True, "wayback": {"archived": False}}
+            for i in range(n)
+        ]
+
+    def _run(self, capacity, targets=None):
+        targets = targets if targets is not None else self._targets()
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.classify_host",
+                return_value="public",
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.capture_capacity",
+                return_value=capacity,
+            ),
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.submit",
+                return_value={"submitted": True, "job_id": None, "archived": False},
+            ) as mock_submit,
+            patch(
+                "ci_article_review.adapters.citation.resolver.wayback.check_job_status",
+                return_value={"state": "not_checked", "reason": "no creds"},
+            ),
+        ):
+            resolver._submit_missing_archives(
+                targets, {"access_key": "AK", "secret_key": "SK"}
+            )
+        return targets, mock_submit
+
+    def _capacity(self, **kw):
+        base = {
+            "available": 3,
+            "processing": 0,
+            "daily_captures": 49,
+            "daily_captures_limit": 30000,
+            "daily_exhausted": False,
+            "known": True,
+            "reason": None,
+        }
+        base.update(kw)
+        return base
+
+    def test_an_exhausted_quota_stops_submissions_and_says_why(self):
+        """Submitting anyway would spend a batch of requests to learn something
+        the quota already told us, and the author would see failures rather than
+        the one fact they can act on."""
+        targets, mock_submit = self._run(
+            self._capacity(daily_exhausted=True, daily_captures=30000)
+        )
+        mock_submit.assert_not_called()
+        for t in targets:
+            wb = t["wayback"]
+            assert wb["archive_outcome"] == wayback.ARCHIVE_NOT_ATTEMPTED
+            assert "daily capture quota" in wb["archive_outcome_detail"]
+            assert "30000" in wb["archive_outcome_detail"]
+
+    def test_scarce_slots_narrow_the_batch(self):
+        targets, mock_submit = self._run(self._capacity(available=1))
+        # Still submits everything, just not at once.
+        assert mock_submit.call_count == len(targets)
+
+    def test_plentiful_slots_do_not_widen_past_the_static_ceiling(self):
+        """A live reading may only make the run more cautious. The static bound
+        was chosen by watching archive.org get upset; trusting a possibly-stale
+        number to exceed it risks the IP block it exists to prevent."""
+        import ci_article_review.adapters.citation.resolver as r
+
+        seen = {}
+        real_sem = r.threading.Semaphore
+
+        def spy(n):
+            seen["n"] = n
+            return real_sem(n)
+
+        with patch.object(r.threading, "Semaphore", side_effect=spy):
+            self._run(self._capacity(available=99))
+        assert seen["n"] <= r._MAX_SUBMIT_PARALLEL
+
+    def test_unknown_capacity_behaves_exactly_as_before(self):
+        targets, mock_submit = self._run(
+            self._capacity(known=False, available=None, daily_exhausted=False)
+        )
+        assert mock_submit.call_count == len(targets)
+        for t in targets:
+            assert t["wayback"]["archive_outcome"] != wayback.ARCHIVE_NOT_ATTEMPTED
+
+
+class TestArchiveMatchesLive:
+    """The report tells the author to cite the live URL *and* the archive copy.
+    Nothing used to establish that the two say the same thing."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/a"
+
+    def _cit(self, checksum="abc", **over):
+        c = {
+            "claim": "c",
+            "url": "https://example.org/a",
+            "resolved": True,
+            "verification": "checksum",
+            "checksum": checksum,
+            "checksum_basis": "extracted_text",
+            "wayback": {"archived": True, "snapshot_url": self.SNAP},
+        }
+        c.update(over)
+        return c
+
+    def _run(self, citations, text="x" * 400, side_effect=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        with (
+            patch(
+                "ci_article_review.adapters.citation.resolver.safe_get",
+                return_value=resp,
+                side_effect=side_effect,
+            ) as mock_get,
+            patch(
+                "ci_article_review.adapters.citation.resolver._extract_fetched",
+                return_value=(text, "html"),
+            ),
+        ):
+            resolver._verify_archive_matches(citations)
+        return mock_get
+
+    def test_a_matching_snapshot_is_confirmed(self):
+        text = "y" * 400
+        c = self._cit(checksum=resolver.sha256_checksum(text))
+        self._run([c], text=text)
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_IDENTICAL
+
+    def test_a_divergent_snapshot_is_reported_not_judged(self):
+        """Three explanations, two of them innocent. It says what it measured."""
+        c = self._cit(checksum="deadbeef")
+        self._run([c], text="z" * 400)
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_DIFFERS
+        assert "may have changed" in c["archive_match_detail"]
+        assert "something other than the document" in c["archive_match_detail"]
+
+    def test_the_snapshot_is_read_without_archive_orgs_banner(self):
+        """The ordinary form carries archive.org's chrome and wombat.js, which
+        would make every citation look divergent."""
+        mock_get = self._run([self._cit()])
+        assert "id_/" in mock_get.call_args[0][0]
+
+    def test_too_little_text_is_unchecked_not_divergent(self):
+        """A bot wall is not a document; hashing it would produce a confident
+        "differs" out of nothing. Same guard as relevance verification."""
+        c = self._cit()
+        self._run([c], text="short")
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_UNCHECKED
+        assert "no readable article text" in c["archive_match_detail"]
+
+    def test_an_unreadable_snapshot_is_unchecked(self):
+        c = self._cit()
+        self._run([c], side_effect=RuntimeError("boom"))
+        assert c["archive_match"] == resolver.ARCHIVE_MATCH_UNCHECKED
+
+    def test_a_citation_read_from_the_archive_is_not_compared_with_itself(self):
+        c = self._cit(verified_via="wayback_fallback")
+        mock_get = self._run([c])
+        mock_get.assert_not_called()
+        assert "archive_match" not in c
+
+    def test_a_citation_with_no_snapshot_is_skipped(self):
+        c = self._cit()
+        c["wayback"] = {"archived": False}
+        mock_get = self._run([c])
+        mock_get.assert_not_called()
+
+    def test_a_different_checksum_basis_is_not_compared(self):
+        """Comparing an extracted-text hash with a raw-body hash would report
+        every such citation as divergent for a reason not about the page."""
+        c = self._cit(checksum_basis="raw_body")
+        mock_get = self._run([c])
+        mock_get.assert_not_called()
+
+    def test_verification_never_raises(self):
+        c = self._cit()
+        self._run([c], side_effect=Exception("kaboom"))
+        assert c["resolved"] is True
+
+
+class TestReaskCarriesTheArchiveResult:
+    """``attach_source_checks`` kept five fields and dropped the rest, so the
+    archive work done for a proposed source was discarded."""
+
+    def test_the_snapshot_and_verdict_survive(self):
+        from ci_article_review.adapters.citation import reask
+
+        result = {"reask": {"action": "different_source"}}
+        outcome = {
+            "verification": "checksum",
+            "resolved": True,
+            "url": "https://example.org/alt",
+            "archive_match": "identical",
+            "wayback": {
+                "archived": True,
+                "snapshot_url": "https://web.archive.org/web/2026/x",
+                "snapshot_is_error_capture": False,
+            },
+        }
+        reask.attach_source_checks([(result, {})], [outcome])
+        check = result["reask"]["source_check"]
+        assert check["snapshot_url"] == "https://web.archive.org/web/2026/x"
+        assert check["archive_match"] == "identical"
+        assert check["snapshot_is_error_capture"] is False
+
+    def test_a_refuted_citation_stays_refuted(self):
+        """The archive result rides along; it must not promote the citation."""
+        from ci_article_review.adapters.citation import reask
+
+        result = {"verification": "content_mismatch", "reask": {}}
+        reask.attach_source_checks(
+            [(result, {})], [{"verification": "checksum", "resolved": True}]
+        )
+        assert result["verification"] == "content_mismatch"
+
+    def test_a_missing_outcome_does_not_raise(self):
+        from ci_article_review.adapters.citation import reask
+
+        result = {"reask": {}}
+        reask.attach_source_checks([(result, {})], [None])
+        assert result["reask"]["source_check"]["snapshot_url"] == ""

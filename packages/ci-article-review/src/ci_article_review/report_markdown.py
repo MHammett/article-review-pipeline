@@ -526,6 +526,43 @@ def _citation_pair(citation):
     return live, wayback.get("snapshot_url")
 
 
+#: Verdicts from ``resolver._verify_archive_matches``. Duplicated rather than
+#: imported for the same reason as ``_ARCHIVE_*`` — see the note there.
+_MATCH_IDENTICAL = "identical"
+_MATCH_DIFFERS = "differs"
+_MATCH_UNCHECKED = "unchecked"
+
+
+def _archive_match_lines(citation, indent):
+    """Whether the archived copy was confirmed to say what the live page said.
+
+    The report tells the author to *cite both* the live URL and the archive
+    copy. That is a recommendation they act on, and nothing used to establish
+    that the two say the same thing — a snapshot of a paywall, a cookie wall, a
+    bot block, or a much older version of the page renders exactly like a good
+    one. The pairing now carries the result of actually checking.
+
+    Silent when nothing was checked and nothing is wrong to report, so an
+    ordinary verified citation does not grow a line saying so twice.
+    """
+    verdict = citation.get("archive_match")
+    if not verdict:
+        return []
+    detail = citation.get("archive_match_detail") or ""
+    if verdict == _MATCH_IDENTICAL:
+        return [
+            f"{indent}- Archive verified: the snapshot's text is identical to "
+            f"the live page this run checked, so the pairing below is safe to "
+            f"publish."
+        ]
+    if verdict == _MATCH_DIFFERS:
+        return [f"{indent}- **Archive does NOT match the live page.** {detail}"]
+    return [
+        f"{indent}- Archive not verified against the live page — {detail} The "
+        f"snapshot may or may not contain the document."
+    ]
+
+
 def _capture_note(citation):
     """Suffix for the Archive line saying what this run's submission produced.
 
@@ -549,8 +586,9 @@ def _capture_note(citation):
     if age == 0:
         return " — snapshot dated today"
     if age:
+        plural = "day" if age == 1 else "days"
         return (
-            f" — archive.org returned an existing snapshot {age} days old "
+            f" — archive.org returned an existing snapshot {age} {plural} old "
             f"rather than making a new capture"
         )
     return ""
@@ -619,6 +657,18 @@ def _render_archive_pair(citation, indent="  "):
             else ""
         )
         out.append(f"{indent}- Archive: {archive}{stale}{_capture_note(citation)}")
+        if wb.get("snapshot_is_error_capture"):
+            # A snapshot exists, and it is a capture of an error page. "Archived"
+            # would be true and useless: what is preserved is the refusal, not
+            # the document. Our own captures cannot produce this (capture_all=0),
+            # but a pre-existing snapshot is outside our control.
+            out.append(
+                f"{indent}- **This snapshot is a capture of an HTTP "
+                f"{wb.get('snapshot_status')} response, not of the document.** "
+                f"Something is archived at that URL; the source is not. Archive "
+                f"it by hand or re-source the claim."
+            )
+        out.extend(_archive_match_lines(citation, indent))
         out.append(f"{indent}- Cite both: {live} (archived: {archive})")
     elif outcome == _ARCHIVE_SUBMIT_FAILED:
         out.append(
@@ -830,6 +880,24 @@ def _render_reask(reask):
         else:
             outcome = "could not be resolved"
         lines.append(f"    - That proposed source was checked: {outcome}.")
+        # The run already archived this URL if it needed archiving, so the
+        # author gets the durable address here rather than being sent to find
+        # it. Only offered when the pairing is safe — the same three states the
+        # reference list withholds.
+        snapshot = check.get("snapshot_url")
+        if snapshot and not check.get("snapshot_is_error_capture"):
+            if check.get("archive_match") == _MATCH_DIFFERS:
+                lines.append(
+                    f"    - Archive of that source: {snapshot} — **does not "
+                    f"match the live page**; check before citing it."
+                )
+            elif check.get("archive_match") == _MATCH_IDENTICAL:
+                lines.append(
+                    f"    - Archive of that source: {snapshot} (verified "
+                    f"identical to the live page)."
+                )
+            else:
+                lines.append(f"    - Archive of that source: {snapshot}")
     elif action == "different_source":
         lines.append("    - That proposed source was NOT checked. Treat it as a lead.")
     return lines
@@ -888,6 +956,177 @@ def _render_mismatch_entry(citation):
     return lines
 
 
+def _html_escape(value):
+    """Escape a URL for use inside an HTML attribute and as link text.
+
+    Four replacements rather than ``html.escape`` so this module keeps the
+    zero-import property the comments above rely on. Ampersand first, or it
+    would double-escape the entities the other replacements introduce.
+
+    Query strings routinely carry ``&`` (``?a=1&b=2``), and pasting that raw
+    into an ``href`` produces a link that silently drops everything after the
+    first parameter — a broken citation that looks fine in the editor.
+    """
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _publishable_archive(citation, archive):
+    """The archive URL only when the pairing is safe to publish unreviewed.
+
+    Withholds exactly the three states the per-entry list flags: a snapshot that
+    captured an error page rather than the document, one whose text does not
+    match the live page, and one that could not be checked this run. A
+    copy-paste block is acted on without re-reading the reasoning above it, so
+    anything questionable must not be in it — the markdown list above still
+    names them, with why.
+    """
+    if not archive:
+        return None
+    wb = citation.get("wayback") or {}
+    if wb.get("snapshot_is_error_capture"):
+        return None
+    if citation.get("archive_match") in (_MATCH_DIFFERS, _MATCH_UNCHECKED):
+        return None
+    return archive
+
+
+def _html_reference_block(entries):
+    """The same reference list as pasteable HTML.
+
+    The markdown above is paste-ready for a markdown-authored article; a
+    WordPress block editor wants anchors. Same sources, same order, and every
+    source appears — one that has no publishable archive copy is still a
+    reference the article cites, so it goes in as a plain link rather than
+    being dropped from the list the author pastes.
+    """
+    if not entries:
+        return []
+    lines = ["```html", "<ol>"]
+    withheld = 0
+    for live, archive, c in entries:
+        safe = _publishable_archive(c, archive)
+        if archive and not safe:
+            withheld += 1
+        href = _html_escape(live)
+        if safe:
+            lines.append(
+                f'  <li><a href="{href}">{href}</a> '
+                f'(<a href="{_html_escape(safe)}">archived</a>)</li>'
+            )
+        else:
+            lines.append(f'  <li><a href="{href}">{href}</a></li>')
+    lines.append("</ol>")
+    lines.append("```")
+    lines.append("")
+    carrying = sum(1 for live, a, c in entries if _publishable_archive(c, a))
+    note = f"{carrying} of {len(entries)} carry an archive link."
+    if withheld:
+        note += (
+            f" {withheld} archived source(s) are linked live-only here because "
+            f"the snapshot was not confirmed to match the page — see the list "
+            f"above for which and why."
+        )
+    lines.append(note)
+    lines.append("")
+    return lines
+
+
+def _render_reference_list(citations):
+    """Every cited address once, with its archive copy, ready to publish.
+
+    The pairing already existed per citation, but only inside the diagnostic
+    entries — spread over five disposition buckets and interleaved with claim
+    text, verification tiers and relevance notes. That is the right shape for
+    deciding whether to trust a citation and the wrong shape for the job the
+    author actually has next, which is putting both addresses into the article.
+    Getting a reference list out of it meant reading the whole section and
+    transcribing by hand, and a source backing three claims appeared three
+    times.
+
+    So: one entry per address, in the order first cited, deduplicated, split by
+    whether an archive copy exists. Sources with no snapshot are listed rather
+    than dropped — the author needs to know which references the article cannot
+    carry an archive link for, and silence would read as "all of them are fine".
+
+    Where the archive was checked against the live page (see
+    ``resolver._verify_archive_matches``) an unconfirmed pairing is marked. It
+    is the only part of this list that is a judgement rather than a fact, and it
+    is the one the author would otherwise publish blind.
+    """
+    paired, live_only, seen = [], [], set()
+    for c in citations:
+        live, archive = _citation_pair(c)
+        if not live or live in seen:
+            continue
+        seen.add(live)
+        (paired if archive else live_only).append((live, archive, c))
+
+    if not paired and not live_only:
+        return []
+
+    lines = [
+        f"### Reference list — live and archived addresses "
+        f"({len(paired) + len(live_only)} source(s))",
+        "",
+        "Each source once, in the order first cited. Paste-ready: the archive "
+        "address is what keeps the citation readable after the live page moves, "
+        "changes, or starts refusing readers.",
+        "",
+    ]
+
+    if paired:
+        for i, (live, archive, c) in enumerate(paired, 1):
+            lines.append(f"{i}. {live}")
+            wb = c.get("wayback") or {}
+            note = ""
+            if wb.get("snapshot_is_error_capture"):
+                note = (
+                    f"  — **do not publish this pairing**: the snapshot captured "
+                    f"an HTTP {wb.get('snapshot_status')} response, not the document"
+                )
+            elif c.get("archive_match") == _MATCH_DIFFERS:
+                note = "  — **archive does not match the live page**; check before publishing"
+            elif c.get("archive_match") == _MATCH_UNCHECKED:
+                note = "  — archive not verified against the live page this run"
+            elif wb.get("snapshot_stale"):
+                note = "  — snapshot is stale; re-archive before relying on it"
+            lines.append(f"   archived: {archive}{note}")
+        lines.append("")
+
+    if live_only:
+        lines.append(
+            f"**No archive copy ({len(live_only)})** — publishable only as a "
+            f"live link, and only as durable as that link:"
+        )
+        for live, _archive, c in live_only:
+            wb = c.get("wayback")
+            if not isinstance(wb, dict):
+                why = "archive.org was never asked about this URL"
+            elif wb.get("archived") is None:
+                why = "the archive.org lookup did not complete this run"
+            elif wb.get("archive_outcome") == _ARCHIVE_CAPTURE_FAILED:
+                why = "archive.org tried to capture it and could not"
+            elif wb.get("archive_outcome") in (_ARCHIVE_PENDING, _ARCHIVE_SUBMITTED):
+                why = "submitted for archiving this run; no snapshot yet"
+            elif wb.get("archive_outcome") == _ARCHIVE_NOT_ATTEMPTED:
+                why = "not submitted for archiving"
+            else:
+                why = "archive.org has no snapshot of this URL"
+            lines.append(f"- {live} — {why}")
+        lines.append("")
+
+    lines.append("For pasting into an HTML editor:")
+    lines.append("")
+    lines.extend(_html_reference_block(paired + live_only))
+    return lines
+
+
 def _render_section_9(citations):
     # The heading carries the framing deliberately. "Citations" alone reads as a
     # list of sources backing the article, which invites more confidence than
@@ -943,6 +1182,10 @@ def _render_section_9(citations):
     for key, label in _DISPOSITIONS:
         lines.append(f"| {label} | {len(grouped[key])} |")
     lines.append("")
+
+    # The deliverable, before the diagnostics. Everything below this point helps
+    # the author decide what to trust; this is what they act on once they have.
+    lines.extend(_render_reference_list(citations))
 
     # Relate the fact-check pass's own verdict to whether anything was retrieved.
     # These are independent — one is model judgment, the other is retrieval — and

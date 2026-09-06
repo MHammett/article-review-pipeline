@@ -2196,3 +2196,348 @@ def test_the_archive_outcome_vocabulary_matches_the_adapters():
     assert report_markdown._ARCHIVE_CAPTURE_FAILED == wb.ARCHIVE_CAPTURE_FAILED
     assert report_markdown._ARCHIVE_SUBMIT_FAILED == wb.ARCHIVE_SUBMIT_FAILED
     assert report_markdown._ARCHIVE_NOT_ATTEMPTED == wb.ARCHIVE_NOT_ATTEMPTED
+
+
+class TestArchiveMatchRendering:
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/page"
+
+    def _cit(self, **over):
+        c = {
+            "claim": "A claim",
+            "url": "https://example.org/page",
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": {"archived": True, "snapshot_url": self.SNAP},
+        }
+        c.update(over)
+        return c
+
+    def _text(self, c):
+        return "\n".join(report_markdown._render_archive_pair(c))
+
+    def test_a_verified_pairing_says_so(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert "Archive verified" in out
+        assert "safe to publish" in out
+        assert "Cite both" in out
+
+    def test_a_divergent_archive_is_stated_prominently(self):
+        out = self._text(
+            self._cit(
+                archive_match="differs",
+                archive_match_detail="the archived text does not match.",
+            )
+        )
+        assert "Archive does NOT match the live page" in out
+
+    def test_an_unchecked_archive_claims_nothing(self):
+        out = self._text(
+            self._cit(
+                archive_match="unchecked",
+                archive_match_detail="the snapshot could not be read this run.",
+            )
+        )
+        assert "not verified" in out
+        assert "may or may not contain the document" in out
+
+    def test_an_ordinary_citation_gains_no_line(self):
+        assert "Archive verified" not in self._text(self._cit())
+
+    def test_a_snapshot_of_an_error_page_is_called_out(self):
+        """A snapshot exists and preserves the refusal, not the document."""
+        out = self._text(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": self.SNAP,
+                    "snapshot_status": "403",
+                    "snapshot_is_error_capture": True,
+                }
+            )
+        )
+        assert "capture of an HTTP 403 response" in out
+        assert "the source is not" in out
+
+    def test_the_match_vocabulary_matches_the_resolver(self):
+        from ci_article_review.adapters.citation import resolver as r
+
+        assert report_markdown._MATCH_IDENTICAL == r.ARCHIVE_MATCH_IDENTICAL
+        assert report_markdown._MATCH_DIFFERS == r.ARCHIVE_MATCH_DIFFERS
+        assert report_markdown._MATCH_UNCHECKED == r.ARCHIVE_MATCH_UNCHECKED
+
+
+class TestReferenceList:
+    """The pairing existed per citation but only inside the diagnostic entries,
+    spread over five buckets. Getting a reference list out of the report meant
+    reading all of it and transcribing by hand."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/a"
+
+    def _cit(self, url="https://example.org/a", archived=True, **over):
+        c = {
+            "claim": "A claim",
+            "url": url,
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": (
+                {"archived": True, "snapshot_url": self.SNAP}
+                if archived
+                else {"archived": False}
+            ),
+        }
+        c.update(over)
+        return c
+
+    def _text(self, *cits):
+        return "\n".join(report_markdown._render_reference_list(list(cits)))
+
+    def test_both_addresses_appear_together(self):
+        out = self._text(self._cit())
+        assert "1. https://example.org/a" in out
+        assert f"archived: {self.SNAP}" in out
+
+    def test_a_source_backing_several_claims_is_listed_once(self):
+        """Deduplicated by address — an article's reference list names a source
+        once however many claims lean on it."""
+        out = self._text(self._cit(), self._cit(), self._cit())
+        # Count numbered entries, not the bare address: the snapshot URL
+        # ends with the live address, so a substring sees it twice.
+        assert "(1 source(s))" in out
+        assert out.count("1. https://example.org/a") == 1
+        assert "2. " not in out
+
+    def test_order_is_first_citation_order(self):
+        out = self._text(
+            self._cit(url="https://example.org/first"),
+            self._cit(url="https://example.org/second"),
+        )
+        assert out.index("first") < out.index("second")
+        assert "1. https://example.org/first" in out
+        assert "2. https://example.org/second" in out
+
+    def test_the_resolved_address_is_published_not_the_redirector(self):
+        """A grounded model cites through an opaque redirect; the article should
+        carry the page's real address."""
+        out = self._text(
+            self._cit(
+                url="https://redirector.example/grounding-api-redirect/AUZIYabc",
+                final_url="https://www.jalopnik.com/honda-clocks-stuck",
+            )
+        )
+        assert "jalopnik.com" in out
+        assert "grounding-api-redirect" not in out
+
+    def test_sources_with_no_archive_are_listed_not_dropped(self):
+        """Silence would read as "all of them are fine". The author needs to
+        know which references cannot carry an archive link."""
+        out = self._text(self._cit(url="https://example.org/b", archived=False))
+        assert "No archive copy (1)" in out
+        assert "https://example.org/b" in out
+        assert "no snapshot of this URL" in out
+
+    def test_a_divergent_archive_is_flagged_in_the_list(self):
+        out = self._text(self._cit(archive_match="differs"))
+        assert "archive does not match the live page" in out
+
+    def test_an_unverified_archive_is_flagged_in_the_list(self):
+        out = self._text(self._cit(archive_match="unchecked"))
+        assert "not verified against the live page" in out
+
+    def test_a_snapshot_of_an_error_page_is_not_offered_for_publication(self):
+        out = self._text(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": self.SNAP,
+                    "snapshot_status": "403",
+                    "snapshot_is_error_capture": True,
+                }
+            )
+        )
+        assert "do not publish this pairing" in out
+        assert "HTTP 403" in out
+
+    def test_a_stale_snapshot_says_so(self):
+        out = self._text(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": self.SNAP,
+                    "snapshot_stale": True,
+                }
+            )
+        )
+        assert "stale" in out
+
+    def test_a_verified_pairing_carries_no_warning(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert "**" not in out.split("archived:")[1]
+
+    def test_a_citation_with_no_url_is_omitted(self):
+        assert report_markdown._render_reference_list([{"claim": "c"}]) == []
+
+    def test_the_list_appears_in_section_9(self):
+        out = "\n".join(report_markdown._render_section_9([self._cit()]))
+        assert "Reference list — live and archived addresses" in out
+        assert f"archived: {self.SNAP}" in out
+
+    def test_the_reason_a_source_is_unarchived_is_specific(self):
+        pending = self._cit(url="https://example.org/p", archived=False)
+        pending["wayback"]["archive_outcome"] = "pending"
+        failed = self._cit(url="https://example.org/f", archived=False)
+        failed["wayback"]["archive_outcome"] = "capture_failed"
+        out = self._text(pending, failed)
+        assert "no snapshot yet" in out
+        assert "tried to capture it and could not" in out
+
+
+class TestHtmlReferenceBlock:
+    """The markdown list pastes into a markdown-authored article; a WordPress
+    block editor wants anchors."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/a"
+
+    def _cit(self, url="https://example.org/a", archived=True, **over):
+        c = {
+            "claim": "A claim",
+            "url": url,
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": (
+                {"archived": True, "snapshot_url": self.SNAP}
+                if archived
+                else {"archived": False}
+            ),
+        }
+        c.update(over)
+        return c
+
+    def _text(self, *cits):
+        return "\n".join(report_markdown._render_reference_list(list(cits)))
+
+    def test_both_addresses_become_anchors(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert '<a href="https://example.org/a">https://example.org/a</a>' in out
+        assert f'(<a href="{self.SNAP}">archived</a>)' in out
+
+    def test_it_is_a_fenced_html_block(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert "```html" in out
+        assert "<ol>" in out and "</ol>" in out
+
+    def test_a_source_with_no_archive_is_still_listed_as_a_link(self):
+        """It is still a reference the article cites; dropping it from the block
+        the author pastes would quietly lose it."""
+        out = self._text(self._cit(url="https://example.org/b", archived=False))
+        assert (
+            '<li><a href="https://example.org/b">https://example.org/b</a></li>' in out
+        )
+
+    def test_an_unconfirmed_pairing_is_not_offered_for_pasting(self):
+        """A copy-paste block is acted on without re-reading the reasoning above
+        it, so a questionable pairing must not be in it."""
+        out = self._text(self._cit(archive_match="differs"))
+        assert "archived</a>" not in out
+        assert "not confirmed to match the page" in out
+
+    def test_an_unverified_pairing_is_also_withheld(self):
+        out = self._text(self._cit(archive_match="unchecked"))
+        assert "archived</a>" not in out
+
+    def test_a_snapshot_of_an_error_page_is_never_pasted(self):
+        out = self._text(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": self.SNAP,
+                    "snapshot_status": "404",
+                    "snapshot_is_error_capture": True,
+                }
+            )
+        )
+        assert "archived</a>" not in out
+
+    def test_the_count_of_archive_links_is_stated(self):
+        out = self._text(
+            self._cit(url="https://example.org/a", archive_match="identical"),
+            self._cit(url="https://example.org/b", archived=False),
+        )
+        assert "1 of 2 carry an archive link." in out
+
+    def test_ampersands_in_urls_are_escaped(self):
+        """A raw & in an href silently truncates the link at the first
+        parameter — a broken citation that looks fine in the editor."""
+        out = self._text(self._cit(url="https://example.org/s?a=1&b=2", archived=False))
+        assert "a=1&amp;b=2" in out
+        assert 'href="https://example.org/s?a=1&b=2"' not in out
+
+    def _html_only(self, *cits):
+        """Just the fenced HTML block.
+
+        The markdown list above it prints URLs as plain text, as every other
+        URL in this module always has; escaping there is a separate, module-wide
+        question. What must hold here is that the anchors we generate cannot be
+        broken out of.
+        """
+        out = self._text(*cits)
+        return out.split("```html", 1)[1].split("```", 1)[0]
+
+    def test_angle_brackets_and_quotes_cannot_break_out_of_the_attribute(self):
+        block = self._html_only(
+            self._cit(url='https://example.org/"><script>x</script>', archived=False)
+        )
+        assert "<script>" not in block
+        assert "&quot;&gt;&lt;script&gt;" in block
+
+
+class TestReaskArchiveIsCarriedThrough:
+    """A proposed replacement source goes through the whole of
+    ``resolve_citations``, so the run has already asked archive.org about it and,
+    where it was missing, spent a real capture. Showing the URL without the
+    archive copy threw that away."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/alt"
+
+    def _cit(self, **check):
+        base = {
+            "verification": "checksum",
+            "resolved": True,
+            "url": "https://example.org/alt",
+        }
+        base.update(check)
+        return {
+            "claim": "A claim",
+            "url": "https://example.org/orig",
+            "resolved": True,
+            "relevance_verdict": "contradicts",
+            "reask": {
+                "action": "different_source",
+                "source_url": "https://example.org/alt",
+                "source_check": base,
+            },
+        }
+
+    def _text(self, **check):
+        return "\n".join(report_markdown._render_reask(self._cit(**check)["reask"]))
+
+    def test_the_archive_address_is_offered_beside_the_proposal(self):
+        out = self._text(snapshot_url=self.SNAP, archive_match="identical")
+        assert f"Archive of that source: {self.SNAP}" in out
+        assert "verified identical to the live page" in out
+
+    def test_a_divergent_archive_is_flagged(self):
+        out = self._text(snapshot_url=self.SNAP, archive_match="differs")
+        assert "does not match the live page" in out
+
+    def test_an_unverified_archive_is_offered_without_a_claim(self):
+        out = self._text(snapshot_url=self.SNAP, archive_match="unchecked")
+        assert f"Archive of that source: {self.SNAP}" in out
+        assert "verified identical" not in out
+        assert "does not match" not in out
+
+    def test_a_snapshot_of_an_error_page_is_not_offered(self):
+        out = self._text(snapshot_url=self.SNAP, snapshot_is_error_capture=True)
+        assert "Archive of that source" not in out
+
+    def test_a_proposal_with_no_archive_gains_no_line(self):
+        assert "Archive of that source" not in self._text()

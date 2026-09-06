@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 _AVAILABILITY_API = "https://archive.org/wayback/available"
 _SAVE_API = "https://web.archive.org/save"
 _SAVE_STATUS_API = "https://web.archive.org/save/status"
+_SAVE_USER_STATUS_API = "https://web.archive.org/save/status/user"
 _STALE_DAYS = (
     180  # default — overridden by pipeline.wayback_snapshot_stale_days in user.yaml
 )
@@ -302,6 +303,65 @@ def _get_availability(url, timeout):
     return _paced_get(_AVAILABILITY_API, timeout, params={"url": url})
 
 
+def _transport_failure_summary(exc, what):
+    """One reader-facing sentence for an archive.org call that did not complete.
+
+    The raw exception is for the log, not for the author. Left unfiltered it
+    reaches the report as
+    ``HTTPSConnectionPool(host='web.archive.org', port=443): Max retries
+    exceeded with url: /save/status/... (Caused by NewConnectionError(...
+    [WinError 10061] ...))`` — observed verbatim in a real run 2026-09-06. That
+    is a debugger's string in a document written for someone deciding what to
+    publish, and it is the same misdirection the non-JSON guard in ``check``
+    exists to prevent: it invites the reader to debug our networking instead of
+    telling them what it means for their citation.
+
+    Callers keep the raw text under a separate key so nothing is lost.
+    """
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"archive.org did not answer {what} within the timeout"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return (
+            f"could not reach archive.org {what} — the connection was refused, "
+            f"dropped, or the host did not resolve"
+        )
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status:
+        return f"archive.org answered HTTP {status} {what}"
+    return f"the request to archive.org {what} failed"
+
+
+def snapshot_raw_url(snapshot_url):
+    """The ``id_`` form of a snapshot URL: the original captured bytes.
+
+    ``https://web.archive.org/web/<ts>/<url>`` serves the capture with
+    archive.org's own banner and its ``wombat.js`` URL-rewriting shim injected.
+    Appending ``id_`` to the timestamp — ``/web/<ts>id_/<url>`` — serves what was
+    actually captured, unmodified.
+
+    That difference is what makes an archived copy checkable against the live
+    page at all. Measured 2026-09-06 across three URLs, one of them archived a
+    week earlier: the ``id_`` body was **byte-identical** to the live page
+    (SHA-256 equal, 6639/10923/9569 bytes), while the ordinary form was nearly
+    three times the size for the same document. Comparing the injected form
+    would be comparing archive.org's chrome, and would report every citation as
+    divergent.
+
+    Returns ``None`` if ``snapshot_url`` is not a snapshot URL.
+    """
+    if not snapshot_url:
+        return None
+    m = _ARCHIVE_URL_RE.search(snapshot_url)
+    if not m:
+        return None
+    # Replace the matched "/web/<ts><flags>/" with "/web/<ts>id_/".
+    return (
+        snapshot_url[: m.start()]
+        + f"https://web.archive.org/web/{m.group(1)}id_/"
+        + snapshot_url[m.end() :]
+    )
+
+
 def _snapshot_state(snapshot_url, ts, stale_days=None):
     """The four snapshot fields every caller reports, from a URL and timestamp.
 
@@ -387,12 +447,87 @@ def check(url, timeout=10, stale_days=None):
         return {"url": url, "archived": False}
 
     result = {"url": url, "archived": True}
+    # The availability API reports the captured response's own HTTP status, and
+    # this discarded it. It matters: a snapshot can be a capture of a 403 block
+    # page or a 404, and "a snapshot exists" then means the opposite of what the
+    # report implies. Our own captures now send capture_all=0 so we never make
+    # one, but a *pre-existing* snapshot is outside our control.
+    status = closest.get("status")
+    if status:
+        result["snapshot_status"] = str(status)
+        result["snapshot_is_error_capture"] = not str(status).startswith("2")
     result.update(
         _snapshot_state(
             closest.get("url", ""), closest.get("timestamp", ""), stale_days
         )
     )
     return result
+
+
+#: Save Page Now capture options this pipeline sets deliberately.
+#:
+#: Read off the live ``/save`` form 2026-09-06 — its control names *are* the API
+#: parameter names: ``capture_outlinks``, ``capture_all``, ``capture_screenshot``,
+#: ``disable_adblocker``, ``wm-save-mywebarchive``, ``email_result``, ``wacz``.
+#: All of them work on the authenticated endpoint. Only two are worth setting,
+#: and one of those is a correctness fix rather than a feature:
+#:
+#: ``capture_all=0`` — **the form defaults this ON**, and on means "archive the
+#:   page even if it answers 4xx/5xx". For citation archiving that is a way to
+#:   manufacture a lie: a source that blocks our capture with a 403 would get
+#:   its block page archived, the next run's ``check()`` would find a snapshot,
+#:   and the report would say the citation is archived when what is archived is
+#:   an error page. It would bite hardest on exactly the sources that refuse
+#:   automated requests — the citations already flagged as most needing an
+#:   archive. A capture that fails should be *reported* as failed, which is what
+#:   the rest of this module now does properly.
+#:
+#: Deliberately NOT set, and why:
+#:   ``email_result`` / ``wacz`` — archive.org emails the account owner, once
+#:     per capture. A run submits many citations; enabling either turns a review
+#:     into an inbox full of mail nobody asked for.
+#:   ``wm-save-mywebarchive`` — writes to the operator's personal archive. Their
+#:     account, their choice, not a side effect of running a review.
+#:   ``capture_outlinks`` — every outlink of every citation is an enormous load
+#:     increase on a service that already throttles us, for pages the article
+#:     does not cite.
+#:   ``capture_screenshot`` — a second form of evidence, and a real option worth
+#:     revisiting, but nothing renders a screenshot URL today so it would be
+#:     collected and discarded — the exact pattern this work exists to remove.
+#:   ``force_get`` — trades the headless browser for a plain GET, which captures
+#:     JavaScript-rendered pages worse. The point is a faithful copy.
+_CAPTURE_OPTIONS = {"capture_all": "0"}
+
+
+def _capture_params(url, stale_days=None):
+    """Form fields for one authenticated capture request.
+
+    ``if_not_archived_within`` is deliberately NOT sent, and it is worth saying
+    why because it looks like an obvious fit. It asks archive.org to skip the
+    capture when a snapshot newer than N already exists — seemingly the same
+    idea as ``wayback_snapshot_stale_days``.
+
+    Tried against the live API 2026-09-06. Sending ``if_not_archived_within``
+    for a page with a recent snapshot returns::
+
+        {"url": "...", "job_id": null,
+         "message": "The same snapshot had been made 177 hours, 9 minutes ago.
+                     You can make new capture of this URL after 4320 hours."}
+
+    while the identical request without it captures normally. So the skip is
+    caused entirely by the parameter — archive.org imposes no such restriction
+    of its own — and it leaves the citation with no job id and no snapshot URL,
+    i.e. less information than before.
+
+    More importantly it is a *second gate on the same decision*. This pass only
+    submits a citation when ``check()`` already said the URL has no snapshot or
+    a stale one; asking archive.org to independently re-decide that can only
+    produce disagreement between two rules meant to answer one question. Same
+    reasoning as this module's one-pacing-scheme rule.
+
+    ``stale_days`` is accepted so callers need not care which options apply.
+    """
+    return {"url": url, **_CAPTURE_OPTIONS}
 
 
 def submit(url, timeout=30, access_key=None, secret_key=None, stale_days=None):
@@ -438,6 +573,27 @@ def submit(url, timeout=30, access_key=None, secret_key=None, stale_days=None):
                                      reported as a failed submission.
       error             str        — set only on failure
     """
+    # The breaker exists because archive.org throttles per IP across endpoints.
+    # Submissions used to ignore it: once five lookups had been refused, the
+    # availability API went quiet while Save Page Now — the *more* expensive
+    # call, since it starts a real capture — kept firing at full pace. Honouring
+    # it here is reuse of the one scheme, not a second one.
+    if rate_limited_out():
+        return {
+            "url": url,
+            "submitted": False,
+            "job_id": None,
+            "archived": False,
+            "error": (
+                "skipped: archive.org rate limit tripped earlier this run "
+                "(no capture requested)"
+            ),
+            "error_summary": (
+                "not requested — archive.org had already rate-limited this run"
+            ),
+            "rate_limited": True,
+        }
+
     headers = dict(DEFAULT_HEADERS)
     try:
         if access_key and secret_key:
@@ -445,18 +601,31 @@ def submit(url, timeout=30, access_key=None, secret_key=None, stale_days=None):
             headers["Accept"] = "application/json"
             resp = requests.post(
                 _SAVE_API,
-                data={"url": url},
+                data=_capture_params(url, stale_days),
                 headers=headers,
                 timeout=timeout,
             )
             resp.raise_for_status()
             payload = resp.json()
-            return {
+            result = {
                 "url": url,
                 "submitted": True,
                 "job_id": payload.get("job_id"),
                 "archived": False,
             }
+            if not result["job_id"]:
+                # Accepted, but no capture started. archive.org explains itself
+                # in ``message`` (e.g. "The same snapshot had been made 177
+                # hours ago"). Carrying that through is the difference between
+                # the report saying why nothing happened and saying nothing.
+                message = str(payload.get("message") or "").strip()
+                result["error_summary"] = (
+                    f"archive.org accepted the request without starting a "
+                    f"capture: {message}"
+                    if message
+                    else "archive.org accepted the request but started no capture"
+                )
+            return result
 
         resp = requests.get(
             f"{_SAVE_API}/{url}",
@@ -486,7 +655,15 @@ def submit(url, timeout=30, access_key=None, secret_key=None, stale_days=None):
             url,
             err,
         )
-        result = {"url": url, "submitted": False, "job_id": None, "error": err}
+        result = {
+            "url": url,
+            "submitted": False,
+            "job_id": None,
+            "error": err,
+            # The sentence the report is allowed to print. ``error`` stays raw
+            # (redacted) for the log and the saved JSON.
+            "error_summary": _transport_failure_summary(exc, "when asked to capture"),
+        }
         if timed_out:
             result["outcome_unknown"] = True
         return result
@@ -568,7 +745,14 @@ def check_job_status(
                 "endpoint (401). The capture outcome is unknown, not failed."
             )
         log.debug("Wayback job status lookup failed for %s: %s", job_id, err)
-        return {"job_id": job_id, "state": "unknown", "reason": err}
+        if status_code == 401:
+            return {"job_id": job_id, "state": "unknown", "reason": err}
+        return {
+            "job_id": job_id,
+            "state": "unknown",
+            "reason": _transport_failure_summary(exc, "about this capture"),
+            "raw_error": err,
+        }
 
     try:
         data = resp.json()
@@ -633,6 +817,94 @@ def check_job_status(
             if status
             else "archive.org's job-status response carried no status field"
         ),
+    }
+
+
+def capture_capacity(timeout=15, access_key=None, secret_key=None):
+    """How much Save Page Now capacity this account has right now. Never raises.
+
+    ``GET /save/status/user``, credential-only like the job-status endpoint.
+    Measured live 2026-09-06::
+
+        {"processing":0,"available":3,"daily_captures":49,"daily_captures_limit":30000}
+
+    Why this is worth a request: every concurrency number governing archiving is
+    otherwise invented. ``_MIN_INTERVAL_SECONDS`` and
+    ``resolver._MAX_SUBMIT_PARALLEL`` were picked by watching archive.org get
+    upset, and they are static — they cannot tell a run with three free capture
+    slots from a run with none. This endpoint answers the question directly, and
+    it answers it *before* the requests are spent rather than after, which is the
+    difference between pacing and apologising. The circuit breaker stays exactly
+    where it is; this only narrows what we attempt in the first place.
+
+    Deliberately never *raises* the concurrency ceiling — see
+    ``resolver._submit_missing_archives``. A reading can only make the run more
+    cautious, so a wrong or stale answer cannot make things worse.
+
+    Returns a dict with:
+      available            int | None — concurrent capture slots free now
+      processing           int | None — captures this account has in flight
+      daily_captures       int | None
+      daily_captures_limit int | None
+      daily_exhausted      bool       — quota is used up; submitting is pointless
+      known                bool       — False when we could not find out
+      reason               str | None — why not, when ``known`` is False
+    """
+    unknown = {
+        "available": None,
+        "processing": None,
+        "daily_captures": None,
+        "daily_captures_limit": None,
+        "daily_exhausted": False,
+        "known": False,
+    }
+    if not (access_key and secret_key):
+        return {
+            **unknown,
+            "reason": (
+                "archive.org reports capture capacity only to an authenticated "
+                "account; configure api_keys.archive_org"
+            ),
+        }
+    if rate_limited_out():
+        return {
+            **unknown,
+            "reason": (
+                "skipped: archive.org rate limit tripped earlier this run "
+                "(no capacity lookup attempted)"
+            ),
+        }
+
+    headers = dict(DEFAULT_HEADERS)
+    headers["Authorization"] = f"LOW {access_key}:{secret_key}"
+    headers["Accept"] = "application/json"
+    try:
+        resp = _paced_get(_SAVE_USER_STATUS_API, timeout, headers=headers)
+        data = resp.json()
+    except Exception as exc:
+        log.debug("Wayback capture-capacity lookup failed: %s", exc)
+        return {
+            **unknown,
+            "reason": _transport_failure_summary(exc, "for capture capacity"),
+        }
+
+    def _int(key):
+        value = data.get(key)
+        return value if isinstance(value, int) else None
+
+    used, limit = _int("daily_captures"), _int("daily_captures_limit")
+    return {
+        "available": _int("available"),
+        "processing": _int("processing"),
+        "daily_captures": used,
+        "daily_captures_limit": limit,
+        # Only assert exhaustion when both numbers are real. "Unknown" must not
+        # collapse into "you are out of quota" and stop the run archiving.
+        "daily_exhausted": bool(
+            used is not None and limit is not None and used >= limit
+        ),
+        "known": True,
+        "reason": None,
     }
 
 
