@@ -2819,6 +2819,8 @@ def run_draft_pipeline(
         log.info(f"Report saved: {paths['report_path']}")
     if paths.get("markdown_path"):
         log.info(f"Readable review: {paths['markdown_path']}")
+    if paths.get("worklist_path"):
+        log.info(f"Worklist: {paths['worklist_path']}")
 
     # Capture the raw ensemble beside the report so this run can be replayed.
     # Skipped on a replay: re-writing a capture from a capture adds nothing and
@@ -2839,7 +2841,11 @@ def run_draft_pipeline(
 
     elapsed_total = round(time.monotonic() - t_start, 1)
     _print_draft_summary(
-        report, delta_cfg, elapsed_total, markdown_path=paths.get("markdown_path")
+        report,
+        delta_cfg,
+        elapsed_total,
+        markdown_path=paths.get("markdown_path"),
+        worklist_path=paths.get("worklist_path"),
     )
 
     return report
@@ -3020,7 +3026,9 @@ def _print_live_model_check(live):
         print(f"  (model availability data {source}; oldest entry {age}h old)")
 
 
-def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=None):
+def _print_draft_summary(
+    report, delta_cfg, elapsed_total=None, markdown_path=None, worklist_path=None
+):
     print("\n" + "=" * 60)
     print(f"REVIEW COMPLETE: {report['article_title']}")
     print(f"Run #{report['run_number']} — {report['generated']}")
@@ -3569,6 +3577,14 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
     print(f"\nFull report: {report_dir}")
     if markdown_path:
         print(f"Readable review (paste into chat): {markdown_path}")
+    # Printed after the review and before the revise-loop instructions, which
+    # is the order the two are used in: the worklist is the author's own
+    # errands, and it is deliberately NOT part of what gets pasted into a
+    # chat model. Handing a model a list of documents nobody has read yet is
+    # an invitation to invent them.
+    if worklist_path:
+        print(f"Your worklist (do NOT paste; these are yours): {worklist_path}")
+    if markdown_path:
         _print_next_step(markdown_path)
     print("=" * 60)
 
