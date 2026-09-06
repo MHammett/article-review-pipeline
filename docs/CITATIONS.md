@@ -185,7 +185,10 @@ Submission is **fire-and-forget by design**. Captures run asynchronously and can
 
 A later run's availability check will pick up the snapshot once it exists. A submission failure degrades to "still shows as unarchived" and never fails the run.
 
-**Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to read an archived snapshot of that same URL instead, and uses the snapshot's content for checksumming and relevance verification.
+**Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to obtain the document another way, and uses whatever it gets for checksumming and relevance verification. There are two tiers, tried in this order:
+
+1. **The live page behind a browser TLS fingerprint** — 403 only. See "Escalating past a bot block" below.
+2. **An archive.org snapshot of the same URL** — every failure in the table below.
 
 It fires on:
 
@@ -202,6 +205,34 @@ It deliberately does **not** fire on 404/410 — the resource is genuinely gone,
 The entry records `verified_via: "wayback_fallback"`, the `origin_failure` reason above, and an `archive_provenance` note stating that the checksum and relevance verdict describe the archived copy, not the live page. Staleness is not suppressed: a 245-day-old snapshot that satisfied a timeout is still reported stale, and the provenance note says so.
 
 The same rules govern draft link validation (`analysis/links.py`), so a link recovered from the archive after a timeout reads `OK (via archive: origin timed out)` rather than being flattened into a plain `OK` or a bare `BROKEN`.
+
+### Escalating past a bot block
+
+A 403 gets one more attempt before the archive: the same request with a browser TLS fingerprint, via `ci_core.http.impersonating_get`. **For a public document, retrieval method does not affect citation validity** — the reader opening the link gets the same page — so a source that refuses scripts but serves browsers is a verifiable citation, not an unverifiable one. On the 2026-09-05 Honda run this was eight claims whose sources the *link checker* could already read, because it has escalated since 2026-08-12 and citation verification did not.
+
+**Scope.** Only a 403. A 401 says an account is required, which is the access-controlled case this policy puts out of scope; a 429 is a rate limit, and changing fingerprint to slip one is abuse rather than verification; a timeout or DNS failure never reached the origin, and no handshake fixes that. No attempt is made at a CAPTCHA, a JS challenge or a subscription gate, and none would work — the measurement in `ci_core/http.py` records three academic publishers returning a challenge page to impersonation too.
+
+**Live before archive**, deliberately, because the two are not competing options:
+
+- The archive lookup runs on the success path regardless, so escalating first yields the snapshot link **as well as** a current read. Archive-first would trade the current read away to obtain something the run was going to get anyway.
+- The checksum and relevance verdict are reported at the strongest tier this pipeline has, so they should describe the document the article actually cites. Both snapshots behind the Honda run's refused claims were flagged stale (358 and 494 days); verifying a claim against a year-old copy and labelling it `checksum` asserts a currency the run never established.
+
+A failed escalation costs nothing: anything that comes back unreadable — a challenge page, a near-empty body — falls through to the archive fallback exactly as an un-escalated 403 would. The tier is additive or it is a regression.
+
+**What the entry records.** `verified_via: "tls_impersonation"`, `origin_failure: "blocked"`, and a `reader_access` note. That note is access information, not a disclosure: what escalation predicts is that the *reader* may hit friction on this host, which makes it exactly the citation that needs an archive copy printed beside it. Section 9 renders it under the live URL, where the author is deciding what to paste.
+
+Where the fetch landed somewhere other than the URL cited — the fact-check model supplies Vertex `grounding-api-redirect` URLs, so it usually does — the destination is recorded as `final_url`, **the archive lookup follows it**, and the paste-ready "Cite both" pairing names it. Asking archive.org about the redirect instead returns `archived: false`, which the report would state as "archive.org has no snapshot of this URL" while the real source is archived: a false absence printed beside the citations that most need the archive to be there.
+
+**This tier needs an optional dependency.** `impersonating_get` returns `None` — leaving the archive fallback to run exactly as before — unless `curl_cffi` is installed:
+
+```bash
+uv sync --extra unblock
+```
+
+Two things measured 2026-09-05 while verifying this against the Honda run:
+
+- **The version matters more than the floor suggests.** curl_cffi 0.16.3 read `bianchihonda.com` and `congress.gov`; 0.16.0 was served a Cloudflare `cf-mitigated: challenge` on both. The extra's `>=0.7` constraint permits versions whose Chrome profile is stale enough to be fingerprinted, which defeats the point of the tier.
+- **Success is not deterministic.** Six concurrent requests to one Cloudflare-fronted host in a single run had four succeed and two challenged. A claim resolved this way in one run may be reported refused in the next — see the rerun-nondeterminism caveat that already applies to this pipeline.
 
 ### archive.org credentials (optional)
 

@@ -6,7 +6,7 @@ import threading
 
 
 from ci_core.concurrency import run_all_with_timeout
-from ci_core.http import UnsafeURLError, is_public_host, safe_get
+from ci_core.http import UnsafeURLError, impersonating_get, is_public_host, safe_get
 
 from ci_core import extract
 from ci_core import llm
@@ -314,6 +314,53 @@ def _check_drift(result, checksum_index):
     return result
 
 
+def _impersonation_fallback_content(url, timeout):
+    """When the origin refuses an honest request, ask again with a browser TLS
+    fingerprint and read the *live* page.
+
+    Policy, decided by the repo owner: for a public document, retrieval method
+    does not affect citation validity, because the reader gets the same page.
+    Paywalled and access-controlled content stays out of scope, and nothing here
+    attempts a CAPTCHA, a JS challenge or a subscription gate — the measurement
+    in ``ci_core.http`` shows three academic publishers return a challenge page
+    to impersonation anyway, and ``impersonating_get`` reports that as a plain
+    failure.
+
+    Scoped to 403 alone, which is where ``analysis/links.py`` draws the same
+    line. A 401 says an account is required, which is precisely the
+    access-controlled case policy puts out of scope; a 429 is a rate limit, and
+    changing fingerprint to slip one is abuse rather than verification; a
+    timeout or DNS failure is not a refusal and a different handshake cannot fix
+    it. Those keep going straight to the archive as before.
+
+    Returns ``(final_url, content, kind)``, or None when the block held, when
+    ``curl_cffi`` is absent, or when what came back is not actually readable.
+    That last case matters: escalation must never *lower* the outcome, so a
+    challenge page or a near-empty body falls through to the Wayback fallback
+    exactly as an un-escalated 403 would, rather than being accepted as content.
+
+    ``final_url`` is where the fetch landed, which is not always ``url``: the
+    fact-check model supplies Vertex ``grounding-api-redirect`` URLs, so the
+    document actually read lives one hop away. The caller needs that hop for the
+    archive lookup — see ``_resolve_known_url``.
+    """
+    resp = impersonating_get(url, timeout=timeout)
+    if resp is None:
+        return None
+    final_url = str(getattr(resp, "url", "") or url)
+    try:
+        content, kind = _extract_fetched(resp, final_url)
+    except Exception:
+        # An unreadable body is a failed escalation, not a failed resolution:
+        # the archive fallback below still deserves its turn.
+        return None
+    if extract.looks_like_access_wall(content):
+        return None
+    if len(content.strip()) < _MIN_VERIFIABLE_CHARS:
+        return None
+    return final_url, content, kind
+
+
 def _wayback_fallback_content(url, timeout):
     """When the origin won't (or can't) serve the page, read archive.org's
     snapshot as the content source instead.
@@ -562,12 +609,28 @@ def _resolve_known_url(
 
     A fetch the origin refused (401/403/429) or that never reached it at all
     (timeout, DNS/connection error) — but not a 404 or 5xx, see
-    ``_wayback_fallback_content``'s scoping — triggers a single fallback
-    attempt against a Wayback snapshot of the same URL, so a claim isn't
-    reported unresolved just because the origin site blocks automated fetches
-    or happened to be unreachable during this run. The result records
-    ``verified_via`` and ``origin_failure`` so a citation read from the archive
-    is never mistaken for one read from the live source.
+    ``_wayback_fallback_content``'s scoping — triggers a fallback so a claim
+    isn't reported unresolved just because the origin site blocks automated
+    fetches or happened to be unreachable during this run. There are two
+    fallback tiers, tried in this order:
+
+    1. **Live page behind a browser TLS fingerprint** (403 only —
+       ``_impersonation_fallback_content``). For a public document the reader
+       gets the same page, so retrieval method does not bear on whether the
+       citation is valid.
+    2. **An archive.org snapshot of the same URL** (every qualifying failure —
+       ``_wayback_fallback_content``).
+
+    Live-first, because the two are not competing options: ``wayback.check``
+    runs on the success path either way, so tier 1 delivers the snapshot link
+    *as well as* a current read, where archive-first would give up the current
+    read to obtain something it was going to get anyway. See the comment at the
+    call site.
+
+    The result records ``verified_via`` — ``direct``, ``tls_impersonation`` or
+    ``wayback_fallback`` — plus ``origin_failure``, so a citation read from the
+    archive is never mistaken for one read from the live source, and one that
+    needed escalation is never mistaken for a source that opens freely.
 
     When that fallback is attempted and still yields nothing readable, the
     unresolved result carries the ``wayback`` availability answer anyway, so the
@@ -595,10 +658,15 @@ def _resolve_known_url(
     verified_via = "direct"
     fallback_reason = None
     wb = None
-    # Set only on the direct path below. The Wayback fallback reads from
-    # archive.org, whose address already appears under `wayback`, and reporting
-    # a snapshot URL as the citation's resolved location would be wrong.
+    # Set by the two paths that read a live page — the direct fetch below and
+    # the TLS-impersonation escalation. It stays empty on the Wayback fallback:
+    # that content came from archive.org, whose address already appears under
+    # `wayback`, and reporting a snapshot URL as the citation's resolved
+    # location would be wrong.
     final_url = ""
+    # Which URL the archive lookup asks about. Only the escalation path moves it
+    # off ``known_url`` — see where it is reassigned below.
+    archive_lookup_url = known_url
     try:
         resp = safe_get(known_url, timeout=timeout)
         resp.raise_for_status()
@@ -640,39 +708,78 @@ def _resolve_known_url(
         # One except for both shapes of failure: wayback.fallback_reason_for_exception
         # dispatches an HTTPError on its status and everything else on its type.
         reason = wayback.fallback_reason_for_exception(e)
-        # A falsy `reason` means no lookup was made at all, so there is genuinely
-        # no `wb` to carry — that stays None, distinct from a lookup that ran and
-        # came back None. Collapsing the two would report "the archive.org lookup
-        # did not complete" for a 404, which was never looked up in the first
-        # place and never will be on a re-run.
-        fallback, wb = (
-            _wayback_fallback_content(known_url, timeout) if reason else (None, None)
+        # Escalate before reaching for the archive, deliberately. The two are
+        # not alternatives with a cost to weigh: ``wayback.check`` runs on the
+        # success path below regardless, so reading the live page first yields
+        # the snapshot link *as well*, while archive-first would silently trade
+        # away the live read and never find out whether the page still says it.
+        # The pairing this run needs is the archive *beside* the source, not
+        # instead of it.
+        #
+        # Freshness is the other half. The checksum and the relevance verdict
+        # are reported at the strongest tier this pipeline has, and they should
+        # describe the document the article actually cites. Both snapshots on
+        # the 2026-09-05 Honda run were flagged stale (358 and 494 days);
+        # verifying against a year-old copy and labelling it `checksum` asserts
+        # a currency the run never established. Where escalation fails, the
+        # archive still gets its turn immediately below and that trade is made
+        # explicit in ``archive_provenance``.
+        escalated = (
+            _impersonation_fallback_content(known_url, timeout)
+            if reason == "blocked"
+            else None
         )
-        if fallback is None:
-            log.warning(f"Known source URL fetch failed for claim '{claim[:50]}': {e}")
-            failed = {
-                "claim": claim,
-                "url": known_url,
-                "resolved": False,
-                "note": f"Known source URL could not be fetched: {e}",
-            }
-            if wb is not None:
-                # The fallback was tried and did not produce readable content,
-                # but archive.org's answer is still a fact about this citation:
-                # "no snapshot exists" and "we never found out" need different
-                # follow-up from the author, and without this the citation
-                # recorded neither. Only set when a lookup actually happened —
-                # an absent key means "never asked", which the renderer says
-                # differently.
-                failed["wayback"] = wb
-            return failed
-        _, content, content_kind = fallback
-        verified_via = "wayback_fallback"
-        fallback_reason = reason
+        if escalated is not None:
+            final_url, content, content_kind = escalated
+            verified_via = "tls_impersonation"
+            fallback_reason = reason
+            # Ask archive.org about the page that actually served the content,
+            # not the URL we started from. On the Honda run every one of these
+            # was a Vertex `grounding-api-redirect`, and looking *that* up
+            # returned `archived: false` — which the renderer states as
+            # "archive.org has no snapshot of this URL". Both real sources are
+            # archived. Getting this wrong would put a false absence next to the
+            # citations that most need the archive to be there.
+            archive_lookup_url = final_url
+        else:
+            # A falsy `reason` means no lookup was made at all, so there is
+            # genuinely no `wb` to carry — that stays None, distinct from a
+            # lookup that ran and came back None. Collapsing the two would
+            # report "the archive.org lookup did not complete" for a 404, which
+            # was never looked up in the first place and never will be on a
+            # re-run.
+            fallback, wb = (
+                _wayback_fallback_content(known_url, timeout)
+                if reason
+                else (None, None)
+            )
+            if fallback is None:
+                log.warning(
+                    f"Known source URL fetch failed for claim '{claim[:50]}': {e}"
+                )
+                failed = {
+                    "claim": claim,
+                    "url": known_url,
+                    "resolved": False,
+                    "note": f"Known source URL could not be fetched: {e}",
+                }
+                if wb is not None:
+                    # The fallback was tried and did not produce readable
+                    # content, but archive.org's answer is still a fact about
+                    # this citation: "no snapshot exists" and "we never found
+                    # out" need different follow-up from the author, and without
+                    # this the citation recorded neither. Only set when a lookup
+                    # actually happened — an absent key means "never asked",
+                    # which the renderer says differently.
+                    failed["wayback"] = wb
+                return failed
+            _, content, content_kind = fallback
+            verified_via = "wayback_fallback"
+            fallback_reason = reason
 
     # The fallback path already asked archive.org; don't ask twice.
     if wb is None:
-        wb = wayback.check(known_url)
+        wb = wayback.check(archive_lookup_url)
     result = {
         "claim": claim,
         "source_name": "fact-check model",
@@ -690,6 +797,27 @@ def _resolve_known_url(
         "checksum_basis": "extracted_text",
         "wayback": wb,
     }
+
+    if verified_via == "tls_impersonation":
+        # Read from the live page, but only after presenting a browser TLS
+        # fingerprint. Recorded as reader-facing friction rather than as a
+        # confession about how we fetched it: for a public document the reader
+        # gets the same page, so the retrieval method says nothing about whether
+        # the citation is valid. What it *does* say is that this host actively
+        # filters clients — which is a durability warning about the link, and
+        # makes this exactly the citation that wants an archive copy printed
+        # next to it. Own field, not `note`, for the same reason
+        # `archive_provenance` is: every branch below may overwrite `note` with
+        # something more specific, and this stays true regardless.
+        result["origin_failure"] = fallback_reason
+        result["reader_access"] = (
+            "This source refused an ordinary automated request (403) and served "
+            "the page only to a browser-shaped client. The content read, "
+            "checksummed and verified here is the live page, and a reader "
+            "opening it in a normal browser will usually get through. But a host "
+            "that filters clients is a fragile citation — cite the archive copy "
+            "alongside it."
+        )
 
     if verified_via == "wayback_fallback":
         # The content behind this citation came from archive.org, not the live
