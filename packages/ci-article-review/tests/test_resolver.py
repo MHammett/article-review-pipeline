@@ -3040,3 +3040,46 @@ class TestArchiveMatchesLive:
         c = self._cit()
         self._run([c], side_effect=Exception("kaboom"))
         assert c["resolved"] is True
+
+
+class TestReaskCarriesTheArchiveResult:
+    """``attach_source_checks`` kept five fields and dropped the rest, so the
+    archive work done for a proposed source was discarded."""
+
+    def test_the_snapshot_and_verdict_survive(self):
+        from ci_article_review.adapters.citation import reask
+
+        result = {"reask": {"action": "different_source"}}
+        outcome = {
+            "verification": "checksum",
+            "resolved": True,
+            "url": "https://example.org/alt",
+            "archive_match": "identical",
+            "wayback": {
+                "archived": True,
+                "snapshot_url": "https://web.archive.org/web/2026/x",
+                "snapshot_is_error_capture": False,
+            },
+        }
+        reask.attach_source_checks([(result, {})], [outcome])
+        check = result["reask"]["source_check"]
+        assert check["snapshot_url"] == "https://web.archive.org/web/2026/x"
+        assert check["archive_match"] == "identical"
+        assert check["snapshot_is_error_capture"] is False
+
+    def test_a_refuted_citation_stays_refuted(self):
+        """The archive result rides along; it must not promote the citation."""
+        from ci_article_review.adapters.citation import reask
+
+        result = {"verification": "content_mismatch", "reask": {}}
+        reask.attach_source_checks(
+            [(result, {})], [{"verification": "checksum", "resolved": True}]
+        )
+        assert result["verification"] == "content_mismatch"
+
+    def test_a_missing_outcome_does_not_raise(self):
+        from ci_article_review.adapters.citation import reask
+
+        result = {"reask": {}}
+        reask.attach_source_checks([(result, {})], [None])
+        assert result["reask"]["source_check"]["snapshot_url"] == ""

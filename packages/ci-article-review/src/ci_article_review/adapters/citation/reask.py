@@ -354,13 +354,33 @@ def attach_source_checks(pending, checked):
     The outcome is stored under the re-ask, never merged into the result's own
     ``verification``. A refuted citation stays refuted; what changes is that the
     author is told whether the replacement the model offered holds up.
+
+    The archive result rides along for the same reason the URL does. A proposed
+    source goes through the whole of ``resolve_citations``, which means the run
+    already asked archive.org about it and, where it was missing, spent a real
+    capture on it. Keeping five fields and dropping the rest threw that away:
+    the author was shown a replacement URL with no archive copy beside it, for a
+    snapshot the pipeline had just paid for. Carrying ``snapshot_url`` and the
+    match verdict does not touch the citation's own verification — it is the
+    same address, with the durable copy of it attached.
     """
     for (result, _entry), outcome in zip(pending, checked):
-        reask = result.get("reask") or {}
+        # setdefault, not ``get(...) or {}``: an empty dict is falsy, so the
+        # ``or`` branch built a *fresh* dict and the assignment below landed on
+        # a throwaway the caller never sees. Latent rather than harmless — a
+        # re-ask normally carries an action by the time it gets here, so the
+        # only reason it never bit is that the dict happened not to be empty.
+        # The sibling use above only reads, which is why it is left alone.
+        reask = result.setdefault("reask", {})
+        outcome = outcome or {}
+        wb = outcome.get("wayback") or {}
         reask["source_check"] = {
-            "verification": (outcome or {}).get("verification"),
-            "resolved": bool((outcome or {}).get("resolved")),
-            "url": (outcome or {}).get("url", ""),
-            "relevance_verdict": (outcome or {}).get("relevance_verdict", ""),
-            "relevance_reason": (outcome or {}).get("relevance_reason", ""),
+            "verification": outcome.get("verification"),
+            "resolved": bool(outcome.get("resolved")),
+            "url": outcome.get("url", ""),
+            "relevance_verdict": outcome.get("relevance_verdict", ""),
+            "relevance_reason": outcome.get("relevance_reason", ""),
+            "snapshot_url": wb.get("snapshot_url", ""),
+            "snapshot_is_error_capture": bool(wb.get("snapshot_is_error_capture")),
+            "archive_match": outcome.get("archive_match", ""),
         }

@@ -254,6 +254,8 @@ The comparison is exact, not fuzzy, because of one API detail: `https://web.arch
 
 A difference is reported, not judged. It has two innocent explanations (the page changed after capture; extraction differs slightly) and one serious one (the capture is not the document), and this pass cannot tell them apart. Citations resolved *from* the archive are skipped — comparing a snapshot with itself proves nothing.
 
+**Re-asked alternative sources.** When a refuted citation's asserting model proposes a different source, that proposal goes through the whole of `resolve_citations` — so the run has already asked archive.org about it and, where it was missing, spent a real capture. The archive address and match verdict are carried through to the proposal in the report rather than discarded, so a source the author may adopt arrives with its durable copy attached. The proposal's own verification is untouched: a refuted citation stays refuted.
+
 **Snapshots that captured an error page.** The availability API reports each capture's own HTTP status, and it was being discarded. A pre-existing snapshot can be a capture of a 403 or 404 — "archived" is then true and useless, because what is preserved is the refusal, not the document. Those are now flagged outright. The pipeline's own captures cannot produce one (`capture_all=0`), but pre-existing snapshots are outside its control.
 
 **Unreadable-origin fallback.** When a direct fetch of a `known_url` fails in a way that means *we couldn't read the origin* rather than *the resource is gone*, the pipeline makes one attempt (never a retry loop) to obtain the document another way, and uses whatever it gets for checksumming and relevance verification. There are two tiers, tried in this order:

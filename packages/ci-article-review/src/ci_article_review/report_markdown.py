@@ -880,6 +880,24 @@ def _render_reask(reask):
         else:
             outcome = "could not be resolved"
         lines.append(f"    - That proposed source was checked: {outcome}.")
+        # The run already archived this URL if it needed archiving, so the
+        # author gets the durable address here rather than being sent to find
+        # it. Only offered when the pairing is safe — the same three states the
+        # reference list withholds.
+        snapshot = check.get("snapshot_url")
+        if snapshot and not check.get("snapshot_is_error_capture"):
+            if check.get("archive_match") == _MATCH_DIFFERS:
+                lines.append(
+                    f"    - Archive of that source: {snapshot} — **does not "
+                    f"match the live page**; check before citing it."
+                )
+            elif check.get("archive_match") == _MATCH_IDENTICAL:
+                lines.append(
+                    f"    - Archive of that source: {snapshot} (verified "
+                    f"identical to the live page)."
+                )
+            else:
+                lines.append(f"    - Archive of that source: {snapshot}")
     elif action == "different_source":
         lines.append("    - That proposed source was NOT checked. Treat it as a lead.")
     return lines

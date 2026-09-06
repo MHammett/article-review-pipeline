@@ -2488,3 +2488,56 @@ class TestHtmlReferenceBlock:
         )
         assert "<script>" not in block
         assert "&quot;&gt;&lt;script&gt;" in block
+
+
+class TestReaskArchiveIsCarriedThrough:
+    """A proposed replacement source goes through the whole of
+    ``resolve_citations``, so the run has already asked archive.org about it and,
+    where it was missing, spent a real capture. Showing the URL without the
+    archive copy threw that away."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/alt"
+
+    def _cit(self, **check):
+        base = {
+            "verification": "checksum",
+            "resolved": True,
+            "url": "https://example.org/alt",
+        }
+        base.update(check)
+        return {
+            "claim": "A claim",
+            "url": "https://example.org/orig",
+            "resolved": True,
+            "relevance_verdict": "contradicts",
+            "reask": {
+                "action": "different_source",
+                "source_url": "https://example.org/alt",
+                "source_check": base,
+            },
+        }
+
+    def _text(self, **check):
+        return "\n".join(report_markdown._render_reask(self._cit(**check)["reask"]))
+
+    def test_the_archive_address_is_offered_beside_the_proposal(self):
+        out = self._text(snapshot_url=self.SNAP, archive_match="identical")
+        assert f"Archive of that source: {self.SNAP}" in out
+        assert "verified identical to the live page" in out
+
+    def test_a_divergent_archive_is_flagged(self):
+        out = self._text(snapshot_url=self.SNAP, archive_match="differs")
+        assert "does not match the live page" in out
+
+    def test_an_unverified_archive_is_offered_without_a_claim(self):
+        out = self._text(snapshot_url=self.SNAP, archive_match="unchecked")
+        assert f"Archive of that source: {self.SNAP}" in out
+        assert "verified identical" not in out
+        assert "does not match" not in out
+
+    def test_a_snapshot_of_an_error_page_is_not_offered(self):
+        out = self._text(snapshot_url=self.SNAP, snapshot_is_error_capture=True)
+        assert "Archive of that source" not in out
+
+    def test_a_proposal_with_no_archive_gains_no_line(self):
+        assert "Archive of that source" not in self._text()
