@@ -340,6 +340,41 @@ def _metadata_gap_note(report, domain):
     ]
 
 
+def _render_degradations(report):
+    """Knock-on effects of a failed pass — what it cost a *different* section.
+
+    ``report["degradations"]`` has had a producer and a console reader since it
+    was added, and no reader for the report itself: the entry that says
+    "Sections 2 and 9 are working from an incomplete claim list" scrolled past
+    in the terminal and never reached ``run_N_*_review.md`` — the file the
+    author keeps, re-reads, and pastes into a chat model. Of the two places it
+    could be said, it was only ever said in the one that disappears.
+
+    Sits with the failure blocks for the same reason the console prints it
+    there: "perplexity:fact_check failed" and "9 claims verified" are
+    separately unremarkable, and it is the link between them that tells a
+    reader which numbers below to distrust.
+    """
+    degradations = report.get("degradations") or []
+    if not degradations:
+        return []
+
+    lines = [f"## ⚠ Knock-on effects of failed passes ({len(degradations)})", ""]
+    for entry in degradations:
+        # ``section`` is a comma-joined title string; older reports predate the
+        # key entirely. Neither is worth failing a render over.
+        where = entry.get("section")
+        caused_by = entry.get("caused_by") or []
+        heading = where or "Affected sections"
+        lines.append(f"**{heading}**")
+        if caused_by:
+            lines.append(f"- Caused by: {', '.join(caused_by)}")
+        lines.append("")
+        lines.append(entry.get("detail", ""))
+        lines.append("")
+    return lines
+
+
 def _render_domains_not_run(report):
     """Header block naming domains no model reviewed, or [].
 
@@ -2113,6 +2148,7 @@ def render_report_markdown(report):
 
     lines.extend(_render_model_failures(report))
     lines.extend(_render_domains_not_run(report))
+    lines.extend(_render_degradations(report))
 
     if report.get("truncated_results"):
         lines.append(
