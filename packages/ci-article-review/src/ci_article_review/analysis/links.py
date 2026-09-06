@@ -20,7 +20,19 @@ log = logging.getLogger(__name__)
 # Trailing punctuation characters that end a sentence but are not part of a URL.
 _URL_RE = re.compile(r"https?://[^\s\)\]\>\"\'<,;]+")
 _TRAILING_PUNCT = re.compile(r"[.,!?:;]+$")
-_HEAD_TIMEOUT = 8
+#: Per-request budget for one link check.
+#:
+#: Was 8s, which sits under what a live but slow origin actually takes:
+#: measured 2026-09-04, https://www.eia.gov/ answered in 9.77s and the run
+#: summary reported it ``BROKEN (timeout)``. A false "broken" on a good citation
+#: costs the author a re-sourcing job that did not need doing, and .gov hosts
+#: are among the ones this publication cites most.
+#:
+#: 20s is that measurement with room for a worse afternoon. Raising it is
+#: cheap: checks run 10-wide, so a page of dead links costs ceil(n/10) x 20s
+#: rather than n x 20s, and a genuinely dead host refuses long before the
+#: ceiling — only a silently-dropping one waits it out.
+_HEAD_TIMEOUT = 20
 _MAX_PARALLEL = 10
 
 

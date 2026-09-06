@@ -23,6 +23,7 @@ import pytest
 
 import ci_article_review.pipeline as pipeline
 from ci_article_review.handoff_parser import build_handoff_from_raw_text
+from ci_article_review.handoff_gaps import _sections_for
 from ci_article_review.report_markdown import render_report_markdown
 
 
@@ -88,7 +89,7 @@ _EMPTY_DOMAIN_DATA = {
 
 
 @contextmanager
-def _run(handoff, prompts=None):
+def _run(handoff, prompts=None, **run_kwargs):
     """Run the whole draft pipeline offline, recording every prompt sent.
 
     ``prompts`` collects the *user* prompt each domain would have received —
@@ -120,7 +121,7 @@ def _run(handoff, prompts=None):
         p("_run_domain", side_effect=_record)
         stack.enter_context(patch.object(pipeline.time, "sleep"))
         yield pipeline.run_draft_pipeline(
-            None, "testpub", handoff=dict(handoff), offline=True
+            None, "testpub", handoff=dict(handoff), offline=True, **run_kwargs
         )
 
 
@@ -181,18 +182,39 @@ class TestRawDraftPath:
     def test_the_claim_gap_names_only_the_sections_this_run_actually_built(
         self, raw_draft_report
     ):
-        """One model at ``standard`` runs two domains, not five.
+        """Every section named must be one this run actually produced.
 
-        ``primary_claim`` feeds argument_integrity, completeness and red_team,
-        but only completeness ran here — and a gap report that named Section 4
-        anyway would be telling the author about a degradation to a section
-        this run never produced.
+        Asserted as an invariant against the run's own call log rather than as
+        a fixed list. The earlier version pinned the expected sections to what
+        one model covered at ``standard``, and the ensemble-width work that
+        retired that preset widened the fixture from two domains to five —
+        failing a test whose subject had not changed. What matters is that the
+        report never claims a degradation to a section the run never built.
         """
         domains_ran = _domains_that_ran(raw_draft_report)
         gap = _by_field(raw_draft_report, "primary_claim")
         assert gap["severity"] == "critical"
-        assert gap["sections"] == ["SECTION 5: Completeness and Framing"]
+        assert gap["domains"], "the claim gap named no domain at all"
         assert set(gap["domains"]) <= domains_ran
+        assert gap["sections"] == _sections_for(gap["domains"])
+
+    def test_a_narrowed_run_names_only_the_one_domain_it_ran(self, tmp_path):
+        """``--only-domain`` is the case the fixture above can no longer show.
+
+        With every domain running, "does not blame a pass that never ran" is
+        vacuously true. Narrowing the run to one domain makes it load-bearing
+        again at the pipeline level, not only in the unit tests.
+        """
+        handoff = build_handoff_from_raw_text(_RAW_DRAFT, source_name="water-piece")
+        with patch("ci_article_review.pipeline.HISTORY_ROOT", str(tmp_path / "h")):
+            with _run(handoff, only_domain="completeness") as report:
+                gap = _by_field(report, "primary_claim")
+
+        assert _domains_that_ran(report) == {"completeness"}
+        assert gap["domains"] == ["completeness"]
+        assert gap["sections"] == ["SECTION 5: Completeness and Framing"]
+        assert "SECTION 4" not in " ".join(gap["sections"])
+        assert "SECTION 6" not in " ".join(gap["sections"])
 
     def test_the_audience_gap_proposes_the_publication_config_audience(
         self, raw_draft_report

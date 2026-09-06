@@ -163,6 +163,12 @@ def parse_metadata_only(text):
     run_number = _extract_field(text, "Pipeline run:")
     # Optional. Names the model that drafted the article so the pipeline can
     # keep it out of voice_style — see _drafting_model() in pipeline.py.
+    # Optional. Who first-person wording in the draft refers to, for citation
+    # verification: an "I have a family." claim cannot be checked against a page
+    # without knowing whose family. Falls back to the publication's own
+    # author_name when absent, so single-author publications need not repeat it
+    # per article; set it here for a guest or co-authored piece.
+    author = _extract_field(text, "Author:")
     drafted_with = _extract_field(text, "Drafted with:")
     # Optional. Pins the history directory so revising the title does not fork
     # the article's history — see _history_key() in pipeline.py.
@@ -186,6 +192,7 @@ def parse_metadata_only(text):
         "uncertain_sections": section("UNCERTAIN SECTIONS"),
         "known_gaps": section("KNOWN GAPS"),
         "additional_context": section("ADDITIONAL CONTEXT FOR REVIEW MODELS"),
+        "author": author,
         "drafted_with": drafted_with,
         "history_key": history_key,
     }
@@ -230,6 +237,12 @@ def parse_draft_submission(text):
     run_number = _extract_field(text, "Pipeline run:")
     # Optional. Names the model that drafted the article so the pipeline can
     # keep it out of voice_style — see _drafting_model() in pipeline.py.
+    # Optional. Who first-person wording in the draft refers to, for citation
+    # verification: an "I have a family." claim cannot be checked against a page
+    # without knowing whose family. Falls back to the publication's own
+    # author_name when absent, so single-author publications need not repeat it
+    # per article; set it here for a guest or co-authored piece.
+    author = _extract_field(text, "Author:")
     drafted_with = _extract_field(text, "Drafted with:")
     # Optional. Pins the history directory so revising the title does not fork
     # the article's history — see _history_key() in pipeline.py.
@@ -268,6 +281,7 @@ def parse_draft_submission(text):
         "uncertain_sections": section("UNCERTAIN SECTIONS"),
         "known_gaps": section("KNOWN GAPS"),
         "additional_context": section("ADDITIONAL CONTEXT FOR REVIEW MODELS"),
+        "author": author,
         "drafted_with": drafted_with,
         "history_key": history_key,
         "draft": _REQUIRED_FIELDS["draft"][1],
