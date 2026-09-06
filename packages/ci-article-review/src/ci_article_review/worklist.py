@@ -17,12 +17,14 @@ opened in a browser clear all 8. Reporting "8 items" there would be dishonest
 about the effort in exactly the direction that gets a worklist abandoned.
 
 **It recovers the URL a human can actually open.** The ``url`` field on a
-refused citation is whatever the fact-check model handed over, which for a
-grounded Gemini answer is a ``vertexaisearch.cloud.google.com`` redirect that
-expires about 30 days after the run. The address that 403'd — the publisher's
-own — is in the ``note``, because that is where ``requests`` puts it in the
-exception text. The worklist parses it back out, so the author gets
-``bianchihonda.com/...`` rather than an opaque redirect blob.
+citation is whatever the fact-check model handed over, which for a grounded
+Gemini answer is a ``vertexaisearch.cloud.google.com`` redirect that expires
+about 30 days after the run. Two better addresses exist and neither is that
+field: for a fetch that landed, the resolver records where it landed in
+``final_url``; for one that was refused, the address it was refused at is in
+the ``note``, because that is where ``requests`` puts it. Both are preferred
+over the stored URL, so the author gets ``bianchihonda.com/...`` rather than an
+opaque blob with a clock on it.
 
 **It separates the permanent from the temporary.** An item is blocked either by
 something no tool will ever do (judgement, a paywall, a document that is not
@@ -162,21 +164,48 @@ def _is_grounding_redirect(url):
     return _GROUNDING_MARKER in (url or "")
 
 
-def _real_url(citation):
-    """The address a human should open, and whether it had to be recovered.
+#: How the address on an item was arrived at, when it was not simply the URL
+#: the citation stored. Both cases need saying, because both mean the author is
+#: being handed something different from what the report's ``url`` field shows.
+_FROM_REDIRECT = "redirect"
+_FROM_NOTE = "note"
 
-    Returns ``(url, recovered)``. ``recovered`` is True when the usable address
-    came out of the failure message rather than the ``url`` field — which is the
-    normal case for a refused fetch behind a grounded answer, where ``url`` is
-    an expiring redirect and the note holds the publisher's own address.
+
+def _real_url(citation):
+    """The address a human should open, and how it was arrived at.
+
+    Returns ``(url, provenance)`` where provenance is ``None``, ``_FROM_REDIRECT``
+    or ``_FROM_NOTE``. Three sources, in descending order of how much the run
+    actually knows:
+
+    ``final_url`` — where the fetch landed after following redirects. The
+    resolver records it only when it differs from the requested URL, so its mere
+    presence means the stored ``url`` was a redirector. This is the best answer
+    available and it is the one the run *proved*, by fetching it.
+
+    The failure message — for a fetch that never landed there is no
+    ``final_url``, but ``requests`` puts the address it was refused at into the
+    exception text, and the resolver folds that into ``note``.
+
+    ``url`` — what the citation stored, which for a grounded answer is a
+    ``vertexaisearch`` redirect that expires roughly 30 days after the run.
+
+    Preferring ``final_url`` is the point of this ordering. A page that fetched
+    and could not be read is the one case where the run knows the publisher's
+    own address and the citation still shows a 271-character redirect; handing
+    the author the redirect there was giving them a link with a clock on it when
+    a durable one was sitting in the same dict.
     """
-    from_note = _URL_IN_NOTE.search(citation.get("note") or "")
     stored = citation.get("url") or ""
+    landed = citation.get("final_url") or ""
+    if landed and landed != stored:
+        return landed, _FROM_REDIRECT
+    from_note = _URL_IN_NOTE.search(citation.get("note") or "")
     if from_note:
         recovered = from_note.group(1).rstrip(".,;)")
         if recovered:
-            return recovered, recovered != stored
-    return stored, False
+            return recovered, _FROM_NOTE if recovered != stored else None
+    return stored, None
 
 
 def _status(citation):
@@ -354,10 +383,12 @@ def _open_page_items(citations):
     for c in citations:
         if _disposition(c) != "unverifiable":
             continue
-        url, _ = _real_url(c)
+        url, provenance = _real_url(c)
         if not url:
             continue
-        slot = by_url.setdefault(url, {"citations": [], "reasons": set()})
+        slot = by_url.setdefault(
+            url, {"citations": [], "reasons": set(), "provenance": provenance}
+        )
         slot["citations"].append(c)
         slot["reasons"].add(_unreadable_reason(c))
 
@@ -365,7 +396,17 @@ def _open_page_items(citations):
     for url, slot in by_url.items():
         reason = min(slot["reasons"], key=_UNREADABLE_ORDER.index)
         blocked_by, why, next_step, gap = _UNREADABLE[reason]
-        if _is_grounding_redirect(url):
+        if slot["provenance"] == _FROM_REDIRECT:
+            # The run followed the redirector and this is where it landed, so
+            # the author gets the durable address rather than the wrapper the
+            # citation stored. Worth saying: it will not match the URL beside
+            # this claim in SECTION 9, and an unexplained mismatch reads like
+            # a bug.
+            next_step += (
+                " This is where the fetch actually landed, not the redirector "
+                "the citation stores — SECTION 9 will show the other one."
+            )
+        elif _is_grounding_redirect(url):
             next_step += (
                 " That address is a Google grounding redirect rather than the "
                 "publisher's own, and those expire roughly 30 days after the "
@@ -393,10 +434,10 @@ def _find_copy_items(citations):
     for c in citations:
         if _disposition(c) != "fetch_failed":
             continue
-        url, recovered = _real_url(c)
+        url, provenance = _real_url(c)
         if not url:
             continue
-        slot = by_url.setdefault(url, {"citations": [], "recovered": recovered})
+        slot = by_url.setdefault(url, {"citations": [], "provenance": provenance})
         slot["citations"].append(c)
 
     items = []
@@ -432,7 +473,7 @@ def _find_copy_items(citations):
             gap = "Tell a transient fetch failure from a permanent one and retry it"
 
         next_step = f"Open it in a browser. {_archive_state(here[0])}"
-        if slot["recovered"]:
+        if slot["provenance"] == _FROM_NOTE:
             next_step += (
                 " (That address was recovered from the failure message — the URL "
                 "stored on the citation is an expiring redirect, not the "

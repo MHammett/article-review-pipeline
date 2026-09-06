@@ -1124,3 +1124,85 @@ class TestTheCapSaysWhetherItCutOnValueOrOnATie:
         built = build_worklist(report, limit=3)
         assert built["items"][0]["possibly_wrong"] is True
         assert all(not i["possibly_wrong"] for i in built["held_back"])
+
+
+class TestTheAddressPrefersWhereTheFetchActuallyLanded:
+    """``final_url`` beats the redirector the citation stores.
+
+    The resolver follows redirects and records where it ended up, but only when
+    that differs from what was requested — so the field's presence *is* the
+    signal that ``url`` was a redirector. For a page that fetched and could not
+    be read, this is the one case where the run knows the publisher's own
+    address and the citation still shows a 271-character `vertexaisearch` link
+    that expires roughly 30 days after the run. Handing the author the expiring
+    one was giving them a dead link with a durable one in the same dict.
+    """
+
+    LANDED = "https://www.jalopnik.com/honda-clocks-stuck-20-years-in-the-past"
+
+    def _landed(self, **extra):
+        return _unreadable("a claim", url=REDIRECT, final_url=self.LANDED, **extra)
+
+    def test_the_landing_address_is_what_the_author_gets(self):
+        built = build_worklist(_report([self._landed()]))
+        assert built["items"][0]["target"] == self.LANDED
+
+    def test_the_expiring_redirect_is_not_offered(self):
+        md = _rendered(_report([self._landed()]))
+        assert REDIRECT not in md.split("### What a better")[0]
+
+    def test_the_mismatch_with_section_9_is_explained(self):
+        """SECTION 9 shows the stored URL. An unexplained difference reads as a
+        bug, so the item says which one it is showing and why."""
+        md = _rendered(_report([self._landed()]))
+        assert "where the fetch actually landed" in md
+        assert "SECTION 9 will show the other one" in md
+
+    def test_the_expiry_warning_is_dropped_once_it_no_longer_applies(self):
+        """Telling the author a durable publisher URL expires in 30 days would
+        be false, and would push them to redo work already done."""
+        md = _rendered(_report([self._landed()]))
+        assert "expire roughly 30 days" not in md
+
+    def test_the_warning_still_fires_when_only_the_redirect_is_known(self):
+        md = _rendered(_report([_unreadable("a claim", url=REDIRECT)]))
+        assert "expire roughly 30 days" in md
+
+    def test_citations_landing_on_one_page_collapse_to_one_action(self):
+        """Two redirectors resolving to the same article are one page to open.
+        Grouping on the stored URL would have made them two."""
+        built = build_worklist(
+            _report(
+                [
+                    _unreadable("claim a", url=REDIRECT, final_url=self.LANDED),
+                    _unreadable("claim b", url=REDIRECT + "XYZ", final_url=self.LANDED),
+                ]
+            )
+        )
+        assert len(built["items"]) == 1
+        assert len(built["items"][0]["claims"]) == 2
+
+    def test_a_final_url_equal_to_the_stored_one_is_not_treated_as_a_redirect(self):
+        plain = "https://example.org/article"
+        built = build_worklist(_report([_unreadable("c", url=plain, final_url=plain)]))
+        assert built["items"][0]["target"] == plain
+        assert "SECTION 9 will show the other one" not in _rendered(
+            _report([_unreadable("c", url=plain, final_url=plain)])
+        )
+
+    def test_a_refused_fetch_still_reads_its_address_from_the_note(self):
+        """A fetch that never landed has no ``final_url``; the note is all there
+        is, and that path must not regress."""
+        built = build_worklist(_report([_refused("c")]))
+        assert built["items"][0]["target"] == BIANCHI
+        assert "recovered from the failure message" in _rendered(
+            _report([_refused("c")])
+        )
+
+    def test_final_url_wins_over_the_note_when_both_are_present(self):
+        """Landing beats being refused: one is where the run got to, the other
+        is where it was turned away."""
+        c = _refused("c")
+        c["final_url"] = self.LANDED
+        built = build_worklist(_report([c]))
+        assert built["items"][0]["target"] == self.LANDED
