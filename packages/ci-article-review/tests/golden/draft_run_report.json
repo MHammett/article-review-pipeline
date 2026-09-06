@@ -332,6 +332,21 @@
     }
   },
   "primary_claim": "Geography determines the answer.",
+  "provenance": {
+    "basis": "declared in the handoff, not measured from the text",
+    "drafted_with": null,
+    "marked": false,
+    "method": null,
+    "note": "No drafting model declared, so nothing can be said either way.",
+    "provider": null,
+    "registry_age_days": "<volatile>",
+    "registry_date": "<volatile>",
+    "registry_staleness": "<volatile>",
+    "scope": null,
+    "since": null,
+    "source": null,
+    "status": "unknown"
+  },
   "publication": "testpub",
   "run_number": 1,
   "section_1_consensus": [

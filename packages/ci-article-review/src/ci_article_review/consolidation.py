@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .passage_match import group_passages, normalise, same_passage
+from ci_core.llm import watermarking
 
 log = logging.getLogger(__name__)
 
@@ -1010,6 +1011,18 @@ def _ensemble_width(results, ensemble_cfg, lt_voted=False):
     }
 
 
+def _build_provenance(drafted_with):
+    """Provenance block: what drafted this, and does that provider mark text.
+
+    Kept in the report rather than only printed, so ``pipeline_history/``
+    accumulates a durable record of which articles carry a mark. By the time
+    anyone asks the question about a piece published months ago, the chat
+    thread that produced it is long gone.
+    """
+    status = watermarking.status_for(drafted_with)
+    return {"drafted_with": (drafted_with or "").strip() or None, **status}
+
+
 def build_report(
     article_title,
     publication_name,
@@ -1023,6 +1036,7 @@ def build_report(
     primary_claim="",
     prior_report_path=None,
     domains_not_run=None,
+    drafted_with="",
 ):
     """Merge ensemble results into a structured report.
 
@@ -1183,6 +1197,11 @@ def build_report(
         "lt_skipped_reason": lt_result.get("skipped_reason") if lt_result else None,
         "corrected_draft": corrected_draft,
         "primary_claim": primary_claim,
+        # Which provider drafted the article, and whether that provider marks
+        # its text output. Declared in the handoff, never measured: a
+        # statistical watermark cannot be detected without the provider's key,
+        # so this records what the author said rather than what the text shows.
+        "provenance": _build_provenance(drafted_with),
         "api_call_log": api_call_log,
         "delta": delta,
         "section_1_consensus": consensus_flags,
