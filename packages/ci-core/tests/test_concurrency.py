@@ -233,6 +233,61 @@ class TestRunAllWithTimeout:
         assert isinstance(results["slow"][1], TimeoutError)
         assert finished_order == ["fast"]
 
+    def test_a_stragglers_budget_is_not_re_spent_when_the_loop_reaches_it(self):
+        """A budget runs from when its own call started, not from when the
+        sequential join loop happens to arrive at that call.
+
+        Every test above puts the tight-budget job *first*, where the loop
+        reaches it immediately and the distinction cannot show. Production is
+        the other shape: the model with the smallest budget sits behind several
+        slower ones, so by the time the loop looks at it, its budget expired
+        long ago — and it was handed a fresh full one anyway. Measured
+        2026-09-03 on a maximum-preset run: four grok calls with a 120s budget
+        ran 143s, 233s, 310s and 378s, every one recorded OK, each landing
+        within a second of *(the moment its join began) + 120*.
+
+        Five hung calls behind one slow one. Their budgets all expired while
+        the first was still being waited on, so each must be abandoned the
+        moment the loop looks at it. Re-spending them serially costs
+        1.0 + 5 x 0.2s instead.
+        """
+        jobs = [("slow", lambda: time.sleep(1.0), 5.0)] + [
+            (f"hung{i}", lambda: time.sleep(30), 0.2) for i in range(5)
+        ]
+
+        started = time.monotonic()
+        results = run_all_with_timeout(jobs, global_timeout=20)
+        elapsed = time.monotonic() - started
+
+        assert results["slow"][1] is None
+        for i in range(5):
+            assert isinstance(results[f"hung{i}"][1], TimeoutError)
+        assert elapsed < 1.5, (
+            f"the group took {elapsed:.2f}s — each straggler was granted a "
+            f"fresh budget instead of one measured from its own start"
+        )
+
+    def test_a_call_that_overran_but_finished_is_still_a_result(self):
+        """The budget bounds how long this function *waits*, not whether an
+        answer that already arrived is usable.
+
+        The counterpart to the test above, and the reason the fix cannot simply
+        fail anything that outlived its budget: a call the loop was too busy to
+        collect on time has still done the work and been paid for. Discarding
+        it would throw away findings the run already bought.
+        """
+
+        def _late():
+            time.sleep(0.3)
+            return "late answer"
+
+        results = run_all_with_timeout(
+            [("slow", lambda: time.sleep(0.6), 5.0), ("late", _late, 0.05)],
+            global_timeout=20,
+        )
+
+        assert results["late"] == ("late answer", None)
+
     def test_jobs_actually_run_concurrently(self):
         """All four jobs must be in flight at once, not run in a sequential loop.
 
@@ -298,4 +353,100 @@ class TestRunAllWithTimeoutProcessExit:
         assert elapsed < self.MUST_EXIT_WITHIN, (
             f"process took {elapsed:.1f}s to exit with a {self.ABANDONED_SECONDS}s "
             f"abandoned job still running in the group"
+        )
+
+
+class TestForeignThreadPoolsDoNotHoldTheExitOpen:
+    """The hang that started the 2026-09-03 audit, from the other direction.
+
+    Everything else here keeps *our* abandoned work off the shutdown path. It
+    cannot help with a pool this codebase never creates, and litellm creates one
+    per streaming call for its post-call success logging. Those workers are not
+    daemons, so `threading._shutdown()` joins them.
+
+    Measured: a `ci-review` run printed its whole summary, wrote every output
+    file, then sat at 0% CPU with 19 threads — 18 blocked in `accept()` inside
+    `socket.socketpair()`, asyncio's Windows self-pipe, which had stopped
+    returning. The work was done; the process could not leave.
+    """
+
+    STUCK_SECONDS = 30
+    MUST_EXIT_WITHIN = 15
+
+    def _run(self, body):
+        script = textwrap.dedent(body).format(stuck=self.STUCK_SECONDS)
+        t0 = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=self.STUCK_SECONDS + 30,
+        )
+        return proc, time.monotonic() - t0
+
+    def test_a_stuck_foreign_worker_does_not_hold_the_interpreter(self):
+        proc, elapsed = self._run(
+            """
+            import concurrent.futures, time
+            from ci_core.concurrency import exit_without_waiting_for_foreign_threads
+
+            # Stand-in for litellm's logging executor: not ours, never shut
+            # down, and its worker outlives the run.
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            pool.submit(lambda: time.sleep({stuck}))
+            time.sleep(0.2)
+            print("work done")
+            exit_without_waiting_for_foreign_threads(0)
+            """
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert "work done" in proc.stdout, proc.stderr
+        assert elapsed < self.MUST_EXIT_WITHIN, (
+            f"exit took {elapsed:.1f}s with a {self.STUCK_SECONDS}s foreign "
+            f"worker still running — that is the original hang"
+        )
+
+    def test_output_written_before_the_exit_is_not_lost(self):
+        """`os._exit` runs no buffers down, so the flush has to be explicit —
+        and the report, review and capture are all written before this point."""
+        proc, _ = self._run(
+            """
+            import sys
+            from ci_core.concurrency import exit_without_waiting_for_foreign_threads
+
+            print("stdout line")
+            print("stderr line", file=sys.stderr)
+            exit_without_waiting_for_foreign_threads(0)
+            """
+        )
+        assert "stdout line" in proc.stdout
+        assert "stderr line" in proc.stderr
+
+    def test_the_exit_code_is_honoured(self):
+        proc, _ = self._run(
+            """
+            from ci_core.concurrency import exit_without_waiting_for_foreign_threads
+            exit_without_waiting_for_foreign_threads(3)
+            """
+        )
+        assert proc.returncode == 3
+
+    @pytest.mark.slow
+    def test_without_it_the_process_really_does_hang(self):
+        """Pins the diagnosis. A plain exit waits the foreign worker out."""
+        proc, elapsed = self._run(
+            """
+            import concurrent.futures, time
+
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            pool.submit(lambda: time.sleep({stuck}))
+            time.sleep(0.2)
+            print("work done")
+            """
+        )
+        assert "work done" in proc.stdout
+        assert elapsed >= self.STUCK_SECONDS - 3, (
+            f"exited in {elapsed:.1f}s — CPython no longer joins non-daemon "
+            f"pool workers at shutdown, so this fix needs revisiting"
         )

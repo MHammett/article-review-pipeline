@@ -31,10 +31,62 @@ used for its ``result(timeout=...)``, which ``Thread.join(timeout)`` provides
 directly.
 """
 
+import logging
+import os
+import sys
 import threading
 import time
 
-__all__ = ["run_with_timeout", "run_all_with_timeout"]
+__all__ = [
+    "run_with_timeout",
+    "run_all_with_timeout",
+    "exit_without_waiting_for_foreign_threads",
+]
+
+
+def exit_without_waiting_for_foreign_threads(code=0):
+    """Flush, then leave, without waiting on threads nobody can reach.
+
+    Everything above keeps *our* abandoned work off the shutdown path. It cannot
+    help with a pool this codebase never creates, and litellm creates one per
+    streaming call for its post-call success logging. Those workers are not
+    daemons, so ``threading._shutdown()`` joins them and the process cannot
+    leave until they return.
+
+    Measured 2026-09-03: a ``ci-review`` run printed its whole summary, wrote
+    every output file, then sat at 0% CPU with 19 threads — 18 of them blocked
+    in ``accept()`` inside ``socket.socketpair()``, asyncio's Windows self-pipe,
+    which had stopped returning. The work was finished; the process could not
+    leave. Two of six such processes were found alive two days later.
+
+    ``os._exit`` because nothing gentler reaches it
+    ----------------------------------------------
+    The obvious trick is to empty ``concurrent.futures.thread._threads_queues``
+    so its ``_python_exit`` hook finds nothing to join. Tried, measured, and it
+    is *worse*: that same hook is what puts a ``None`` sentinel in each work
+    queue to wake the workers. Removed from the registry, they never receive it,
+    block on ``work_queue.get()`` forever, and — still not being daemons —
+    ``threading._shutdown()`` waits on them without end. A bounded hang becomes
+    an unbounded one.
+
+    Nothing else works either, because the thread is not merely idle, it is
+    stuck inside a syscall that will not return. It cannot be woken, it cannot
+    be killed, and its ``daemon`` flag cannot be changed after ``start()``.
+    ``os._exit`` skips interpreter finalisation altogether, which is the only
+    thing that does not depend on that thread cooperating.
+
+    Safe here specifically because of *when* it is called: at the end of
+    ``main``, after the report, the readable review and the capture have all
+    been written and closed. Flushing explicitly first is what makes that true
+    for the streams, since ``os._exit`` runs no buffers down.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # pragma: no cover - a closed pipe is not our problem
+            pass
+    logging.shutdown()
+    os._exit(code)
 
 
 def run_with_timeout(fn, timeout):
@@ -90,10 +142,26 @@ def run_all_with_timeout(jobs, global_timeout):
     raised nothing, or ``{name: (None, exc)}`` otherwise — ``exc`` is whatever
     ``fn`` raised, or ``TimeoutError`` (message says which budget hit first)
     if neither finished before its deadline.
+
+    Both budgets are absolute deadlines stamped up front — the group's when this
+    function is entered, each call's when that call starts — never durations
+    handed out when the join loop arrives. The loop joins sequentially, so a
+    duration would restart every straggler's budget from wherever the loop had
+    got to: a call late in the list would be waited on for the sum of every
+    budget ahead of it plus its own. Measured 2026-09-03 at four grok calls
+    running 143-378s against a 120s budget, each recorded ``OK`` and each
+    landing within a second of *(the moment its join began) + 120*.
+
+    A call that outlived its budget but finished anyway still returns its value.
+    The budget bounds how long this function *waits*; work that is already done
+    has been paid for, and throwing it away would buy nothing.
     """
+    group_deadline = time.monotonic() + global_timeout
+
     outcomes = {}
     threads = {}
     per_job_timeout = {}
+    job_deadline = {}
 
     for name, fn, timeout in jobs:
         outcome = {}
@@ -110,22 +178,25 @@ def run_all_with_timeout(jobs, global_timeout):
         outcomes[name] = outcome
         threads[name] = worker
         per_job_timeout[name] = timeout
+        # timeout of None means "no per-call budget" (e.g. a model with no
+        # calibrated timeout) — the group deadline is still the backstop.
+        job_deadline[name] = None if timeout is None else time.monotonic() + timeout
         worker.start()
 
-    deadline = time.monotonic() + global_timeout
     results = {}
     for name, worker in threads.items():
-        own_timeout = per_job_timeout[name]
-        remaining = max(0.0, deadline - time.monotonic())
-        # own_timeout of None means "no per-call budget" (e.g. a model with no
-        # calibrated timeout) — the group deadline is still the backstop.
-        own_binds = own_timeout is not None and own_timeout <= remaining
-        worker.join(own_timeout if own_binds else remaining)
+        own_deadline = job_deadline[name]
+        own_binds = own_deadline is not None and own_deadline <= group_deadline
+        limit = own_deadline if own_binds else group_deadline
+        worker.join(max(0.0, limit - time.monotonic()))
 
         outcome = outcomes[name]
         if worker.is_alive():
             if own_binds:
-                results[name] = (None, TimeoutError(f"Timed out after {own_timeout}s"))
+                results[name] = (
+                    None,
+                    TimeoutError(f"Timed out after {per_job_timeout[name]}s"),
+                )
             else:
                 results[name] = (
                     None,

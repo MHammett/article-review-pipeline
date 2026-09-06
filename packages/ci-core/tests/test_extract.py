@@ -312,3 +312,58 @@ class TestExtractArticleStillWorks:
             _title, body = extract.extract_article("<html><body><p>x</p></body></html>")
 
         assert body == "trafilatura body"
+
+
+class TestBodySelection:
+    """trafilatura is preferred, but not when it has lost most of the page.
+
+    It is tuned for news articles: find one main content block, discard the rest
+    as boilerplate. Right for an article, wrong for a page whose content *is*
+    repeated blocks — a team page, a staff directory, a filings list. The
+    heuristic parser was only consulted when trafilatura returned nothing, so a
+    page it cut to one seventh went through unnoticed.
+
+    Measured 2026-09-04 on a six-person team page: trafilatura kept 439 of
+    36,717 bytes, covering one colleague. The page had been cited for two claims
+    about the article's *author*, whose bio was among the discarded 98%, so
+    citation verification reported the source as failing to support a claim the
+    page states outright.
+    """
+
+    def test_trafilatura_is_used_when_the_two_agree_closely(self):
+        """The normal case. Measured gaps on four real article pages were 1.09x
+        to 1.45x — trafilatura trimming navigation, which is its job."""
+        keep = "x" * 1000
+        assert self._choose(trafilatura=keep, heuristic="y" * 1200) == keep
+
+    def _choose(self, trafilatura, heuristic):
+        import unittest.mock as m
+
+        with (
+            m.patch.object(
+                extract, "_extract_with_trafilatura", return_value=trafilatura
+            ),
+            m.patch.object(extract, "_fallback_body", return_value=heuristic),
+        ):
+            return extract._best_body("<html></html>", [])
+
+    def test_the_heuristic_wins_a_landslide(self):
+        """439 vs 3,381 — the shape that says "this is not an article"."""
+        heuristic = "y" * 3381
+        assert self._choose(trafilatura="x" * 439, heuristic=heuristic) == heuristic
+
+    def test_an_empty_trafilatura_result_falls_back_as_before(self):
+        assert self._choose(trafilatura="", heuristic="body") == "body"
+
+    def test_both_empty_is_empty(self):
+        assert self._choose(trafilatura="", heuristic="") == ""
+
+    def test_a_shorter_heuristic_never_wins(self):
+        keep = "x" * 5000
+        assert self._choose(trafilatura=keep, heuristic="y" * 100) == keep
+
+    def test_the_threshold_is_not_met_at_exactly_the_ratio(self):
+        """Strictly greater than, so the boundary keeps trafilatura."""
+        tr = "x" * 1000
+        at_ratio = "y" * int(1000 * extract._HEURISTIC_WINS_RATIO)
+        assert self._choose(trafilatura=tr, heuristic=at_ratio) == tr
