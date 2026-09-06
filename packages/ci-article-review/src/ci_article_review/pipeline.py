@@ -2779,6 +2779,7 @@ def run_draft_pipeline(
         domains_ran=sorted({domain for (_model, domain) in results}),
         pipeline_cfg=pipeline_cfg,
         has_prior_run=prior_report is not None,
+        citations=report.get("section_9_citations") or (),
     )
     if gaps:
         report["handoff_gaps"] = gaps
@@ -3720,7 +3721,16 @@ def run_publish_pipeline(
             for t in pub_handoff["publication_parameters"].get("tags", "").split(",")
             if t.strip()
         ],
-        "author": pub_handoff["publication_parameters"].get("author"),
+        # "WordPress author:" is the current spelling; "Author:" is the
+        # original and still parsed, because existing publication handoffs
+        # use it. The rename exists because Template A's "Author:" means
+        # something else entirely — who "I" is, for citation verification —
+        # and a byline pasted into this field is a WordPress login that does
+        # not exist.
+        "author": (
+            pub_handoff["publication_parameters"].get("wordpress_author")
+            or pub_handoff["publication_parameters"].get("author")
+        ),
         "seo": pub_handoff.get("seo", {}),
     }
 
