@@ -2659,3 +2659,77 @@ class TestReaskArchiveIsCarriedThrough:
 
     def test_a_proposal_with_no_archive_gains_no_line(self):
         assert "Archive of that source" not in self._text()
+
+
+class TestKnockOnEffectsReachTheReport:
+    """`degradations` had a producer and a console reader, and no report reader.
+
+    The entry exists to link two facts that are unremarkable apart —
+    "perplexity:fact_check failed" and "9 claims verified" — and it was only
+    ever said in the terminal, which scrolls. The file the author keeps and
+    pastes into a chat model never carried it.
+    """
+
+    ENTRY = {
+        "section": "SECTION 2: Factual Verification, SECTION 9: Citations",
+        "caused_by": ["perplexity:fact_check", "mistral:fact_check"],
+        "detail": (
+            "Sections 2 and 9 are working from an incomplete claim list: 2 of 5 "
+            "fact-check passes failed. Counts in both sections are lower than a "
+            "clean run would produce."
+        ),
+    }
+
+    def test_no_block_when_nothing_degraded(self):
+        assert "Knock-on effects" not in render_report_markdown(_base_report())
+
+    def test_the_detail_reaches_the_report(self):
+        md = render_report_markdown(_base_report(degradations=[self.ENTRY]))
+        assert "## ⚠ Knock-on effects of failed passes (1)" in md
+        assert "working from an incomplete claim list" in md
+
+    def test_it_names_the_sections_and_the_passes_that_caused_it(self):
+        md = render_report_markdown(_base_report(degradations=[self.ENTRY]))
+        assert "SECTION 2: Factual Verification, SECTION 9: Citations" in md
+        assert "perplexity:fact_check, mistral:fact_check" in md
+
+    def test_it_sits_with_the_failure_blocks_not_after_the_findings(self):
+        """The link is only useful next to the failure it explains."""
+        md = render_report_markdown(
+            _base_report(
+                degradations=[self.ENTRY],
+                model_failures=["perplexity:fact_check"],
+                model_failure_details=[
+                    {
+                        "pass": "perplexity:fact_check",
+                        "model": "sonar",
+                        "domain": "fact_check",
+                        "section": "SECTION 2: Factual Verification",
+                        "error": "timeout",
+                        "elapsed_seconds": 90.0,
+                    }
+                ],
+            )
+        )
+        assert md.index("Failed model passes") < md.index("Knock-on effects")
+        assert md.index("Knock-on effects") < md.index("## SECTION 1")
+
+    def test_an_older_entry_without_a_section_still_renders(self):
+        """Reports predate the key; a missing field must not fail a render."""
+        md = render_report_markdown(
+            _base_report(degradations=[{"detail": "Something was degraded."}])
+        )
+        assert "Something was degraded." in md
+        assert "Affected sections" in md
+
+    def test_every_entry_is_rendered_not_just_the_first(self):
+        md = render_report_markdown(
+            _base_report(
+                degradations=[
+                    self.ENTRY,
+                    {"section": "SECTION 3: Voice", "detail": "A second effect."},
+                ]
+            )
+        )
+        assert "(2)" in md
+        assert "A second effect." in md
