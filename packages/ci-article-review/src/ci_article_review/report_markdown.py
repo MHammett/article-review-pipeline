@@ -473,6 +473,25 @@ def _render_section_8(additional):
     return lines
 
 
+#: Retrieval fields ``_render_archive_pair`` renders itself, beside the URLs
+#: they are about. Appended to each caller's own exclude list so nothing is said
+#: twice, and so the access story stays next to the links it governs. (``url``
+#: and ``final_url`` are excluded by the callers directly — the pair block has
+#: rendered those since the redirector fix.)
+#:
+#: ``verified_via`` is here because it is an enum — ``tls_impersonation`` told a
+#: reader nothing, and the resolver already writes the sentence that does: one
+#: per retrieval route, ``reader_access`` for an escalated fetch and
+#: ``archive_provenance`` for one read from the archive. ``archive_provenance``
+#: stays in the dump below, where it has always rendered, so each route states
+#: itself exactly once.
+#:
+#: A plain direct fetch says nothing at all, which is the point: it is the
+#: unremarkable case, and a line on every entry reporting that nothing happened
+#: would bury the entries where something did.
+_PAIR_RENDERED_FIELDS = ("verified_via", "reader_access")
+
+
 def _citation_pair(citation):
     """Return the live URL and its archive URL, for a citation the author can paste.
 
@@ -530,6 +549,11 @@ def _render_archive_pair(citation, indent="  "):
     if not live:
         return []
     out = [f"{indent}- Live: {live}"]
+    # Immediately under the URL, not down in the key/value dump: this is what
+    # the author needs while deciding what to paste into the article.
+    friction = citation.get("reader_access")
+    if friction:
+        out.append(f"{indent}- Reader access: {friction}")
     wayback = citation.get("wayback") or {}
     if archive:
         stale = (
@@ -559,10 +583,25 @@ def _render_archive_pair(citation, indent="  "):
             f"archived; re-run to find out."
         )
     elif citation.get("resolved"):
-        out.append(
-            f"{indent}- Archive: none. This citation is only as durable as the "
-            f"live URL — re-run once archiving succeeds, or archive it by hand."
-        )
+        # A citation that only came back because the fetch escalated is the one
+        # case where "as durable as the live URL" understates the problem: the
+        # live URL already refused a client once. Saying the absence out loud is
+        # the point — an escalated citation with no archive beside it is the
+        # weakest thing this section can produce, and it should not read like
+        # the ordinary not-yet-archived case.
+        if citation.get("verified_via") == "tls_impersonation":
+            out.append(
+                f"{indent}- Archive: NONE — and this is the citation that most "
+                f"needed one. The source refused an ordinary automated request, "
+                f"so the live URL is both the only copy and the fragile kind. "
+                f"Archive it by hand before publishing, or re-source the claim."
+            )
+        else:
+            out.append(
+                f"{indent}- Archive: none. This citation is only as durable as "
+                f"the live URL — re-run once archiving succeeds, or archive it "
+                f"by hand."
+            )
     else:
         # Unresolved: the live URL did not yield readable content this run, and
         # archive.org confirmed it has no snapshot either. Neither half of the
@@ -711,6 +750,7 @@ def _render_mismatch_entry(citation):
         "final_url",
         "relevance_verdict",
         "relevance_reason",
+        *_PAIR_RENDERED_FIELDS,
     ]
     if reason and reason in (c.get("note") or ""):
         exclude.append("note")
@@ -860,7 +900,9 @@ def _render_section_9(citations):
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
             for kv in _kv_lines(
-                c, exclude=("claim", "resolved", "content_changed_since")
+                c,
+                exclude=("claim", "resolved", "content_changed_since")
+                + _PAIR_RENDERED_FIELDS,
             ):
                 lines.append(kv)
         lines.append("")
@@ -972,7 +1014,11 @@ def _render_section_9(citations):
         for c in unverifiable:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
+            for kv in _kv_lines(
+                c,
+                exclude=("claim", "resolved", "url", "final_url")
+                + _PAIR_RENDERED_FIELDS,
+            ):
                 lines.append(kv)
         lines.append("")
 
@@ -988,18 +1034,24 @@ def _render_section_9(citations):
         )
         lines.append(
             "_A specific URL was named for these claims and the fetch did not "
-            "succeed: refused (403), missing (404), or unreachable. A 403 is a "
-            "statement about automated access, not about the document — these are "
-            "often readable in a browser, and academic publishers in particular "
-            "refuse every automated tier. Where an archive copy exists it is "
-            "listed below, and for a refused URL that copy may be the only "
-            "readable version. Nothing here is evidence either way._"
+            "succeed: refused (403), missing (404), or unreachable. A 403 here "
+            "is the hard kind — a 403 this run could get past was retried as a "
+            "browser and read, so what is left refused that too, which in "
+            "practice means a subscription gate or a JS/CAPTCHA challenge rather "
+            "than a bot policy. Some are still readable to a logged-in person. "
+            "Where an archive copy exists it is listed below, and for these URLs "
+            "that copy may be the only readable version. Nothing here is "
+            "evidence either way._"
         )
         lines.append("")
         for c in fetch_failed:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
+            for kv in _kv_lines(
+                c,
+                exclude=("claim", "resolved", "url", "final_url")
+                + _PAIR_RENDERED_FIELDS,
+            ):
                 lines.append(kv)
         lines.append("")
 
@@ -1016,7 +1068,11 @@ def _render_section_9(citations):
         for c in pointer:
             lines.append(f'- "{c.get("claim", "")}"')
             lines.extend(_render_archive_pair(c))
-            for kv in _kv_lines(c, exclude=("claim", "resolved", "url", "final_url")):
+            for kv in _kv_lines(
+                c,
+                exclude=("claim", "resolved", "url", "final_url")
+                + _PAIR_RENDERED_FIELDS,
+            ):
                 lines.append(kv)
         lines.append("")
 

@@ -1779,6 +1779,142 @@ class TestUnresolvedCitationsRenderTheirArchiveState:
         assert "NOT CHECKED" in md
 
 
+#: Standing in for the sentence ``resolver._resolve_known_url`` writes onto an
+#: escalated citation. The renderer passes it through rather than composing its
+#: own, so one route states itself once — the wording itself is asserted in
+#: ``test_resolver.py``, where it is written.
+_READER_ACCESS = (
+    "This source refused an ordinary automated request (403) and served the "
+    "page only to a browser-shaped client. …cite the archive copy alongside it."
+)
+
+
+class TestEscalatedCitationsRenderReaderFriction:
+    """``verified_via`` is reader-facing information, not a disclosure.
+
+    For a public document the retrieval method does not bear on whether the
+    citation is valid — the reader opening the link gets the same page. What it
+    does bear on is durability: a source that refused an ordinary automated
+    request is the one whose link is most likely to fail somebody later, which
+    makes it exactly the citation that needs an archive copy beside it. That is
+    the framing under test here, in both directions — it has to say enough to be
+    useful and not so much that it reads as an admission.
+    """
+
+    LIVE = "https://www.bianchihonda.com/change-clock-with-navigation-repair/"
+    SNAPSHOT = "http://web.archive.org/web/20250912181258/" + LIVE
+
+    def _cit(self, **overrides):
+        citation = {
+            "claim": "The placeholder date was January 1, 2002.",
+            "url": self.LIVE,
+            "resolved": True,
+            "verification": "checksum",
+            "verified_via": "tls_impersonation",
+            "origin_failure": "blocked",
+            "reader_access": _READER_ACCESS,
+            "wayback": {"archived": True, "snapshot_url": self.SNAPSHOT},
+        }
+        citation.update(overrides)
+        return citation
+
+    def _pair(self, **overrides):
+        return "\n".join(report_markdown._render_archive_pair(self._cit(**overrides)))
+
+    def test_the_friction_is_stated_where_the_links_are(self):
+        out = self._pair()
+        assert f"Reader access: {_READER_ACCESS}" in out
+        # Immediately under the live URL, not paragraphs away in a key dump:
+        # this is what the author needs while deciding what to paste.
+        lines = [line.strip() for line in out.splitlines()]
+        assert lines[0].startswith("- Live:")
+        assert lines[1].startswith("- Reader access:")
+
+    def test_an_escalated_citation_still_offers_the_paste_ready_pairing(self):
+        out = self._pair()
+        assert f"Cite both: {self.LIVE} (archived: {self.SNAPSHOT})" in out
+
+    def test_a_missing_archive_is_stated_and_not_softened(self):
+        """The absence is the finding.
+
+        An escalated citation with no snapshot is the weakest thing this section
+        can produce: the live URL already refused a client once, so "only as
+        durable as the live URL" — the wording every other unarchived citation
+        gets — understates it.
+        """
+        out = self._pair(wayback={"archived": False})
+        assert "Archive: NONE" in out
+        assert "most needed one" in out
+        assert "only as durable as" not in out
+
+    def test_an_ordinary_unarchived_citation_keeps_its_milder_wording(self):
+        out = self._pair(
+            verified_via="direct", reader_access=None, wayback={"archived": False}
+        )
+        assert "Archive: none." in out
+        assert "Archive: NONE" not in out
+        assert "Reader access:" not in out
+
+    def test_a_directly_fetched_citation_says_nothing_about_retrieval(self):
+        """The unremarkable case stays silent. A line on every entry reporting
+        that nothing happened would bury the two entries where something did."""
+        out = self._pair(verified_via="direct", reader_access=None)
+        assert "Reader access:" not in out
+
+    def test_an_archive_read_states_its_provenance_exactly_once(self):
+        """Each retrieval route has one sentence, and only one.
+
+        A citation read from the archive already carries ``archive_provenance``,
+        which says more than a generic line could — it names the origin failure
+        and flags a stale snapshot. Adding a second sentence for the same fact
+        would make the entry state its provenance twice.
+        """
+        citation = self._cit(
+            verified_via="wayback_fallback",
+            reader_access=None,
+            archive_provenance="Content was read from an archive.org snapshot…",
+        )
+        pair = "\n".join(report_markdown._render_archive_pair(citation))
+        assert "Reader access:" not in pair
+
+        md = "\n".join(report_markdown._render_section_9([citation]))
+        assert md.count("Content was read from an archive.org snapshot") == 1
+        assert "wayback_fallback" not in md
+
+    def test_an_escalated_fetch_feeds_the_redirector_fix(self):
+        """The escalation path has to record ``final_url`` like the direct one.
+
+        Every refused claim in the 2026-09-05 Honda run cited a Vertex
+        ``grounding-api-redirect`` URL, so these are exactly the citations
+        ``_citation_pair`` was taught to resolve — and they only reach it
+        because ``_impersonation_fallback_content`` reports where the fetch
+        landed. Left unset, an escalated citation would still be published as
+        271 opaque characters that expire.
+        """
+        redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZ"
+        out = self._pair(url=redirect, final_url=self.LIVE)
+
+        assert f"Live: {self.LIVE}" in out
+        assert f"Cite both: {self.LIVE} (archived: {self.SNAPSHOT})" in out
+        assert redirect not in out
+
+    def test_the_raw_enum_is_never_dumped_beside_the_prose(self):
+        """``verified_via`` used to reach the reader through the generic
+        key/value dump as ``Verified via: tls_impersonation``. Rendering it
+        twice — once as an enum, once as prose — is worse than either."""
+        md = "\n".join(report_markdown._render_section_9([self._cit()]))
+        assert "tls_impersonation" not in md
+        assert "Verified via:" not in md
+        assert "Reader access:" in md
+
+    def test_an_escalated_citation_sits_in_the_read_and_supports_bucket(self):
+        """Escalation changes how the document was obtained, not what was
+        established about it. A page read this way was read."""
+        md = "\n".join(report_markdown._render_section_9([self._cit()]))
+        assert "### Read, and supports the claim (1)" in md
+        assert "| Source URL identified, but the fetch was refused | 0 |" in md
+
+
 class TestWaybackIsRenderedForAReaderNotADebugger:
     """`_kv_lines` dumped the raw wayback dict into the report.
 

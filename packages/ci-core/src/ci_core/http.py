@@ -265,9 +265,19 @@ def impersonating_get(url, timeout=30):
     headers it sends.
 
     ``None`` when ``curl_cffi`` is not installed (it is an optional extra), when
-    the fetch raises, or when the response is still an error. Callers treat that
-    exactly as they treated the original block, so nothing regresses if the
-    dependency is absent.
+    the fetch raises, when a hop fails the SSRF guard, or when the response is
+    still an error. Callers treat that exactly as they treated the original
+    block, so nothing regresses if the dependency is absent.
+
+    Redirects are followed hop by hop with ``_guard`` applied to each, for the
+    same reason ``safe_get`` does it: ``allow_redirects=True`` validates the URL
+    you pass and then follows an attacker-chosen chain unchecked. That gap was
+    tolerable while the only caller recorded a status code, and is not now that
+    citation verification checksums this body and hands it to a model — the case
+    ``DEFAULT_HEADERS`` above singles out as needing the fail-closed default. A
+    refused hop returns ``None`` rather than raising, because every other
+    failure here does and callers are written to treat ``None`` as "the block
+    held".
 
     This does not defeat a genuine paywall or a JS/CAPTCHA challenge, and no
     attempt is made to: the three academic publishers in the measurement above
@@ -277,16 +287,32 @@ def impersonating_get(url, timeout=30):
         from curl_cffi import requests as _cffi
     except ImportError:
         return None
+    current = url
     try:
-        resp = _cffi.get(
-            url,
-            impersonate="chrome",
-            timeout=timeout,
-            headers=BROWSER_HEADERS,
-            allow_redirects=True,
-        )
+        for _hop in range(_MAX_REDIRECTS + 1):
+            _guard(current)
+            resp = _cffi.get(
+                current,
+                impersonate="chrome",
+                timeout=timeout,
+                headers=BROWSER_HEADERS,
+                allow_redirects=False,
+            )
+            if not 300 <= resp.status_code < 400:
+                break
+            location = resp.headers.get("Location")
+            if not location:
+                break
+            # Relative Locations are legal and common; resolve before validating.
+            current = requests.compat.urljoin(current, location)
+        else:
+            return None
     except Exception:
         return None
-    if resp.status_code >= 400:
+    # >= 300 rather than >= 400: the loop also breaks on a 3xx carrying no
+    # Location, which is a redirect we cannot follow rather than a document.
+    # Handing that back would let a caller checksum a redirect stub and feed it
+    # to a model as the source's content.
+    if resp.status_code >= 300:
         return None
     return resp
