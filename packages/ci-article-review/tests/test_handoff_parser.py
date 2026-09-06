@@ -333,3 +333,39 @@ class TestParsePublicationHandoff:
         result = parse_publication_handoff(doc)
         assert result["embeds"] == "An embedded chart."
         assert result["disposition_log"] == "Approved by editor."
+
+
+class TestAuthorIdentity:
+    """Who first-person wording in the draft refers to.
+
+    Citation verification cannot check "I have a family." against a page
+    without knowing whose family. Measured 2026-09-04: with no author supplied,
+    the verifier bound "I" to the first person named on a team page and offered
+    a stranger's wife and grandchildren as supporting evidence.
+    """
+
+    def _handoff(self, extra=""):
+        return (
+            "Article: A Test Piece\n"
+            "Publication: mikehammett\n"
+            f"{extra}"
+            "Pipeline run: 1\n\n"
+            "## PRIMARY CLAIM\nA claim.\n\n"
+            "## DRAFT\nSome body text.\n"
+        )
+
+    def test_an_author_line_is_read(self):
+        got = parse_draft_submission(self._handoff("Author: Jane Guest\n"))
+        assert got["author"] == "Jane Guest"
+
+    def test_it_is_optional(self):
+        """Single-author publications set it once in the publication config
+        rather than repeating it on every article."""
+        got = parse_draft_submission(self._handoff())
+        assert not got.get("author")
+
+    def test_a_raw_draft_carries_none(self):
+        """--raw-draft has no metadata at all, so the publication default is
+        the only thing standing between the verifier and an unattributed 'I'."""
+        got = build_handoff_from_raw_text("Just prose.", source_name="x")
+        assert not got.get("author")

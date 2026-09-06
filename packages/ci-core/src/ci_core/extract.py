@@ -176,11 +176,59 @@ def extract_article(html):
                 title = n["text"]
                 break
 
-    body = _extract_with_trafilatura(html)
-    if not body:
-        body = _fallback_body(parser.nodes)
+    body = _best_body(html, parser.nodes)
 
     return (title or "Untitled"), (body or "").strip()
+
+
+#: How much longer the heuristic body must be before it displaces trafilatura's.
+#:
+#: Sized from the failure that prompted it rather than picked. On a six-person
+#: team page (36,717 bytes) trafilatura returned 439 characters covering one
+#: person, while the heuristic parser returned 3,381 covering all six — a factor
+#: of 7.7. A normal article does not produce that gap: trafilatura's job there is
+#: to strip navigation, a modest trim rather than a 90% cut. 2.5 sits well above
+#: the trim and well below the cliff.
+_HEURISTIC_WINS_RATIO = 2.5
+
+
+def _best_body(html, nodes):
+    """Body text, preferring trafilatura but not when it has lost most of the page.
+
+    trafilatura is tuned for news articles: it finds one main content block and
+    discards the rest as boilerplate. That is the right instinct for an article
+    and the wrong one for a page whose content *is* repeated blocks — a team
+    page, a staff directory, a list of filings. The heuristic parser was only
+    consulted when trafilatura returned nothing at all, so a page it mangled
+    down to one seventh passed through unnoticed.
+
+    Measured 2026-09-04 on https://fd-ix.com/about/team/, which a fact-check
+    model had cited for two claims about the article's author. trafilatura kept
+    one colleague's bio; the author's own — the text that settles both claims —
+    was not in it. Citation verification then reported the source as failing to
+    support a claim the page states outright, and no trafilatura option
+    (favor_recall, deduplicate, include_comments) recovered it.
+
+    Erring toward recall is right for this caller specifically. Missing text
+    produces a confident "the source does not support this", asserting something
+    false about a real document; surplus navigation produces noise, and
+    ``select_excerpt`` already centres its window on the claim's own terms. The
+    wrong refutation is the more expensive error.
+    """
+    trafilatura_body = (_extract_with_trafilatura(html) or "").strip()
+    heuristic_body = (_fallback_body(nodes) or "").strip()
+
+    if not trafilatura_body:
+        return heuristic_body
+    if len(heuristic_body) > len(trafilatura_body) * _HEURISTIC_WINS_RATIO:
+        log.debug(
+            "Heuristic body (%d chars) displaces trafilatura's (%d): a gap that "
+            "size means the page is not shaped like an article.",
+            len(heuristic_body),
+            len(trafilatura_body),
+        )
+        return heuristic_body
+    return trafilatura_body
 
 
 def looks_like_pdf(content_type=None, url=None, raw=None):
