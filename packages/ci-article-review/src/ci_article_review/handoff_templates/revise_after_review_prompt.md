@@ -63,9 +63,14 @@ Rules for the metadata update:
   to what the source actually says, or drop it) while `not_addressed` usually
   means the wrong URL was checked (fix the citation, not the sentence).
   "Source URL identified, but the fetch was refused" names a document that
-  exists but did not load for an automated fetch — usually a 403, and usually
-  still readable in a browser or via the archive copy listed beside it; those
-  are worth opening by hand rather than treating as unsourced. "Pointer only",
+  exists but did not load — a 404, an unreachable host, or a 403 that survived
+  a browser-shaped retry, which in practice means a subscription gate or a
+  JS/CAPTCHA challenge rather than a bot policy. Some are still readable to a
+  logged-in person, or via the archive copy listed beside it; those are worth
+  opening by hand rather than treating as unsourced. A citation whose entry
+  carries a "Reader access" line was read successfully — that line describes
+  friction the reader may meet, not a weaker verification, and the archive link
+  beside it is the durable half of the pairing. "Pointer only",
   "Fetched, but could not be read", and "No source identified"
   establish nothing either way — do not treat them as either confirmation or
   refutation; flag them in your summary as needing a human check. In
