@@ -938,6 +938,87 @@ def _render_mismatch_entry(citation):
     return lines
 
 
+def _html_escape(value):
+    """Escape a URL for use inside an HTML attribute and as link text.
+
+    Four replacements rather than ``html.escape`` so this module keeps the
+    zero-import property the comments above rely on. Ampersand first, or it
+    would double-escape the entities the other replacements introduce.
+
+    Query strings routinely carry ``&`` (``?a=1&b=2``), and pasting that raw
+    into an ``href`` produces a link that silently drops everything after the
+    first parameter — a broken citation that looks fine in the editor.
+    """
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _publishable_archive(citation, archive):
+    """The archive URL only when the pairing is safe to publish unreviewed.
+
+    Withholds exactly the three states the per-entry list flags: a snapshot that
+    captured an error page rather than the document, one whose text does not
+    match the live page, and one that could not be checked this run. A
+    copy-paste block is acted on without re-reading the reasoning above it, so
+    anything questionable must not be in it — the markdown list above still
+    names them, with why.
+    """
+    if not archive:
+        return None
+    wb = citation.get("wayback") or {}
+    if wb.get("snapshot_is_error_capture"):
+        return None
+    if citation.get("archive_match") in (_MATCH_DIFFERS, _MATCH_UNCHECKED):
+        return None
+    return archive
+
+
+def _html_reference_block(entries):
+    """The same reference list as pasteable HTML.
+
+    The markdown above is paste-ready for a markdown-authored article; a
+    WordPress block editor wants anchors. Same sources, same order, and every
+    source appears — one that has no publishable archive copy is still a
+    reference the article cites, so it goes in as a plain link rather than
+    being dropped from the list the author pastes.
+    """
+    if not entries:
+        return []
+    lines = ["```html", "<ol>"]
+    withheld = 0
+    for live, archive, c in entries:
+        safe = _publishable_archive(c, archive)
+        if archive and not safe:
+            withheld += 1
+        href = _html_escape(live)
+        if safe:
+            lines.append(
+                f'  <li><a href="{href}">{href}</a> '
+                f'(<a href="{_html_escape(safe)}">archived</a>)</li>'
+            )
+        else:
+            lines.append(f'  <li><a href="{href}">{href}</a></li>')
+    lines.append("</ol>")
+    lines.append("```")
+    lines.append("")
+    carrying = sum(1 for live, a, c in entries if _publishable_archive(c, a))
+    note = f"{carrying} of {len(entries)} carry an archive link."
+    if withheld:
+        note += (
+            f" {withheld} archived source(s) are linked live-only here because "
+            f"the snapshot was not confirmed to match the page — see the list "
+            f"above for which and why."
+        )
+    lines.append(note)
+    lines.append("")
+    return lines
+
+
 def _render_reference_list(citations):
     """Every cited address once, with its archive copy, ready to publish.
 
@@ -1022,6 +1103,9 @@ def _render_reference_list(citations):
             lines.append(f"- {live} — {why}")
         lines.append("")
 
+    lines.append("For pasting into an HTML editor:")
+    lines.append("")
+    lines.extend(_html_reference_block(paired + live_only))
     return lines
 
 

@@ -2389,3 +2389,102 @@ class TestReferenceList:
         out = self._text(pending, failed)
         assert "no snapshot yet" in out
         assert "tried to capture it and could not" in out
+
+
+class TestHtmlReferenceBlock:
+    """The markdown list pastes into a markdown-authored article; a WordPress
+    block editor wants anchors."""
+
+    SNAP = "https://web.archive.org/web/20260905123736/https://example.org/a"
+
+    def _cit(self, url="https://example.org/a", archived=True, **over):
+        c = {
+            "claim": "A claim",
+            "url": url,
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": (
+                {"archived": True, "snapshot_url": self.SNAP}
+                if archived
+                else {"archived": False}
+            ),
+        }
+        c.update(over)
+        return c
+
+    def _text(self, *cits):
+        return "\n".join(report_markdown._render_reference_list(list(cits)))
+
+    def test_both_addresses_become_anchors(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert '<a href="https://example.org/a">https://example.org/a</a>' in out
+        assert f'(<a href="{self.SNAP}">archived</a>)' in out
+
+    def test_it_is_a_fenced_html_block(self):
+        out = self._text(self._cit(archive_match="identical"))
+        assert "```html" in out
+        assert "<ol>" in out and "</ol>" in out
+
+    def test_a_source_with_no_archive_is_still_listed_as_a_link(self):
+        """It is still a reference the article cites; dropping it from the block
+        the author pastes would quietly lose it."""
+        out = self._text(self._cit(url="https://example.org/b", archived=False))
+        assert (
+            '<li><a href="https://example.org/b">https://example.org/b</a></li>' in out
+        )
+
+    def test_an_unconfirmed_pairing_is_not_offered_for_pasting(self):
+        """A copy-paste block is acted on without re-reading the reasoning above
+        it, so a questionable pairing must not be in it."""
+        out = self._text(self._cit(archive_match="differs"))
+        assert "archived</a>" not in out
+        assert "not confirmed to match the page" in out
+
+    def test_an_unverified_pairing_is_also_withheld(self):
+        out = self._text(self._cit(archive_match="unchecked"))
+        assert "archived</a>" not in out
+
+    def test_a_snapshot_of_an_error_page_is_never_pasted(self):
+        out = self._text(
+            self._cit(
+                wayback={
+                    "archived": True,
+                    "snapshot_url": self.SNAP,
+                    "snapshot_status": "404",
+                    "snapshot_is_error_capture": True,
+                }
+            )
+        )
+        assert "archived</a>" not in out
+
+    def test_the_count_of_archive_links_is_stated(self):
+        out = self._text(
+            self._cit(url="https://example.org/a", archive_match="identical"),
+            self._cit(url="https://example.org/b", archived=False),
+        )
+        assert "1 of 2 carry an archive link." in out
+
+    def test_ampersands_in_urls_are_escaped(self):
+        """A raw & in an href silently truncates the link at the first
+        parameter — a broken citation that looks fine in the editor."""
+        out = self._text(self._cit(url="https://example.org/s?a=1&b=2", archived=False))
+        assert "a=1&amp;b=2" in out
+        assert 'href="https://example.org/s?a=1&b=2"' not in out
+
+    def _html_only(self, *cits):
+        """Just the fenced HTML block.
+
+        The markdown list above it prints URLs as plain text, as every other
+        URL in this module always has; escaping there is a separate, module-wide
+        question. What must hold here is that the anchors we generate cannot be
+        broken out of.
+        """
+        out = self._text(*cits)
+        return out.split("```html", 1)[1].split("```", 1)[0]
+
+    def test_angle_brackets_and_quotes_cannot_break_out_of_the_attribute(self):
+        block = self._html_only(
+            self._cit(url='https://example.org/"><script>x</script>', archived=False)
+        )
+        assert "<script>" not in block
+        assert "&quot;&gt;&lt;script&gt;" in block
