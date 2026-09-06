@@ -274,6 +274,10 @@ _VOLATILE_KEYS = {
     "timeout_budget_seconds",
     "registry_date",
     "registry_age_days",
+    # Derived from today's date against a registry stamp, so it changes on its
+    # own: "ok" becomes "notice" at 60 days and "warning" at 120, and this test
+    # would start failing on a calendar boundary rather than on a code change.
+    "registry_staleness",
     "prior_date",
 }
 

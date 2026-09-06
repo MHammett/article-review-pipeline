@@ -1926,6 +1926,65 @@ def _render_seo_field(field):
     return lines
 
 
+def _render_provenance(report):
+    """Which provider drafted the article, and whether it marks its text.
+
+    Declared, never measured, and the block says so on every render. A
+    statistical watermark is recovered with the provider's secret key; without
+    it, marked and unmarked text are statistically indistinguishable by design.
+    So this reports what the handoff said, and an author who reads it as a
+    detection result has been misled by us rather than by the tool they used.
+
+    Silent for a provider that does not mark, and silent for a report written
+    before this block existed -- there is nothing to say, and a line saying
+    nothing is a line that trains people to skip the section.
+    """
+    prov = report.get("provenance")
+    if not prov or not prov.get("marked"):
+        return []
+
+    lines = ["## Authorship Provenance", ""]
+    declared = prov.get("drafted_with")
+    lines.append(f"- Drafted with: **{declared}**")
+
+    status = prov.get("status")
+    if status == "partial":
+        lines.append(
+            "- This provider marks text on some surfaces; the API path was "
+            "unconfirmed when the registry was last checked. Treat the mark as "
+            "present rather than absent."
+        )
+    else:
+        since = prov.get("since")
+        lines.append(
+            "- This provider embeds a statistical watermark in generated text"
+            + (f", since {since}." if since else ".")
+        )
+    if prov.get("scope"):
+        lines.append(f"- Scope: {prov['scope']}")
+
+    lines.append(
+        f"- Basis: {prov.get('basis')}. Nothing in this pipeline can detect a "
+        "statistical watermark — that needs the provider's key."
+    )
+
+    if prov.get("registry_staleness") in ("notice", "warning"):
+        age = prov.get("registry_age_days")
+        lines.append(
+            f"- NOTE: the watermarking registry was last verified "
+            f"{prov.get('registry_date')} ({age} days ago). These facts move "
+            "quickly; re-check configs/watermarking.yaml before relying on this."
+        )
+    if prov.get("note"):
+        lines.append("")
+        lines.append(f"_{prov['note']}_")
+    if prov.get("source"):
+        lines.append("")
+        lines.append(f"Source: {prov['source']}")
+    lines.append("")
+    return lines
+
+
 def render_report_markdown(report):
     """Render a review report dict into a readable markdown document.
 
@@ -2002,6 +2061,7 @@ def render_report_markdown(report):
     lines.extend(_render_ensemble_width(report))
 
     lines.extend(_render_model_currency(report))
+    lines.extend(_render_provenance(report))
 
     lines.append("---")
     lines.append("")
