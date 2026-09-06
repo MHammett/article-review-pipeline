@@ -282,6 +282,20 @@ def impersonating_get(url, timeout=30):
     This does not defeat a genuine paywall or a JS/CAPTCHA challenge, and no
     attempt is made to: the three academic publishers in the measurement above
     return a challenge page to this too.
+
+    Whether this tier works at all depends on the installed ``curl_cffi``
+    version, because ``impersonate="chrome"`` resolves to whatever
+    ``DEFAULT_CHROME`` that release ships and Cloudflare fingerprints stale
+    profiles. Measured 2026-09-06: 0.16.0 (``chrome146``) was challenged on
+    congress.gov and bianchihonda.com; 0.16.1+ (``chrome150``) read both in
+    full. The extra pins a floor for this reason — see
+    ``packages/ci-core/pyproject.toml``.
+
+    Debugging a 403 that reaches here: this function returns ``None`` for every
+    failure, so check the response headers directly. ``cf-mitigated:
+    challenge`` means the fingerprint was rejected and the fix is a newer
+    curl_cffi; its absence means the origin refuses browsers too, which is a
+    subscription or JS gate and not worth chasing.
     """
     try:
         from curl_cffi import requests as _cffi

@@ -10,6 +10,12 @@ attacker-chosen chain unchecked, exactly the gap ``safe_get`` exists to close.
 ``curl_cffi`` is an optional extra, so every test here installs a fake one
 rather than depending on it being present. That also lets the absent case be
 tested at all.
+
+The cost of that choice is worth stating plainly: because the fake is always
+used, **these tests pass whether or not the real dependency works**. They said
+nothing while the tier was inert for a month, and they would say nothing about
+a curl_cffi whose Chrome profile has aged into being fingerprinted. Only a live
+fetch answers that — see docs/CITATIONS.md, "Escalating past a bot block".
 """
 
 import sys
@@ -198,9 +204,13 @@ class TestFailuresAllLookTheSame:
             assert http.impersonating_get("https://example.com/doc") is None
 
     def test_the_optional_extra_being_absent_is_not_an_error(self):
-        """The dependency ships as ``ci-core[unblock]`` and is normally absent —
-        it is not installed in the main checkout today, which is why the link
-        checker's escalation tier has been dormant there."""
+        """The dependency ships as ``ci-core[unblock]``, so an end user who
+        did not ask for the extra has no curl_cffi and must still get a clean
+        degradation rather than an ImportError.
+
+        Development checkouts do have it — ``ci-core[unblock]`` is in the root
+        dev group as of 2026-09-06, because while it was absent the escalation
+        tier was inert in every ``uv run`` and nothing said so."""
         real_import = __import__
 
         def _no_curl_cffi(name, *args, **kwargs):
