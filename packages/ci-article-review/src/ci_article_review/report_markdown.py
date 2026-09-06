@@ -18,6 +18,11 @@ a leaf: a tuple, a lookup and a pure function, importing nothing itself.
 
 from .adapters.citation.disposition import DISPOSITIONS, disposition
 
+# ``worklist`` is a second exempt import, for the same reason: it reads the same
+# plain report dict, imports only the stdlib and the leaf module above, and so
+# pulls nothing in behind it.
+from .worklist import build_worklist, render_worklist
+
 #: Order the SEO METADATA fields render in, matching publication.md's block.
 #: Duplicated from ``analysis.seo_suggest.FIELD_ORDER`` rather than imported so
 #: this module stays a dependency-free renderer over a plain dict — importing
@@ -2194,6 +2199,15 @@ def render_report_markdown(report):
     lines.extend(_render_model_currency(report))
     lines.extend(_render_provenance(report))
 
+    lines.append("---")
+    lines.append("")
+
+    # The worklist comes before the findings because it is the only part of this
+    # file the author acts on directly; everything below it is the evidence it
+    # points back at. It is deliberately not a "## SECTION N" heading, so the
+    # paste-into-a-chat-model revision loop does not sweep it up — see
+    # worklist.HEADING for why that matters.
+    lines.extend(render_worklist(build_worklist(report)))
     lines.append("---")
     lines.append("")
 
