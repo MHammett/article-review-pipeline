@@ -12,6 +12,8 @@ The two anchor cases below are taken verbatim from
 spelling of the same names elsewhere, which is what pins the mapping down.
 """
 
+import logging
+
 import pytest
 
 from ci_core import text_repair
@@ -145,3 +147,55 @@ class TestRepairHappensAfterTheJsonParse:
 
         with pytest.raises(json.JSONDecodeError):
             json.loads('{"claim": "Laboratory' + chr(0x19) + 's"}')
+
+
+class TestTheRepairAnnouncesItself:
+    """Repairing silently would trade a visible defect for an invisible one.
+
+    The provider is still corrupting text. If that stops, worsens, or moves to
+    a code point the mapping cannot recover, the log line is the only way
+    anyone finds out -- so these pin the signal, not just the repair.
+    """
+
+    DAMAGED = "Laboratory" + chr(0x19) + "s report" + chr(0x14) + "as filed"
+
+    def test_a_repair_is_logged_at_warning(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="ci_core.text_repair"):
+            text_repair.repair_tree({"claim": self.DAMAGED})
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelname == "WARNING"
+
+    def test_the_log_names_the_count_and_the_code_points(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="ci_core.text_repair"):
+            text_repair.repair_tree({"claim": self.DAMAGED})
+        msg = caplog.text
+        assert "Repaired 2 narrowed punctuation character(s)" in msg
+        assert "U+0019 -> U+2019 x1" in msg
+        assert "U+0014 -> U+2014 x1" in msg
+
+    def test_clean_data_logs_nothing(self, caplog):
+        """This runs on every response; a clean one must stay silent."""
+        with caplog.at_level(logging.WARNING, logger="ci_core.text_repair"):
+            text_repair.repair_tree({"claim": "ordinary text — real punctuation"})
+        assert caplog.records == []
+
+    def test_one_line_per_response_not_per_string(self, caplog):
+        """A payload's worth of damage is one provider defect, not twenty."""
+        payload = {
+            "items": [{"claim": self.DAMAGED} for _ in range(10)],
+            "snippets": [self.DAMAGED, self.DAMAGED],
+        }
+        with caplog.at_level(logging.WARNING, logger="ci_core.text_repair"):
+            text_repair.repair_tree(payload)
+        assert len(caplog.records) == 1
+        assert "Repaired 24 narrowed" in caplog.text
+
+    def test_dropped_and_space_outcomes_are_named_not_shown_as_code_points(self):
+        """U+200B/E/F are invisible and U+2000-8 are spaces; say so plainly."""
+        import collections
+
+        tally = collections.Counter({chr(0x0F): 3, chr(0x07): 2, chr(0x19): 1})
+        described = text_repair._describe(tally)
+        assert "U+000F -> dropped x3" in described
+        assert "U+0007 -> space x2" in described
+        assert "U+0019 -> U+2019 x1" in described
