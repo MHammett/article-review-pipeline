@@ -1611,3 +1611,46 @@ class TestCacheBreakpoint:
             "prompt_cache_key"
         ]
         assert "secret" not in key
+
+
+class TestNarrowedPunctuationRepair:
+    """Perplexity narrows General Punctuation to its low byte, so U+2019 lands
+    in the response as a C0 control character. It arrives by two different
+    routes and each needs its own repair point — see ci_core.text_repair.
+
+    Search-result snippets come out of litellm's parse of the provider
+    envelope, so they carry a real control character and are repaired at the
+    stream boundary. The model's own answer JSON carries an *escape* instead,
+    which is still plain text at that point and only becomes a control
+    character when the answer is parsed.
+    """
+
+    def test_search_result_snippets_are_repaired_at_the_stream(self):
+        stream = _completion_stream(
+            citations=["https://example.org/a"],
+            search_results=[
+                {"title": "A", "snippet": "the site" + chr(0x19) + "s owner"}
+            ],
+        )
+        with patch.object(client.litellm, "completion", return_value=stream):
+            result = _call("perplexity")
+
+        assert result["search_results"][0]["snippet"] == "the site’s owner"
+
+    def test_answer_json_is_repaired_through_the_parse(self):
+        body = '{"flags": ["Laboratory' + chr(92) + 'u0019s congressional report"]}'
+        with patch.object(
+            client.litellm, "completion", return_value=_completion_stream(text=body)
+        ):
+            result = _call("perplexity")
+
+        assert result["data"]["flags"] == ["Laboratory’s congressional report"]
+
+    def test_a_clean_response_is_left_alone(self):
+        body = '{"flags": ["nothing — wrong here"]}'
+        with patch.object(
+            client.litellm, "completion", return_value=_completion_stream(text=body)
+        ):
+            result = _call("perplexity")
+
+        assert result["data"]["flags"] == ["nothing — wrong here"]
