@@ -31,6 +31,7 @@ ci-probe = "ci_article_review.probe:main"
 ci-review = "ci_article_review.pipeline:cli"
 ci-history-report = "ci_article_review.history_analytics:main"
 ci-voice-patterns = "ci_article_review.voice_pattern_report:main"
+ci-markers = "ci_article_review.markers:main"
 
 [tool.uv.sources]
 ci-core = { workspace = true }

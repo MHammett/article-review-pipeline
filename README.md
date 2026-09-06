@@ -216,6 +216,77 @@ Readable review (paste into chat): pipeline_history/my-article/run_1_20260809_14
 
 ---
 
+## Authorship markers
+
+Step 4 of the loop above is where machine typography enters the article. The draft goes out to a chat model, comes back revised, and gets pasted into a file — and what comes back is not punctuated like something typed on a keyboard. Measured across `pipeline_history/` and `handoff_templates/`: 2,258 em dashes, 1,782 curly apostrophes, and 376 non-breaking hyphens, a character no one types on purpose. The author's own drafts carry four em dashes and nothing else.
+
+`ci-markers` reports that residue and optionally removes it.
+
+```powershell
+uv run ci-markers revised_draft.md                    # what is in there
+uv run ci-markers revised_draft.md --fix              # remove the invisible residue
+uv run ci-markers revised_draft.md --fix --aggressive # also flatten typography to ASCII
+```
+
+**What this is not.** There is no recoverable watermark in the text this pipeline handles, and this tool does not remove one. The review models never write the article, the revise step rewrites whatever the draft model produced, and a scan of the whole corpus found no zero-width character anywhere. Stripping typography is cosmetic. It also will not fool a classifier, which keys on sentence rhythm and word choice far more than on punctuation — prose style is `banned_phrases` territory in the publication config, not a character-level problem.
+
+**Two tiers, because they are different decisions.** The default `--fix` changes no glyph: it removes characters that render as nothing and normalises the spaces that only pretend to be one. `--aggressive` also flattens em dashes, curly quotes and known lookalike letters, which visibly changes the prose — an author who uses em dashes is entitled to keep using them, so that stays opt-in.
+
+**Built for the marker that does not exist yet.** Detection keys on Unicode *classes*, not a list of bad characters: format characters, private-use and unassigned code points, separators, orphaned variation selectors, and scripts mixed inside a single word. Anything built from those is caught without a change to the code. The one trap worth naming is that variation selectors are category `Mn`, not `Cf` — a scanner that sweeps format characters and stops there misses `U+E0100`–`U+E01EF` entirely, which is the channel currently used to hide bytes in text. For a marker built from none of that, `--inventory` counts every distinct non-ASCII code point and judges nothing; diff it between drafts and a character that was not there last week shows up on its own.
+
+| Flag | Purpose |
+|---|---|
+| `--fix` | Rewrite each file with its markers removed. Without this the tool only reports — it never writes |
+| `--aggressive` | With `--fix`, also flatten typography to ASCII and substitute known confusables. Changes visible text |
+| `--inventory` | Also list every distinct non-ASCII code point, with no verdicts |
+| `--stdin` | Read from stdin, write sanitized text to stdout, report to stderr, so it composes in a pipe |
+| `--json` | Machine-readable output |
+| `--verbose`, `-v` | DEBUG logging |
+
+Findings are grouped by what they mean, and two of the groups are not markers at all:
+
+- **Invisible** — renders as nothing; never innocent in prose. Removed by `--fix`.
+- **Decode damage** — a replacement character or an unassigned code point, meaning bytes were lost upstream. **Reported and never removed**, by either tier: deleting the scar leaves the wound. Finding these is what surfaced a citation fetch storing a PDF's raw binary as a source's content summary.
+- **Mixed-script words** — a Cyrillic `а` inside an otherwise-Latin word. A whole Cyrillic word is a quotation and is left alone.
+- **Lookalike spaces** and **typography** — cosmetic.
+
+The exit code suits a publish gate: `1` when a file contains an invisible character, a mixed-script word, or decode damage; `0` when it is clean or the only findings are cosmetic. An em dash should not fail a build.
+
+---
+
+## Authorship provenance
+
+Since August 2026, Anthropic embeds a statistical watermark in Claude's text output. It is applied at the model level, so it is present worldwide rather than only in the EU, and it covers the API and Claude Code, not just claude.ai. Google ships SynthID-Text across the Gemini consumer products.
+
+That mark lives in word choice, not in characters, and **nothing in this repo can detect it**. Detection means re-running a keyed pseudorandom function over the token stream; without the provider's secret key, marked and unmarked text are statistically indistinguishable — that is the scheme's design guarantee, not a gap in the tooling. A heuristic pretending otherwise would be unfalsifiable, wrong in ways nobody here could measure.
+
+So the report states provenance rather than pretending to detect. You already declare the drafting model with `Drafted with:` in the handoff, where the pipeline uses it to keep a model from reviewing its own prose. That same declaration now reaches `report.json` and the `review.md` header:
+
+```
+## Authorship Provenance
+
+- Drafted with: **claude**
+- This provider embeds a statistical watermark in generated text, since 2026-08-02.
+- Scope: API, Claude Code, and consumer surfaces; applied at model level, worldwide
+- Basis: declared in the handoff, not measured from the text. Nothing in this
+  pipeline can detect a statistical watermark — that needs the provider's key.
+```
+
+The block is silent when the declared provider does not mark text, and silent when nothing was declared. A line that says nothing trains people to skip the section.
+
+Which providers mark text is a dated table in `packages/ci-core/src/ci_core/configs/watermarking.yaml`, following the same pattern as `model_registry.yaml`: bump `registry_date` when you re-check it against provider documentation, and the report starts warning once the table goes stale. It *will* go stale — every signatory to the EU Code of Practice is still shipping changes.
+
+Two rules in that table are deliberate:
+
+- **An unlisted or unverified provider records as `unknown`, never as `no`.** Reporting an unverified provider as clean is the one error worth engineering against, so absence of evidence is recorded as absence of evidence.
+- **`partial` counts as marked.** A provider that marks on some surfaces but not confirmably on its API — Gemini, at the time of writing — is a reason to assume the mark is present, not a reason to assume it is absent.
+
+Recording this in `report.json` matters more than printing it. By the time anyone asks whether a piece published months ago carries a mark, the chat thread that produced it is long gone.
+
+If you need actual detection rather than bookkeeping, Anthropic runs a third-party detection API — in private preview at the time of writing, with media and fact-checkers among the eligible categories.
+
+---
+
 ## Cross-run analytics
 
 A single run tells you about one article. `ci-history-report` reads every `run_*_report.json` under `pipeline_history/` and reports what only shows up across many runs:
@@ -268,39 +339,6 @@ What it reports:
 Both are clustered with a normalized-text `difflib` similarity check rather than any NLP/ML clustering — the goal is surfacing obvious repeats, not perfect semantic dedup. A pattern must appear in at least `--min-articles` *distinct* articles to qualify, so one model flagging the same phrase twice in a single draft isn't cross-article evidence.
 
 It is a suggestion report only. Nothing is written to `pipeline_history/` or to any publication config — a human decides whether each candidate actually becomes a rule.
-
----
-
-## Authorship provenance
-
-Since August 2026, Anthropic embeds a statistical watermark in Claude's text output. It is applied at the model level, so it is present worldwide rather than only in the EU, and it covers the API and Claude Code, not just claude.ai. Google ships SynthID-Text across the Gemini consumer products.
-
-That mark lives in word choice, not in characters, and **nothing in this repo can detect it**. Detection means re-running a keyed pseudorandom function over the token stream; without the provider's secret key, marked and unmarked text are statistically indistinguishable — that is the scheme's design guarantee, not a gap in the tooling. A heuristic pretending otherwise would be unfalsifiable, wrong in ways nobody here could measure.
-
-So the report states provenance rather than pretending to detect. You already declare the drafting model with `Drafted with:` in the handoff, where the pipeline uses it to keep a model from reviewing its own prose. That same declaration now reaches `report.json` and the `review.md` header:
-
-```
-## Authorship Provenance
-
-- Drafted with: **claude**
-- This provider embeds a statistical watermark in generated text, since 2026-08-02.
-- Scope: API, Claude Code, and consumer surfaces; applied at model level, worldwide
-- Basis: declared in the handoff, not measured from the text. Nothing in this
-  pipeline can detect a statistical watermark — that needs the provider's key.
-```
-
-The block is silent when the declared provider does not mark text, and silent when nothing was declared. A line that says nothing trains people to skip the section.
-
-Which providers mark text is a dated table in `packages/ci-core/src/ci_core/configs/watermarking.yaml`, following the same pattern as `model_registry.yaml`: bump `registry_date` when you re-check it against provider documentation, and the report starts warning once the table goes stale. It *will* go stale — every signatory to the EU Code of Practice is still shipping changes.
-
-Two rules in that table are deliberate:
-
-- **An unlisted or unverified provider records as `unknown`, never as `no`.** Reporting an unverified provider as clean is the one error worth engineering against, so absence of evidence is recorded as absence of evidence.
-- **`partial` counts as marked.** A provider that marks on some surfaces but not confirmably on its API — Gemini, at the time of writing — is a reason to assume the mark is present, not a reason to assume it is absent.
-
-Recording this in `report.json` matters more than printing it. By the time anyone asks whether a piece published months ago carries a mark, the chat thread that produced it is long gone.
-
-If you need actual detection rather than bookkeeping, Anthropic runs a third-party detection API — in private preview at the time of writing, with media and fact-checkers among the eligible categories.
 
 ---
 
@@ -435,6 +473,8 @@ content-intelligence/
 │   │   │   ├── history_analytics.py   cross-run analytics over pipeline_history/ (ci-history-report)
 │   │   │   ├── passage_match.py       decides when two quoted passages are the same passage
 │   │   │   ├── voice_pattern_report.py  recurring voice patterns across articles (ci-voice-patterns)
+│   │   │   ├── markers.py           reports/strips machine-authorship markers in a
+│   │   │   │                        draft (ci-markers); --fix removes, default only reports
 │   │   │   ├── report_markdown.py     renders the readable run_N_*_review.md from the report
 │   │   │   ├── check.py               connectivity/credential check for all services
 │   │   │   ├── discover.py            live model discovery — queries provider APIs
@@ -505,6 +545,9 @@ content-intelligence/
 │   │   │   │                     a .env value (python-dotenv's override=False)
 │   │   │   ├── console.py        force_utf8_stdio — every CLI calls it first, so a
 │   │   │   │                     cp1252 Windows console cannot kill a report mid-print
+│   │   │   ├── text_markers.py  detects invisible characters, mixed-script words and
+│   │   │   │                     decode damage in article text, by Unicode class rather
+│   │   │   │                     than a denylist; inventory() censuses the rest
 │   │   │   ├── config_helpers.py load_yaml, resolve_env_recursive, normalize_model_configs
 │   │   │   ├── configs/          pricing.yaml, timeouts.yaml, model_registry.yaml,
 │   │   │   │                     watermarking.yaml
