@@ -138,7 +138,7 @@ models:
   gemini: gemini-2.5-flash    # best price-performance; gemini-3.5-flash for upgrade
   mistral: mistral-large-latest
   perplexity: sonar-reasoning-pro
-  grok: grok-4.3              # grok-4.20-0309-reasoning for CoT (same price)
+  grok: grok-4.3              # grok-4.6 for CoT, via reasoning_effort
   claude: claude-opus-4-8     # claude-sonnet-4-6 for lower cost with extended thinking
 ```
 
@@ -318,14 +318,28 @@ All Gemini 2.5 and 3.x models support this. Gemini 2.5 Flash already uses dynami
 
 #### Grok — model selection
 
-Grok reasoning is model-based, not parameter-based:
+Grok reasoning was model-based until grok-4.6 (2026-08-12), which added a
+real `reasoning_effort`. Both forms still exist, and which one applies depends
+entirely on the model:
 
 ```yaml
 models:
   grok:
-    model: grok-4.20-0309-reasoning   # reasoning variant (same $1.25/$2.50 price)
-    timeout_seconds: 180
+    model: grok-4.6
+    reasoning_effort: low     # low | medium | high | xhigh
 ```
+
+**Unset is not off.** It resolves to the provider default, which for grok-4.6 is
+`high` — so omitting the flag buys the most expensive setting. Every preset that
+runs grok-4.6 now states what it wants for that reason.
+
+Verified live 2026-09-05: litellm forwards the parameter to xAI with no
+client-side rejection and none of the `allowed_openai_params` escape hatch
+Mistral needs, and Grok honours it — ~380 completion tokens at `low` against
+~1060 at `high` on the same prompt, a 3x difference in both tokens and latency.
+
+Earlier Grok models take no `reasoning_effort` at all; on those, reasoning is
+model selection only and sending the parameter is a 400 for no gain.
 
 #### Mistral — `reasoning_effort`
 
@@ -763,7 +777,7 @@ The tables below show exactly what settings each preset applies to each provider
 | gemini | _(user model)_ | — | not set (dynamic) | Dynamic thinking (model default) |
 | mistral | `mistral-medium-3-5` | — | — | Reasoning model; `low`/`medium` not accepted — preset omits effort flag |
 | perplexity | `sonar-reasoning-pro` | — | — | CoT+search grounding |
-| grok | `grok-4.3` | `reasoning_effort` | `"low"` | Light CoT |
+| grok | `grok-4.6` | `reasoning_effort` | `"low"` | Light CoT. Unset would mean `high` |
 | claude | `claude-sonnet-4-6` | `effort` | `"medium"` | Adaptive thinking (always on on Sonnet 4.6); effort controls depth |
 
 #### thorough preset — thorough thoroughness, ~$1.00–$2.50/article
@@ -774,7 +788,7 @@ The tables below show exactly what settings each preset applies to each provider
 | gemini | _(user model)_ | — | not set (dynamic) | Dynamic thinking (model default) |
 | mistral | `mistral-medium-3-5` | `reasoning_effort` | `"high"` | Deep CoT; only `"high"` or `"none"` accepted on this model |
 | perplexity | `sonar-reasoning-pro` | — | — | CoT+search grounding |
-| grok | `grok-4.3` | `reasoning_effort` | `"medium"` | Standard CoT depth |
+| grok | `grok-4.6` | `reasoning_effort` | `"high"` | Full CoT depth |
 | claude | `claude-opus-4-8` | `effort` | `"high"` | Adaptive thinking (always on); effort=high pushes harder |
 
 #### maximum preset — maximum thoroughness, ~$2.50–$5.00/article
@@ -785,7 +799,7 @@ The tables below show exactly what settings each preset applies to each provider
 | gemini | `gemini-2.5-pro` | `thinking_budget` | `16000` | Upgraded to pro; 16K thinking budget; flash doesn't support `thinking_budget` in Vertex AI |
 | mistral | `mistral-medium-3-5` | `reasoning_effort` | `"high"` | Deep CoT; only `"high"` or `"none"` accepted |
 | perplexity | `sonar-reasoning-pro` | — | — | CoT+search grounding |
-| grok | `grok-4.3` | `reasoning_effort` | `"high"` | Full CoT depth |
+| grok | `grok-4.6` | `reasoning_effort` | `"high"` | Full CoT depth. `xhigh` exists, unmeasured |
 | claude | `claude-opus-4-8` | `effort` | `"high"` | Adaptive thinking, max effort |
 
 **Notes on the preset tables:**
