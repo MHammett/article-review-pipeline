@@ -25,6 +25,18 @@ from .adapters.citation.disposition import DISPOSITIONS, disposition
 #: asserts the two stay in step.
 _SEO_FIELD_ORDER = ("meta_description", "og_title", "og_description", "schema_type")
 
+#: Archive outcome vocabulary, duplicated from ``adapters.citation.wayback``'s
+#: ``ARCHIVE_*`` constants rather than imported, for the same reason as
+#: ``_SEO_FIELD_ORDER`` above: this module is a dependency-free renderer over a
+#: plain dict, and importing the adapter would pull ``requests`` in behind it. A
+#: test asserts the two sets stay in step.
+_ARCHIVE_SUBMITTED = "submitted"
+_ARCHIVE_ARCHIVED = "archived"
+_ARCHIVE_PENDING = "pending"
+_ARCHIVE_CAPTURE_FAILED = "capture_failed"
+_ARCHIVE_SUBMIT_FAILED = "submit_failed"
+_ARCHIVE_NOT_ATTEMPTED = "not_attempted"
+
 
 def _wayback_summary(wb):
     """One line describing a wayback result, for a reader rather than a debugger.
@@ -514,15 +526,53 @@ def _citation_pair(citation):
     return live, wayback.get("snapshot_url")
 
 
+def _capture_note(citation):
+    """Suffix for the Archive line saying what this run's submission produced.
+
+    Only ever describes the snapshot's own timestamp, because that is the only
+    thing actually known. Save Page Now does not always make a new capture: on
+    2026-09-05 a live save of an IANA page redirected to a snapshot dated
+    2026-08-31, five days old. The first version of this line said "captured
+    this run" for any submission that came back with a URL, which would have
+    reported that five-day-old copy as fresh — the same species of overstatement
+    as calling a submission "archived".
+
+    An existing snapshot returned instead of a new capture is worth saying out
+    loud rather than papering over: it tells the author archive.org declined to
+    re-capture, which is why a page they just asked to archive still carries an
+    older date.
+    """
+    wb = citation.get("wayback") or {}
+    if wb.get("archive_outcome") != _ARCHIVE_ARCHIVED:
+        return ""
+    age = wb.get("snapshot_age_days")
+    if age == 0:
+        return " — snapshot dated today"
+    if age:
+        return (
+            f" — archive.org returned an existing snapshot {age} days old "
+            f"rather than making a new capture"
+        )
+    return ""
+
+
 def _render_archive_pair(citation, indent="  "):
     """Lines pairing a citation's live URL with its archive copy.
 
     Says which state applies rather than silently omitting the archive line,
-    because "no snapshot yet" and "never submitted" need different follow-up
-    from the author.
+    because the states need different follow-up from the author.
 
-    The two negative states are the ones worth being careful about, and they are
-    three, not two:
+    The distinction this function exists to hold, and which it previously did
+    not: **"submitted" is not "archived".** The old wording — "submitted to the
+    Wayback Machine this run; the snapshot URL appears on the next run once
+    archive.org has captured it" — asserted a future that nothing checked. A
+    capture archive.org accepted and then dropped rendered identically to one it
+    completed, and the author had no way to tell, this run or any later one.
+    Only ``archived`` says a snapshot exists, and it is only ever set alongside
+    the URL of that snapshot.
+
+    The negative states are the ones worth being careful about, and there are
+    five, not two:
 
     * ``archived: None`` — a lookup was made and did not complete (the circuit
       breaker tripped, or the request failed). NOT the same as "there is no
@@ -535,6 +585,10 @@ def _render_archive_pair(citation, indent="  "):
       "NOT CHECKED" would imply a lookup that could succeed next time; none was
       attempted and none will be.
     * ``archived: False`` — archive.org answered and has no snapshot.
+    * submission failed — archive.org refused the request outright.
+    * capture failed — archive.org took the job and then could not capture it.
+      This is the one that used to be invisible, and the one that repeats
+      silently run after run if nobody names it.
 
     The missing-key branch has to come before the null one: ``{}.get("archived")
     is None`` is True, so an absent dict would otherwise fall into "NOT CHECKED".
@@ -554,21 +608,62 @@ def _render_archive_pair(citation, indent="  "):
     friction = citation.get("reader_access")
     if friction:
         out.append(f"{indent}- Reader access: {friction}")
-    wayback = citation.get("wayback") or {}
+    wb = citation.get("wayback") or {}
+    outcome = wb.get("archive_outcome")
+    detail = wb.get("archive_outcome_detail")
+
     if archive:
         stale = (
             " (STALE — re-archive before relying on it)"
-            if wayback.get("snapshot_stale")
+            if wb.get("snapshot_stale")
             else ""
         )
-        out.append(f"{indent}- Archive: {archive}{stale}")
+        out.append(f"{indent}- Archive: {archive}{stale}{_capture_note(citation)}")
         out.append(f"{indent}- Cite both: {live} (archived: {archive})")
-    elif wayback.get("submitted"):
+    elif outcome == _ARCHIVE_SUBMIT_FAILED:
         out.append(
-            f"{indent}- Archive: submitted to the Wayback Machine this run; the "
-            f"snapshot URL appears on the next run once archive.org has captured it."
+            f"{indent}- Archive: SUBMISSION FAILED — archive.org did not accept "
+            f"the request to capture this URL ({detail or 'no reason given'}). "
+            f"It is NOT archived. Archive it by hand, or re-run."
         )
-    elif not wayback:
+    elif outcome == _ARCHIVE_NOT_ATTEMPTED:
+        # "re-run once archiving succeeds" would be a promise nothing is going
+        # to keep for an internal address, and a misleading one for a host that
+        # would not resolve — same reasoning as the unresolved-citation branch
+        # at the bottom of this function.
+        out.append(
+            f"{indent}- Archive: NOT SUBMITTED — {detail or 'no reason recorded'}. "
+            f"This URL is not archived and nothing in this run tried to archive "
+            f"it."
+        )
+    elif outcome == _ARCHIVE_CAPTURE_FAILED:
+        out.append(
+            f"{indent}- Archive: CAPTURE FAILED — archive.org accepted the "
+            f"request and then could not capture the page "
+            f"({detail or 'no reason given'}). It is NOT archived, and "
+            f"re-running will most likely fail the same way. Archive it by hand."
+        )
+    elif outcome == _ARCHIVE_PENDING:
+        out.append(
+            f"{indent}- Archive: SUBMITTED, OUTCOME UNKNOWN — archive.org was "
+            f"still capturing this URL when the report was written"
+            f"{f' ({detail})' if detail else ''}. Nothing here establishes that "
+            f"the capture succeeded; the next run reads the job's outcome and "
+            f"says which way it went."
+        )
+    elif outcome == _ARCHIVE_SUBMITTED or wb.get("submitted"):
+        # Deliberately does not say archive.org "accepted" anything: this branch
+        # also covers a request that timed out or was abandoned, where even the
+        # acceptance is unestablished. Everything asserted here is something the
+        # run actually observed.
+        out.append(
+            f"{indent}- Archive: SUBMITTED, OUTCOME UNKNOWN — a capture request "
+            f"went out for this URL and no snapshot came back"
+            f"{f' ({detail})' if detail else ''}. That it was asked for is all "
+            f"this establishes — treat the URL as unarchived until a snapshot "
+            f"appears."
+        )
+    elif not wb:
         out.append(
             f"{indent}- Archive: NOT LOOKED UP — archive.org was never asked "
             f"about this URL, because the fetch failed in a way an archived copy "
@@ -576,7 +671,7 @@ def _render_archive_pair(citation, indent="  "):
             f"would hand to a third party. Re-running will not ask either. This "
             f"says nothing about whether the page is archived — check by hand."
         )
-    elif wayback.get("archived") is None:
+    elif wb.get("archived") is None:
         out.append(
             f"{indent}- Archive: NOT CHECKED — the archive.org lookup did not "
             f"complete this run. This says nothing about whether the page is "
@@ -615,6 +710,41 @@ def _render_archive_pair(citation, indent="  "):
             f"of this URL, and the live fetch did not succeed either, so no "
             f"readable copy was obtained from anywhere. Unresolved citations are "
             f"not submitted for archiving; archive it by hand if you keep it."
+        )
+
+    # The escalation warning above lives in the `resolved` branch, which only
+    # citations that were never submitted ever reach — and an escalated citation
+    # is resolved, so `_submit_missing_archives` always submits it. That made the
+    # warning nearly unreachable in a real run: it fired only for the rare
+    # escalated-and-non-public combination, and the common case (submitted,
+    # capture pending or failed) quietly got the milder wording meant for
+    # ordinary citations. An escalated source with no snapshot is in the same
+    # weak position however the archiving ended, so say it there too — once,
+    # only when the branch above did not already say it.
+    if (
+        citation.get("verified_via") == "tls_impersonation"
+        and not archive
+        and outcome
+        and outcome != _ARCHIVE_ARCHIVED
+    ):
+        out.append(
+            f"{indent}- This is the citation that most needed an archive: the "
+            f"source refused an ordinary automated request, so the live URL is "
+            f"both the only copy and the fragile kind. Archive it by hand before "
+            f"publishing, or re-source the claim."
+        )
+
+    # A capture that failed on an earlier run and is being retried. Worth a line
+    # of its own: a URL that never archives across several runs looks like bad
+    # luck one report at a time, and like a page archive.org cannot capture once
+    # you can see the reason repeating.
+    prior = wb.get("prior_capture_failure")
+    if prior and outcome != _ARCHIVE_ARCHIVED:
+        run = prior.get("run_number")
+        where = f" (run {run})" if run else ""
+        out.append(
+            f"{indent}- Archive history: a previous capture of this URL "
+            f"failed{where} — {prior.get('reason') or 'no reason given'}."
         )
     return out
 

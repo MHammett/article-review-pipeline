@@ -3404,13 +3404,24 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
         not_archived = [
             c for c in resolved if c.get("wayback", {}).get("archived") is False
         ]
-        submitted = [c for c in not_archived if c.get("wayback", {}).get("submitted")]
-        submission_failed = [
-            c
-            for c in not_archived
-            if c.get("wayback", {}).get("submitted") is False
-            and c.get("wayback", {}).get("submission_error")
-        ]
+        # Bucketed by what the run established about archiving, not by what it
+        # asked for. Counting `submitted` was the old summary's whole answer,
+        # and it could not tell a completed capture from one archive.org
+        # dropped. Note these are keyed off `resolved`, not `not_archived`: a
+        # capture that completed inline flips `archived` to True and would
+        # otherwise fall out of every bucket and be reported nowhere.
+        by_outcome = {}
+        for c in resolved:
+            outcome = c.get("wayback", {}).get("archive_outcome")
+            if outcome:
+                by_outcome.setdefault(outcome, []).append(c)
+        newly_archived = by_outcome.get(wayback.ARCHIVE_ARCHIVED, [])
+        capture_unknown = by_outcome.get(wayback.ARCHIVE_PENDING, []) + by_outcome.get(
+            wayback.ARCHIVE_SUBMITTED, []
+        )
+        capture_failed = by_outcome.get(wayback.ARCHIVE_CAPTURE_FAILED, [])
+        submission_failed = by_outcome.get(wayback.ARCHIVE_SUBMIT_FAILED, [])
+        not_submitted = by_outcome.get(wayback.ARCHIVE_NOT_ATTEMPTED, [])
         stale = [c for c in resolved if c.get("wayback", {}).get("snapshot_stale")]
         print(
             f"\nSection 9 — Citations: {len(citations)} claim(s) — "
@@ -3446,21 +3457,33 @@ def _print_draft_summary(report, delta_cfg, elapsed_total=None, markdown_path=No
                 f"  {len(from_archive)} resolved from an archive.org snapshot rather "
                 f"than the live source ({detail}) — content checked is the archived copy"
             )
-        if submitted:
+        if newly_archived:
             print(
-                f"  {len(submitted)} resolved URL(s) submitted for archiving "
-                "(check back later — archive.org processes asynchronously)"
+                f"  {len(newly_archived)} resolved URL(s) archived this run "
+                "— snapshot URL recorded against the citation"
+            )
+        if capture_unknown:
+            print(
+                f"  {len(capture_unknown)} resolved URL(s) submitted for archiving, "
+                "capture NOT confirmed — reported as pending, not as archived"
+            )
+        if capture_failed:
+            print(
+                f"  {len(capture_failed)} resolved URL(s) accepted by archive.org "
+                "and then failed to capture — still not archived"
             )
         if submission_failed:
             print(
                 f"  {len(submission_failed)} resolved URL(s) failed Wayback submission "
                 "— still not archived"
             )
+        if not_submitted:
+            print(
+                f"  {len(not_submitted)} resolved URL(s) were NOT submitted for "
+                "archiving (non-public address, or the host did not resolve)"
+            )
         not_attempted = [
-            c
-            for c in not_archived
-            if not c.get("wayback", {}).get("submitted")
-            and not c.get("wayback", {}).get("submission_error")
+            c for c in not_archived if not c.get("wayback", {}).get("archive_outcome")
         ]
         if not_attempted:
             print(

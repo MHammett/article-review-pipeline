@@ -9,11 +9,18 @@ import requests
 
 from ci_article_review.adapters.citation import wayback
 
+JOB_ID = "spn2-abc123"
 
-def _mock_response(payload):
+
+def _mock_response(payload, url="https://example.com"):
+    """A 200. ``url`` is the *final* URL after redirects, which is load-bearing
+    for submissions: an unauthenticated Save Page Now lands on the snapshot it
+    just wrote, and that redirect is the only place the snapshot URL appears.
+    Defaults to a non-archive URL, i.e. "no snapshot established"."""
     m = MagicMock()
     m.json.return_value = payload
     m.raise_for_status.return_value = None
+    m.url = url
     return m
 
 
@@ -565,3 +572,324 @@ class TestPacingClock:
         assert 29.0 <= slept[0] <= 30.0, (
             f"Waited {slept} — the 3s interval won over the 30s backoff"
         )
+
+
+def _json_response(payload, status_code=200, content=b"{}"):
+    """A 200 carrying JSON, as the job-status endpoint returns."""
+    m = MagicMock()
+    m.status_code = status_code
+    m.headers = {}
+    m.content = content
+    m.json.return_value = payload
+    m.raise_for_status.return_value = None
+    return m
+
+
+def _error_response(status_code):
+    """A response whose ``raise_for_status`` raises, carrying itself as
+    ``.response`` the way ``requests`` does."""
+    m = MagicMock()
+    m.status_code = status_code
+    m.headers = {}
+    m.raise_for_status.side_effect = requests.HTTPError(
+        f"{status_code} Client Error", response=m
+    )
+    return m
+
+
+class TestSubmitEstablishesWhatItCan:
+    """A submission that returns a snapshot URL is not the same fact as one that
+    returns nothing, and ``submitted: True`` was recording them identically."""
+
+    ARCHIVE = "https://web.archive.org/web/20260905121627/https://example.com/"
+
+    def test_the_redirect_target_is_kept_as_the_snapshot(self):
+        """The unauthenticated endpoint captures inline and 302s to the result.
+
+        Measured against the live service 2026-09-05: one hop from
+        ``/save/<url>`` to a ``/web/<ts>/<url>`` minted seconds earlier. The old
+        code followed that redirect and discarded ``resp.url``, so the pipeline
+        threw away a finished answer and told the author to wait a run for it.
+        """
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response({}, url=self.ARCHIVE),
+        ):
+            result = wayback.submit("https://example.com/")
+
+        assert result["submitted"] is True
+        assert result["archived"] is True
+        assert result["snapshot_url"] == self.ARCHIVE
+        assert result["snapshot_ts"] == "20260905121627"
+
+    def test_a_submission_that_names_no_snapshot_does_not_claim_one(self):
+        """No redirect to a snapshot means nothing was established."""
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response({}, url="https://web.archive.org/save/x"),
+        ):
+            result = wayback.submit("https://example.com/")
+
+        assert result["submitted"] is True
+        assert result["archived"] is False
+        assert "snapshot_url" not in result
+
+    def test_freshness_is_measured_not_assumed(self):
+        """A save can redirect to a pre-existing snapshot rather than a new one.
+
+        Stamping "captured just now" on whatever the redirect lands on would
+        turn a four-year-old copy into a fresh one in the report.
+        """
+        old = "https://web.archive.org/web/20200101000000/https://example.com/"
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            return_value=_mock_response({}, url=old),
+        ):
+            result = wayback.submit("https://example.com/")
+
+        assert result["archived"] is True
+        assert result["snapshot_age_days"] > 180
+        assert result["snapshot_stale"] is True
+
+    def test_an_authenticated_submission_returns_a_job_not_a_snapshot(self):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.post",
+            return_value=_mock_response({"job_id": "spn2-abc123"}),
+        ):
+            result = wayback.submit(
+                "https://example.com/", access_key="AK", secret_key="SK"
+            )
+
+        assert result["job_id"] == "spn2-abc123"
+        assert result["archived"] is False
+
+    def test_a_read_timeout_is_not_reported_as_a_refusal(self):
+        """Observed live 2026-09-05: a 30s read timeout on a save archive.org
+        had almost certainly accepted. We stopped listening; that is not the
+        same fact as archive.org saying no, and reporting it as one is the same
+        overstatement as calling a submission "archived"."""
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            side_effect=requests.exceptions.ReadTimeout("Read timed out."),
+        ):
+            result = wayback.submit("https://example.com/")
+        assert result["submitted"] is False
+        assert result["outcome_unknown"] is True
+
+    def test_a_connection_refusal_is_a_refusal(self):
+        """The other side of the same line: this one really did fail."""
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            side_effect=requests.exceptions.ConnectionError("refused"),
+        ):
+            result = wayback.submit("https://example.com/")
+        assert result["submitted"] is False
+        assert "outcome_unknown" not in result
+
+    def test_a_failed_submission_still_reports_a_job_id_key(self):
+        """Callers read ``job_id`` unconditionally; a failure must not KeyError."""
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get",
+            side_effect=Exception("boom"),
+        ):
+            result = wayback.submit("https://example.com/")
+        assert result["submitted"] is False
+        assert result["job_id"] is None
+
+
+class TestCheckJobStatus:
+    """Reading the outcome of an SPN2 capture."""
+
+    JOB = "spn2-abc123"
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def _call(self, response=None, side_effect=None, **kwargs):
+        opts = {"access_key": "AK", "secret_key": "SK"}
+        opts.update(kwargs)
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=response,
+                side_effect=side_effect,
+            ) as mock_get,
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+        ):
+            return wayback.check_job_status(self.JOB, **opts), mock_get
+
+    def test_success_builds_the_snapshot_url_from_the_answer(self):
+        result, _ = self._call(
+            _json_response(
+                {
+                    "status": "success",
+                    "job_id": JOB_ID,
+                    "timestamp": "20260905121627",
+                    "original_url": "https://example.com/",
+                }
+            )
+        )
+        assert result["state"] == "success"
+        assert (
+            result["snapshot_url"]
+            == "https://web.archive.org/web/20260905121627/https://example.com/"
+        )
+        assert result["snapshot_ts"] == "20260905121627"
+
+    def test_success_without_a_timestamp_does_not_invent_a_url(self):
+        """Half an answer is not an answer. A fabricated snapshot URL is worse
+        than admitting we cannot name one — the author would click it."""
+        result, _ = self._call(_json_response({"status": "success"}))
+        assert result["state"] == "unknown"
+        assert "snapshot_url" not in result
+
+    def test_pending_is_pending(self):
+        result, _ = self._call(_json_response({"status": "pending"}))
+        assert result["state"] == "pending"
+
+    def test_an_error_reports_archive_orgs_own_reason(self):
+        result, _ = self._call(
+            _json_response(
+                {
+                    "status": "error",
+                    "status_ext": "error:invalid-url-syntax",
+                    "message": "Cannot resolve host example.invalid.",
+                }
+            )
+        )
+        assert result["state"] == "failed"
+        assert result["reason"] == "Cannot resolve host example.invalid."
+
+    def test_an_error_falls_back_through_the_optional_fields(self):
+        """SPN2 spreads the explanation over message/status_ext/exception and
+        does not always send the friendliest one."""
+        result, _ = self._call(
+            _json_response({"status": "error", "status_ext": "error:no-access"})
+        )
+        assert result["state"] == "failed"
+        assert result["reason"] == "error:no-access"
+
+    def test_an_unrecognized_status_is_unknown_not_failed(self):
+        result, _ = self._call(_json_response({"status": "something-new"}))
+        assert result["state"] == "unknown"
+        assert "something-new" in result["reason"]
+
+    def test_a_non_json_answer_says_what_arrived(self):
+        """Same misdirection guard as the availability API: reporting the JSON
+        decoder's complaint sends the reader hunting for a parser bug."""
+        resp = _json_response({}, content=b"x" * 512)
+        resp.json.side_effect = ValueError("Expecting value: line 1 column 1")
+        result, _ = self._call(resp)
+        assert result["state"] == "unknown"
+        assert "non-JSON" in result["reason"]
+        assert "512 bytes" in result["reason"]
+        assert "Expecting value" not in result["reason"]
+
+    def test_a_401_is_reported_as_unknown_not_as_a_failed_capture(self):
+        """Verified against the live endpoint 2026-09-05: it answers 401 to an
+        unauthenticated caller and to a wrong credential alike. Rendering that
+        as "the capture failed" would blame archive.org for our own config."""
+        result, _ = self._call(_error_response(401))
+        assert result["state"] == "unknown"
+        assert "401" in result["reason"]
+        assert "unknown, not failed" in result["reason"]
+
+    def test_a_transport_error_never_raises(self):
+        result, _ = self._call(side_effect=Exception("connection reset"))
+        assert result["state"] == "unknown"
+        assert "connection reset" in result["reason"]
+
+    def test_the_secret_is_redacted_out_of_an_error(self):
+        result, _ = self._call(
+            side_effect=Exception("auth failed for SK456"), secret_key="SK456"
+        )
+        assert "SK456" not in result["reason"]
+
+    def test_no_credentials_means_no_call_at_all(self):
+        """The endpoint is credential-only (probed 2026-09-05), so asking
+        without them spends pacing budget to be told 401."""
+        result, mock_get = self._call(
+            _json_response({"status": "pending"}), access_key=None, secret_key=None
+        )
+        assert result["state"] == "not_checked"
+        assert "requires credentials" in result["reason"]
+        mock_get.assert_not_called()
+
+    def test_no_job_id_means_no_call_at_all(self):
+        with patch(
+            "ci_article_review.adapters.citation.wayback.requests.get"
+        ) as mock_get:
+            result = wayback.check_job_status(None, access_key="AK", secret_key="SK")
+        assert result["state"] == "not_checked"
+        mock_get.assert_not_called()
+
+    def test_a_tripped_breaker_skips_the_lookup(self):
+        wayback._rate_limited_lookups = wayback._CIRCUIT_TRIP_AFTER
+        result, mock_get = self._call(_json_response({"status": "pending"}))
+        assert result["state"] == "not_checked"
+        assert "rate limit tripped" in result["reason"]
+        mock_get.assert_not_called()
+
+    def test_the_authorization_header_is_sent(self):
+        _, mock_get = self._call(_json_response({"status": "pending"}))
+        headers = mock_get.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "LOW AK:SK"
+        assert headers["Accept"] == "application/json"
+
+
+class TestJobStatusSharesTheOneRateLimitScheme:
+    """archive.org throttles per IP, not per endpoint.
+
+    The job-status endpoint is a second archive.org caller added to a module
+    that already had pacing, backoff and a circuit breaker. Giving it its own
+    would mean two schemes each pacing against half the real request rate —
+    which is how you get rate-limited while believing you are being polite.
+    These tests pin it to the existing one.
+    """
+
+    def setup_method(self):
+        wayback.reset_rate_limit_state()
+
+    def teardown_method(self):
+        wayback.reset_rate_limit_state()
+
+    def test_refusals_come_out_of_the_one_shared_breaker_budget(self):
+        """Three refused availability lookups plus two refused status lookups
+        trip the breaker at five. Two separate budgets would not trip at all."""
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_rate_limited_response(),
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+        ):
+            for i in range(3):
+                wayback.check(f"https://example.com/{i}")
+            assert wayback.rate_limited_out() is False
+            for i in range(2):
+                wayback.check_job_status(f"spn2-{i}", access_key="AK", secret_key="SK")
+
+        assert wayback._rate_limited_lookups == wayback._CIRCUIT_TRIP_AFTER
+        assert wayback.rate_limited_out() is True
+
+    def test_a_429_from_a_status_call_backs_off_every_other_caller(self):
+        """The backoff clock is shared, so a throttled status call slows the
+        availability lookups too — not just itself."""
+        with (
+            patch(
+                "ci_article_review.adapters.citation.wayback.requests.get",
+                return_value=_rate_limited_response(retry_after="30"),
+            ),
+            patch.object(wayback, "_MIN_INTERVAL_SECONDS", 0.0),
+            patch.object(wayback, "_BACKOFF_BASE_SECONDS", 0.0),
+            patch.object(wayback, "_MAX_ATTEMPTS", 1),
+        ):
+            before = time.monotonic()
+            wayback.check_job_status(JOB_ID, access_key="AK", secret_key="SK")
+
+        assert wayback._blocked_until >= before + 30.0

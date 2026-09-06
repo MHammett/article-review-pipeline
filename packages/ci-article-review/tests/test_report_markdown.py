@@ -1611,9 +1611,17 @@ class TestCitationsPairLiveAndArchiveLinks:
         )
         assert "STALE" in out
 
-    def test_a_just_submitted_archive_says_so_rather_than_going_quiet(self):
+    def test_a_bare_submitted_flag_no_longer_promises_a_future_snapshot(self):
+        """The old line — "submitted to the Wayback Machine this run; the
+        snapshot URL appears on the next run once archive.org has captured it" —
+        asserted a future nothing checked. A capture archive.org dropped read
+        exactly like one it completed. Reports written before the outcome
+        vocabulary existed still land here, and must not keep making the promise.
+        """
         out = self._text(self._cit(archived=False, submitted=True))
-        assert "submitted to the Wayback Machine this run" in out
+        assert "SUBMITTED, OUTCOME UNKNOWN" in out
+        assert "treat the URL as unarchived" in out
+        assert "appears on the next run" not in out
         assert "Cite both" not in out
 
     def test_an_unarchived_citation_says_it_is_undurable(self):
@@ -1847,6 +1855,55 @@ class TestEscalatedCitationsRenderReaderFriction:
         assert "most needed one" in out
         assert "only as durable as" not in out
 
+    def test_the_warning_survives_the_citation_actually_being_submitted(self):
+        """The branch carrying this warning sits under ``resolved``, which only
+        citations that were never submitted reach — and an escalated citation is
+        resolved, so ``_submit_missing_archives`` always submits it. That made
+        the warning almost unreachable in a real run: the common case (submitted,
+        capture pending) fell into the generic wording meant for ordinary
+        citations. An escalated source with no snapshot is in the same weak
+        position however the archiving turned out.
+        """
+        out = self._pair(
+            wayback={
+                "archived": False,
+                "submitted": True,
+                "archive_outcome": "pending",
+            }
+        )
+        assert "most needed an archive" in out
+        assert "SUBMITTED, OUTCOME UNKNOWN" in out
+
+    def test_a_failed_capture_on_an_escalated_source_says_both_things(self):
+        out = self._pair(
+            wayback={
+                "archived": False,
+                "submitted": True,
+                "archive_outcome": "capture_failed",
+                "archive_outcome_detail": "error:soft-time-limit-exceeded",
+            }
+        )
+        assert "CAPTURE FAILED" in out
+        assert "most needed an archive" in out
+
+    def test_the_warning_is_not_stated_twice(self):
+        """The ``resolved`` branch already says it for a never-submitted
+        citation. Saying it again below would double-state the same fact — the
+        thing this file's provenance test exists to prevent."""
+        out = self._pair(wayback={"archived": False})
+        assert out.count("most needed") == 1
+
+    def test_an_archived_escalated_citation_is_not_warned_about(self):
+        """It got its archive. The warning would be noise."""
+        out = self._pair(
+            wayback={
+                "archived": True,
+                "snapshot_url": self.SNAPSHOT,
+                "archive_outcome": "archived",
+            }
+        )
+        assert "most needed" not in out
+
     def test_an_ordinary_unarchived_citation_keeps_its_milder_wording(self):
         out = self._pair(
             verified_via="direct", reader_access=None, wayback={"archived": False}
@@ -1991,3 +2048,151 @@ class TestWaybackSummaryDoesNotDriftFromTheAdapter:
             assert report_markdown._wayback_summary(wb) == wayback.format_summary(wb), (
                 wb
             )
+
+
+class TestArchiveOutcomeWording:
+    """ "Submitted" is a record of what was asked for. "Archived" is a claim
+    about the world. The renderer used to print the first and mean the second.
+    """
+
+    def _cit(self, **wayback):
+        return {
+            "claim": "A claim",
+            "url": "https://example.org/page",
+            "resolved": True,
+            "verification": "checksum",
+            "wayback": wayback,
+        }
+
+    def _text(self, citation):
+        return "\n".join(report_markdown._render_section_9([citation]))
+
+    SNAP = "https://web.archive.org/web/20260905121627/https://example.org/page"
+
+    def test_an_archived_citation_names_the_snapshot(self):
+        out = self._text(
+            self._cit(
+                archived=True,
+                snapshot_url=self.SNAP,
+                snapshot_age_days=0,
+                archive_outcome="archived",
+            )
+        )
+        assert f"Archive: {self.SNAP}" in out
+        assert "snapshot dated today" in out
+        assert f"Cite both: https://example.org/page (archived: {self.SNAP})" in out
+
+    def test_a_save_that_returned_an_older_snapshot_is_not_called_fresh(self):
+        """Save Page Now does not always capture. Observed live 2026-09-05: a
+        save of an IANA page redirected to a snapshot five days old. Reporting
+        that as "captured this run" is the same overstatement, one layer down."""
+        out = self._text(
+            self._cit(
+                archived=True,
+                snapshot_url=self.SNAP,
+                snapshot_age_days=5,
+                archive_outcome="archived",
+            )
+        )
+        assert "existing snapshot 5 days old" in out
+        assert "captured this run" not in out
+        assert "dated today" not in out
+
+    def test_a_pending_capture_is_not_reported_as_archived(self):
+        out = self._text(
+            self._cit(
+                archived=False,
+                submitted=True,
+                submission_job_id="spn2-abc",
+                archive_outcome="pending",
+                archive_outcome_detail="archive.org has not finished this capture yet",
+            )
+        )
+        assert "SUBMITTED, OUTCOME UNKNOWN" in out
+        assert "the next run reads the job's outcome" in out
+        assert "Cite both" not in out
+
+    def test_a_failed_capture_says_so_and_says_why(self):
+        """The state that was previously invisible: archive.org took the job and
+        could not capture the page. It rendered identically to success."""
+        out = self._text(
+            self._cit(
+                archived=False,
+                submitted=True,
+                archive_outcome="capture_failed",
+                archive_outcome_detail="Cannot resolve host example.invalid.",
+            )
+        )
+        assert "CAPTURE FAILED" in out
+        assert "Cannot resolve host example.invalid." in out
+        assert "NOT archived" in out
+
+    def test_a_refused_submission_says_so_and_says_why(self):
+        out = self._text(
+            self._cit(
+                archived=False,
+                submitted=False,
+                archive_outcome="submit_failed",
+                archive_outcome_detail="429 Too Many Requests",
+            )
+        )
+        assert "SUBMISSION FAILED" in out
+        assert "429 Too Many Requests" in out
+        assert "NOT archived" in out
+
+    def test_a_repeated_capture_failure_is_visible_as_a_pattern(self):
+        """One report at a time a URL that never archives looks like bad luck.
+        Naming the earlier failure is what makes it look like a page archive.org
+        cannot capture."""
+        out = self._text(
+            self._cit(
+                archived=False,
+                submitted=True,
+                archive_outcome="pending",
+                prior_capture_failure={
+                    "job_id": "spn2-old",
+                    "reason": "error:soft-time-limit-exceeded",
+                    "run_number": 7,
+                },
+            )
+        )
+        assert "a previous capture of this URL failed (run 7)" in out
+        assert "error:soft-time-limit-exceeded" in out
+
+    def test_a_successful_capture_does_not_dredge_up_the_old_failure(self):
+        """It archived. The history is no longer the reader's problem."""
+        out = self._text(
+            self._cit(
+                archived=True,
+                snapshot_url=self.SNAP,
+                archive_outcome="archived",
+                prior_capture_failure={"reason": "error:soft-time-limit-exceeded"},
+            )
+        )
+        assert "previous capture" not in out
+
+
+def test_the_archive_outcome_vocabulary_matches_the_adapters():
+    """``report_markdown`` duplicates the outcome constants instead of importing
+    them, to stay a dependency-free renderer over a plain dict — same reason as
+    ``_SEO_FIELD_ORDER``. This is the test that keeps the two in step; without
+    it a renamed outcome silently stops matching and every citation falls
+    through to a wrong branch.
+    """
+    from ci_article_review.adapters.citation import wayback as wb
+
+    renderer = {
+        report_markdown._ARCHIVE_SUBMITTED,
+        report_markdown._ARCHIVE_ARCHIVED,
+        report_markdown._ARCHIVE_PENDING,
+        report_markdown._ARCHIVE_CAPTURE_FAILED,
+        report_markdown._ARCHIVE_SUBMIT_FAILED,
+        report_markdown._ARCHIVE_NOT_ATTEMPTED,
+    }
+    assert renderer == set(wb.ARCHIVE_OUTCOME_LABELS)
+    assert report_markdown._ARCHIVE_ARCHIVED == wb.ARCHIVE_ARCHIVED
+    assert report_markdown._ARCHIVE_PENDING == wb.ARCHIVE_PENDING
+    assert report_markdown._ARCHIVE_SUBMITTED == wb.ARCHIVE_SUBMITTED
+    assert report_markdown._ARCHIVE_CAPTURE_FAILED == wb.ARCHIVE_CAPTURE_FAILED
+    assert report_markdown._ARCHIVE_SUBMIT_FAILED == wb.ARCHIVE_SUBMIT_FAILED
+    assert report_markdown._ARCHIVE_NOT_ATTEMPTED == wb.ARCHIVE_NOT_ATTEMPTED
