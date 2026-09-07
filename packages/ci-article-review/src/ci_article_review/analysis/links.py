@@ -6,7 +6,12 @@ import re
 import requests
 
 from ci_core.concurrency import run_all_bounded
-from ci_core.http import DEFAULT_HEADERS, impersonating_get, safe_get
+from ci_core.http import (
+    DEFAULT_HEADERS,
+    impersonating_get,
+    impersonation_available,
+    safe_get,
+)
 from ci_core.http import is_public_host as _core_is_public_host
 
 from ..adapters.citation.wayback import (
@@ -194,6 +199,15 @@ def _check_http(url, timeout=_HEAD_TIMEOUT):
                             "verified_via": "tls_impersonation",
                             "final_url": str(getattr(impersonated, "url", url)),
                         }
+                    result = _finalize_http_result(url, get_resp, timeout)
+                    # A 403 that was never actually escalated is a different
+                    # fact about this link than a 403 that survived escalation,
+                    # and only one of the two is fixable by installing
+                    # something. `impersonating_get` reports both as None on
+                    # purpose — see `impersonation_available`.
+                    if not impersonation_available():
+                        result["escalation_unavailable"] = True
+                    return result
                 return _finalize_http_result(url, get_resp, timeout)
         return _finalize_http_result(url, resp, timeout)
     except Exception as exc:
